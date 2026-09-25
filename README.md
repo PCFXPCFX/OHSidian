@@ -14,7 +14,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/HarmonyOS-6.0.2%2822%29-blue?logo=harmonyos" alt="HarmonyOS" />
-  <img src="https://img.shields.io/badge/Obsidian-1.12.7-purple?logo=obsidian" alt="Obsidian" />
+  <img src="https://img.shields.io/badge/Obsidian-1.13.7-purple?logo=obsidian" alt="Obsidian" />
   <img src="https://img.shields.io/badge/ArkTS-API%2022-orange" alt="ArkTS" />
   <img src="https://img.shields.io/badge/license-BSD%203--Clause-green" alt="License" />
 </p>
@@ -51,7 +51,7 @@
 | 目标设备 | 2in1（折叠屏/平板）、平板 |
 | 开发语言 | ArkTS (TypeScript) |
 | 构建系统 | Hvigor |
-| 内核版本 | Obsidian 1.12.7 |
+| 内核版本 | Obsidian 1.13.7 |
 
 ---
 
@@ -59,7 +59,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                     Obsidian 1.12.7                   │
+│                     Obsidian 1.13.7                   │
 │                   (obsidian.asar)                     │
 ├──────────────────────────────────────────────────────┤
 │               Electron API Compatibility              │
@@ -84,7 +84,7 @@
 
 **分层说明：**
 
-- **Obsidian 层** —— 原版 `obsidian.asar`，未经修改的 Obsidian 1.12.7 应用代码
+- **Obsidian 层** —— 原版 `obsidian.asar`，未经修改的 Obsidian 1.13.7 应用代码
 - **Electron 兼容层** —— `@electron/remote` 提供 remote 模块 API，`main.js` 负责加载 asar 和更新管理
 - **JSBind 桥接层** —— 连接 JS 运行时与 ArkTS 原生层，将 Electron API 调用转发到对应适配器
 - **C++ 原生库** —— `libadapter.so` 提供核心系统级 API 对接
@@ -97,7 +97,7 @@
 
 ### Obsidian 核心体验
 
-- 完整的 Obsidian 1.12.7 笔记编辑与管理功能
+- 完整的 Obsidian 1.13.7 笔记编辑与管理功能
 - 所有社区插件和主题的完整兼容
 - 本地 Vault（知识库）的创建、管理与浏览
 - Markdown 实时预览与编辑
@@ -412,7 +412,7 @@ obsidian/
 │       ├── cpp/types/libadapter/     # C++ 原生库类型声明
 │       └── resources/resfile/resources/app/
 │           ├── main.js               # Electron 启动入口
-│           ├── package.json           # Obsidian 1.12.7 包装配置
+│           ├── package.json           # Obsidian 1.13.7 包装配置
 │           └── obsidian.asar          # Obsidian 应用包
 │
 ├── electron/                         # HAP 入口模块

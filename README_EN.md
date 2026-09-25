@@ -14,7 +14,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/HarmonyOS-6.0.2%2822%29-blue?logo=harmonyos" alt="HarmonyOS" />
-  <img src="https://img.shields.io/badge/Obsidian-1.12.7-purple?logo=obsidian" alt="Obsidian" />
+  <img src="https://img.shields.io/badge/Obsidian-1.13.7-purple?logo=obsidian" alt="Obsidian" />
   <img src="https://img.shields.io/badge/ArkTS-API%2022-orange" alt="ArkTS" />
   <img src="https://img.shields.io/badge/license-BSD%203--Clause-green" alt="License" />
 </p>
@@ -51,7 +51,7 @@ At its core, OHsidian **shims the Electron API surface using HarmonyOS native ca
 | Target Devices | 2in1 (foldable/tablet), Tablet |
 | Language | ArkTS (TypeScript) |
 | Build System | Hvigor |
-| Obsidian Engine | 1.12.7 |
+| Obsidian Engine | 1.13.7 |
 
 ---
 
@@ -59,7 +59,7 @@ At its core, OHsidian **shims the Electron API surface using HarmonyOS native ca
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                   Obsidian 1.12.7                     │
+│                   Obsidian 1.13.7                     │
 │                   (obsidian.asar)                     │
 ├──────────────────────────────────────────────────────┤
 │             Electron API Compatibility                │
@@ -84,7 +84,7 @@ At its core, OHsidian **shims the Electron API surface using HarmonyOS native ca
 
 **Layer breakdown:**
 
-- **Obsidian Layer** — Stock `obsidian.asar`, unmodified Obsidian 1.12.7 application code
+- **Obsidian Layer** — Stock `obsidian.asar`, unmodified Obsidian 1.13.7 application code
 - **Electron Compatibility** — `@electron/remote` provides the remote module API; `main.js` handles asar loading and update management
 - **JSBind Bridge** — Connects the JS runtime to the ArkTS native layer, forwarding Electron API calls to the appropriate adapters
 - **C++ Native Library** — `libadapter.so` provides core system-level API bindings
@@ -97,7 +97,7 @@ At its core, OHsidian **shims the Electron API surface using HarmonyOS native ca
 
 ### Core Obsidian Experience
 
-- Full Obsidian 1.12.7 note editing and management
+- full Obsidian 1.13.7 note editing and management
 - Complete compatibility with all community plugins and themes
 - Local Vault creation, management, and browsing
 - Real-time Markdown preview and editing
@@ -417,7 +417,7 @@ obsidian/
 │       ├── cpp/types/libadapter/     # C++ native library type declarations
 │       └── resources/resfile/resources/app/
 │           ├── main.js               # Electron bootstrap entry point
-│           ├── package.json          # Obsidian 1.12.7 wrapper config
+│           ├── package.json          # Obsidian 1.13.7 wrapper config
 │           └── obsidian.asar          # Obsidian application archive
 │
 ├── electron/                         # HAP entry module

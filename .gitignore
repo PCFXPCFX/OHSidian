@@ -72,3 +72,9 @@ build-profile.json5
 
 # Local properties
 local.properties
+
+# OHSidian build/update tooling
+scripts/node_modules/
+scripts/package-lock.json
+scripts/.tmp-update/
+
