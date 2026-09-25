@@ -93,13 +93,29 @@ jobs:
               exit 1
               ;;
           esac
-          # The package may extract into commandline-tools/ directly or
-          # nested; locate the root that owns bin/hvigorw and sdk/.
-          HVIGORW_PATH="$(find "$RUNNER_TEMP/ctl" -maxdepth 4 -name hvigorw -type f | head -1)"
+          # Locate the real binaries inside the package. Layout differs
+          # between versions (ohpm may live in bin/ or tool/ohpm/bin/), and
+          # the wrappers can be symlinks, so search instead of assuming.
+          echo "--- extracted tree (first 40 entries):"
+          find "$RUNNER_TEMP/ctl" -maxdepth 3 | head -40
+          HVIGORW_PATH="$(find "$RUNNER_TEMP/ctl" -maxdepth 5 \( -type f -o -type l \) -name hvigorw | head -1)"
+          if [ -z "$HVIGORW_PATH" ]; then
+            echo "::error::hvigorw not found in extracted command-line-tools"
+            exit 1
+          fi
           CTL_ROOT="$(dirname "$(dirname "$HVIGORW_PATH")")"
           echo "CTL_ROOT=$CTL_ROOT" >> "$GITHUB_ENV"
+          echo "hvigorw at: $HVIGORW_PATH"
+          echo "CTL_ROOT=$CTL_ROOT, DEVECO_SDK_HOME=$CTL_ROOT/sdk"
           echo "$CTL_ROOT/bin" >> "$GITHUB_PATH"
           echo "DEVECO_SDK_HOME=$CTL_ROOT/sdk" >> "$GITHUB_ENV"
+          OHPM_PATH="$(find "$RUNNER_TEMP/ctl" -maxdepth 5 \( -type f -o -type l \) -name ohpm | head -1)"
+          if [ -n "$OHPM_PATH" ]; then
+            echo "ohpm at: $OHPM_PATH"
+            echo "$(dirname "$OHPM_PATH")" >> "$GITHUB_PATH"
+          else
+            echo "::warning::ohpm binary not found under command-line-tools - the ohpm install step will fail"
+          fi
 
       - name: Generate build-profile.json5 (unsigned, target API 24)
         run: |
