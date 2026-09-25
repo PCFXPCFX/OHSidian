@@ -7,8 +7,8 @@
  * - Pins the locally tested SDK combination: compatible 6.0.2(22),
  *   target 6.1.1(24) (override via TARGET_SDK env if ever needed).
  */
-'use strict';
-const fs = require('fs');
+// ESM: scripts/package.json declares "type": "module".
+import fs from 'node:fs';
 
 const src = fs.readFileSync('build-profile.example.json5', 'utf8');
 // Strip line comments (json5 superset). Only full-line // comments are used
