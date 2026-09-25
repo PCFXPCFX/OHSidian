@@ -93,28 +93,40 @@ jobs:
               exit 1
               ;;
           esac
-          # Locate the real binaries inside the package. Layout differs
-          # between versions (ohpm may live in bin/ or tool/ohpm/bin/), and
-          # the wrappers can be symlinks, so search instead of assuming.
-          echo "--- extracted tree (first 40 entries):"
-          find "$RUNNER_TEMP/ctl" -maxdepth 3 | head -40
-          HVIGORW_PATH="$(find "$RUNNER_TEMP/ctl" -maxdepth 5 \( -type f -o -type l \) -name hvigorw | head -1)"
-          if [ -z "$HVIGORW_PATH" ]; then
-            echo "::error::hvigorw not found in extracted command-line-tools"
+          # Anchor on the SDK itself: hvigor validates DEVECO_SDK_HOME
+          # against the real SDK directory, so locate it directly instead
+          # of guessing from the hvigorw path (layout differs per version).
+          echo "--- package layout (first 40 entries):"
+          find "$RUNNER_TEMP/ctl" -maxdepth 2 | head -40
+          SDK_DIR="$(find "$RUNNER_TEMP/ctl" -maxdepth 3 -type d -name sdk -not -empty | head -1)"
+          if [ -z "$SDK_DIR" ]; then
+            echo "::error::No non-empty 'sdk' directory in the extracted tools. Full layout:"
+            find "$RUNNER_TEMP/ctl" -maxdepth 3 | head -80
             exit 1
           fi
-          CTL_ROOT="$(dirname "$(dirname "$HVIGORW_PATH")")"
-          echo "CTL_ROOT=$CTL_ROOT" >> "$GITHUB_ENV"
+          CTL_ROOT="$(dirname "$SDK_DIR")"
+          echo "CTL_ROOT=$CTL_ROOT"
+          echo "SDK contents:"; ls "$SDK_DIR"
+          echo "DEVECO_SDK_HOME=$SDK_DIR" >> "$GITHUB_ENV"
+
+          HVIGORW_PATH="$CTL_ROOT/bin/hvigorw"
+          if [ ! -e "$HVIGORW_PATH" ]; then
+            HVIGORW_PATH="$(find "$CTL_ROOT" -maxdepth 3 \( -type f -o -type l \) -name hvigorw | head -1)"
+          fi
+          if [ -z "$HVIGORW_PATH" ] || [ ! -e "$HVIGORW_PATH" ]; then
+            echo "::error::hvigorw not found under $CTL_ROOT"
+            exit 1
+          fi
+          chmod +x "$HVIGORW_PATH" 2>/dev/null || true
           echo "hvigorw at: $HVIGORW_PATH"
-          echo "CTL_ROOT=$CTL_ROOT, DEVECO_SDK_HOME=$CTL_ROOT/sdk"
           echo "$CTL_ROOT/bin" >> "$GITHUB_PATH"
-          echo "DEVECO_SDK_HOME=$CTL_ROOT/sdk" >> "$GITHUB_ENV"
-          OHPM_PATH="$(find "$RUNNER_TEMP/ctl" -maxdepth 5 \( -type f -o -type l \) -name ohpm | head -1)"
+          OHPM_PATH="$(find "$CTL_ROOT" -maxdepth 4 \( -type f -o -type l \) -name ohpm | head -1)"
           if [ -n "$OHPM_PATH" ]; then
             echo "ohpm at: $OHPM_PATH"
+            chmod +x "$OHPM_PATH" 2>/dev/null || true
             echo "$(dirname "$OHPM_PATH")" >> "$GITHUB_PATH"
           else
-            echo "::warning::ohpm binary not found under command-line-tools - the ohpm install step will fail"
+            echo "::warning::ohpm binary not found under $CTL_ROOT - the ohpm install step will fail"
           fi
 
       - name: Generate build-profile.json5 (unsigned, target API 24)
@@ -163,7 +175,7 @@ jobs:
 
       - name: Build HAP
         run: |
-          hvigorw --mode module -p product=default assembleHap --no-daemon
+          hvigorw --mode module -p product=default -p buildMode=release assembleHap --no-daemon
 
       - name: Collect HAP artifacts
         run: |
