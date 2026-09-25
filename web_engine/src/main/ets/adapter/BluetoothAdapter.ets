@@ -260,7 +260,8 @@ export class BluetoothAdapter extends BaseAdapter {
     return devices;
   }
 
-  @LogMethod
+  // No @LogMethod: the decorator would write the pairing PIN code to system
+  // logs in plaintext.
   setDevicePinCode(deviceId: string, pinCode: string, setPinCodeCb: (isSuccess: boolean) => void): boolean {
     try {
       connection.setDevicePinCode(deviceId, pinCode, (err: BusinessError) => {

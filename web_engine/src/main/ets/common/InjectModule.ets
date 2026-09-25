@@ -62,17 +62,12 @@ export default class InjectModule {
 
   static getOrCreate<T>(serviceIdentifier: interfaces.ServiceIdentifier<T>): T {
     try {
-      const module = InjectModule.container.get<T>(serviceIdentifier);
-      if (module) {
-        return module;
-      }
+      return InjectModule.container.get<T>(serviceIdentifier);
     } catch (err) {
       const loadMode = new ContainerModule((bind:interfaces.Bind) => {
         bind(serviceIdentifier).toSelf()
       });
       InjectModule.container.load(loadMode);
-      return InjectModule.container.get<T>(serviceIdentifier);
-    } finally {
       return InjectModule.container.get<T>(serviceIdentifier);
     }
   }

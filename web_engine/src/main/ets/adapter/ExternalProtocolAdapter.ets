@@ -29,14 +29,18 @@
 
 import { inject, injectable } from 'inversify';
 import { Want, wantConstant } from '@kit.AbilityKit';
+import uri from '@ohos.uri';
 
 import { BaseAdapter } from '../common/BaseAdapter';
 import LogMethod from '../common/LogDecorator';
+import LogUtil from '../utils/LogUtil';
 import LaunchHelper from '../utils/LaunchHelper';
 import { ContextAdapter } from './ContextAdapter';
 
 @injectable()
 export class ExternalProtocolAdapter extends BaseAdapter {
+  private static TAG: string = 'ExternalProtocolAdapter';
+  private static ALLOWED_SCHEMES: string[] = ['http', 'https', 'mailto', 'tel', 'obsidian'];
   private ctxAdapter: ContextAdapter;
 
   constructor(@inject(ContextAdapter) ctxAdapter: ContextAdapter) {
@@ -44,8 +48,22 @@ export class ExternalProtocolAdapter extends BaseAdapter {
     this.ctxAdapter = ctxAdapter;
   }
 
+  // Only launch well-known web/contact schemes. The renderer passes arbitrary
+  // strings here and FLAG_START_WITHOUT_TIPS silently launches the handler,
+  // so an unfiltered URI would let a page open arbitrary system handlers.
   @LogMethod
   openExternal(urlStr: string) {
+    let scheme: string = '';
+    try {
+      scheme = (new uri.URI(urlStr)).scheme.toLowerCase();
+    } catch (err) {
+      LogUtil.error(ExternalProtocolAdapter.TAG, 'openExternal: failed to parse url');
+      return;
+    }
+    if (scheme.length === 0 || !ExternalProtocolAdapter.ALLOWED_SCHEMES.includes(scheme)) {
+      LogUtil.error(ExternalProtocolAdapter.TAG, 'openExternal: scheme not allowed: ' + scheme);
+      return;
+    }
     const want: Want = {
       flags: wantConstant.Flags.FLAG_START_WITHOUT_TIPS,
       uri: urlStr

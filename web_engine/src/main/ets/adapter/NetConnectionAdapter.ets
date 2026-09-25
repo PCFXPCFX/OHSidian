@@ -98,6 +98,9 @@ export class NetConnectionAdapter extends BaseAdapter {
       LogUtil.error(TAG, `netConnectionPropertiesChange error: ${JSON.stringify(err)}.`);
     }
     try {
+      // Drop a previous subscriber first: repeated calls used to overwrite
+      // this.subscriber, leaking the old system event subscription.
+      this.unsubscribeCommonEvent();
       CommonEventManager.createSubscriber(this.subscribeInfo,
         (err: BusinessError, sub: CommonEventManager.CommonEventSubscriber) => {
           if (err) {
@@ -112,6 +115,18 @@ export class NetConnectionAdapter extends BaseAdapter {
     } catch (err) {
       LogUtil.error(TAG, `createSubscriber error: ${JSON.stringify(err)}.`);
     }
+  }
+
+  private unsubscribeCommonEvent(): void {
+    if (!this.subscriber) {
+      return;
+    }
+    try {
+      CommonEventManager.unsubscribe(this.subscriber);
+    } catch (err) {
+      LogUtil.warn(TAG, `unsubscribe error: ${JSON.stringify(err)}.`);
+    }
+    this.subscriber = undefined;
   }
 
   @LogMethod
@@ -130,7 +145,16 @@ export class NetConnectionAdapter extends BaseAdapter {
 
   @LogMethod
   unregisterAll(): void {
-    this.getNetConnect().unregister((error: BusinessError) => {
+    this.unsubscribeCommonEvent();
+    // Reset so a later on() re-registers; without the reset the adapter
+    // stayed "registered" forever and network events went silent.
+    this.registered = false;
+    let netCon = this.netCon;
+    this.netCon = undefined;
+    if (!netCon) {
+      return;
+    }
+    netCon.unregister((error: BusinessError) => {
       if (error) {
         LogUtil.error(TAG, `unregister error: ${JSON.stringify(error)}.`);
       }

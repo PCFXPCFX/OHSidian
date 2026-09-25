@@ -106,7 +106,14 @@ export class DialogAdapter extends BaseAdapter {
   showMessageBox(settings: string, buffer: ArrayBuffer, width: number, height: number,  callback: (button_id: number, checkbox_checked: boolean) => void) {
     LogUtil.info(TAG, 'messagebox settings ' + settings);
     let icon: image.PixelMap | undefined = this.convertImagePixelMap(width, height, buffer);
-    let boxSettings: IMessageBoxSettings = JSON.parse(settings);
+    let boxSettings: IMessageBoxSettings;
+    try {
+      boxSettings = JSON.parse(settings) as IMessageBoxSettings;
+    } catch (err) {
+      LogUtil.error(TAG, 'messagebox settings parse failed: ' + JSON.stringify(err));
+      callback(-1, false);
+      return;
+    }
     let params: IMessageBoxParams = {
       messageBoxSettings: boxSettings,
       icon: icon,
@@ -115,8 +122,13 @@ export class DialogAdapter extends BaseAdapter {
     LogUtil.error(TAG, 'parentId ' + boxSettings.parent_id);
     let parentId = boxSettings.parent_id === -1 ? 1 : boxSettings.parent_id;
     let messageBoxManager: MessageBoxData | undefined = this.abilityManager.getMessageBox(parentId);
-    messageBoxManager?.setMessageBoxParams(params);
-    messageBoxManager?.dialogController.open();
+    if (messageBoxManager === undefined) {
+      LogUtil.error(TAG, 'messageBoxManager not found for parentId ' + parentId);
+      callback(-1, false);
+      return;
+    }
+    messageBoxManager.setMessageBoxParams(params);
+    messageBoxManager.dialogController.open();
   }
 
   @LogMethod
@@ -145,7 +157,14 @@ export class DialogAdapter extends BaseAdapter {
   showOpenDialog(settings: string, callback: (filePaths: string[], canceled: boolean) => void) {
     LogUtil.info(TAG, 'ShowOpenDialog ' + settings);
     let DocumentSelectOptions = new picker.DocumentSelectOptions();
-    let dialogSettings: IOpenDialogSettings = JSON.parse(settings);
+    let dialogSettings: IOpenDialogSettings;
+    try {
+      dialogSettings = JSON.parse(settings) as IOpenDialogSettings;
+    } catch (err) {
+      LogUtil.error(TAG, 'ShowOpenDialog settings parse failed: ' + JSON.stringify(err));
+      callback([], true);
+      return;
+    }
     if (dialogSettings.properties_open_directory) {
       DocumentSelectOptions.selectMode = picker.DocumentSelectMode.FOLDER;
       if (dialogSettings.properties_open_mixed)
@@ -156,7 +175,7 @@ export class DialogAdapter extends BaseAdapter {
     }
     const context = this.ctxAdapter.getContext();
     let allFileDescription = context.resourceManager.getStringSync(this.allFIleDescriptionId);
-    if (dialogSettings.filters.length > 0) {
+    if (dialogSettings.filters && dialogSettings.filters.length > 0) {
       DocumentSelectOptions.fileSuffixFilters = this.getFilterArray(dialogSettings.filters);
     } else {
       DocumentSelectOptions.fileSuffixFilters = [allFileDescription + "|.*"];
@@ -187,7 +206,14 @@ export class DialogAdapter extends BaseAdapter {
   @LogMethod
   showSaveDialog(settings: string, callback: (filePath: string, canceled: boolean) => void) {
     LogUtil.info(TAG, 'ShowSaveDialog ' + settings);
-    let dialogSettings: IOpenDialogSettings = JSON.parse(settings);
+    let dialogSettings: IOpenDialogSettings;
+    try {
+      dialogSettings = JSON.parse(settings) as IOpenDialogSettings;
+    } catch (err) {
+      LogUtil.error(TAG, 'ShowSaveDialog settings parse failed: ' + JSON.stringify(err));
+      callback('', true);
+      return;
+    }
     let DocumentSaveOptions = new picker.DocumentSaveOptions();
     let dirAndFile: string[] = this.handleDefaultPath(dialogSettings.default_path);
     LogUtil.info(TAG, 'ShowSaveDialog dirAndFile: ' + `${dirAndFile[0]}-${dirAndFile[1]}`);
@@ -195,7 +221,7 @@ export class DialogAdapter extends BaseAdapter {
     DocumentSaveOptions.newFileNames = [`${dirAndFile[1]}`];
     const context = this.ctxAdapter.getContext();
     let allFileDescription = context.resourceManager.getStringSync(this.allFIleDescriptionId);
-    if (dialogSettings.filters.length > 0) {
+    if (dialogSettings.filters && dialogSettings.filters.length > 0) {
       DocumentSaveOptions.fileSuffixChoices = this.getFilterArray(dialogSettings.filters);
     } else {
       DocumentSaveOptions.fileSuffixChoices = [allFileDescription + "|.*"];

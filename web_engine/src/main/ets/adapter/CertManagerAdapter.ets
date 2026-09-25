@@ -67,19 +67,29 @@ export class CertManagerAdapter extends BaseAdapter {
   }
 
   readFile(filePath: string) : string {
-    let res = fs.accessSync(filePath);
-    if (!res) {
+    let file: fs.File | undefined = undefined;
+    try {
+      let res = fs.accessSync(filePath);
+      if (!res) {
+        return '';
+      }
+      let fileStat = fs.lstatSync(filePath);
+      file = fs.openSync(filePath, fs.OpenMode.READ_ONLY);
+      let buf = new ArrayBuffer(fileStat.size);
+      fs.readSync(file.fd, buf);
+      return this.uint8ArrayToString(new Uint8Array(buf));
+    } catch (err) {
+      LogUtil.error(TAG, 'readFile failed: ' + JSON.stringify(err));
       return '';
+    } finally {
+      if (file !== undefined) {
+        fs.closeSync(file);
+      }
     }
-    let fileStat = fs.lstatSync(filePath);
-    let file = fs.openSync(filePath, fs.OpenMode.READ_ONLY | fs.OpenMode.CREATE);
-    let buf = new ArrayBuffer(fileStat.size);
-    fs.readSync(file.fd, buf);
-    fs.closeSync(file);
-    return this.uint8ArrayToString(new Uint8Array(buf));
   }
 
-  @LogMethod
+  // No @LogMethod: the decorator would write the keystore password (certPass)
+  // to system logs in plaintext.
   installPersonalCert(certData: ArrayBuffer,
     certPass: string,
     alias: string,

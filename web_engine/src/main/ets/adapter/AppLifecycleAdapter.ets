@@ -29,11 +29,13 @@
 
 import { inject, injectable } from 'inversify';
 import { common } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 
 import { AbilityManager } from '../common/AbilityManager';
 import { BaseAdapter } from '../common/BaseAdapter';
 import { WebStatus } from '../common/Constants';
 import LogMethod from '../common/LogDecorator';
+import LogUtil from '../utils/LogUtil';
 
 @injectable()
 export class AppLifecycleAdapter extends BaseAdapter {
@@ -70,7 +72,9 @@ export class AppLifecycleAdapter extends BaseAdapter {
     let proxy_list = this.abilityManager.getProxyList();
     for (let i = 0; i < proxy_list.length; i++) {
       let context = proxy_list[i].getWindowContext() as common.UIAbilityContext;
-      context?.terminateSelf();
+      context?.terminateSelf()?.catch((err: BusinessError) => {
+        LogUtil.error('AppLifecycleAdapter', 'terminateSelf failed: ' + JSON.stringify(err));
+      });
     }
   }
 }

@@ -97,10 +97,11 @@ function adjustSpeechVolumeOfSpeakParams(speakParams: SpeakingParams): SpeakingP
     let error = err as BusinessError;
     LogUtil.error(TAG, `tts Failed to get audioVolumeGroupManager, error: ${error}`);
   }
-  if (typeof systemVolume === "number" && clonedSpeakParams.extraParams) {
+  if (typeof systemVolume === "number" && clonedSpeakParams.extraParams &&
+    clonedSpeakParams.extraParams.volume !== undefined) {
     // Converts the system volume to a percentage, which is used to scale the speak input volume parameter.
     // The range for the system volume is 0 - 20
-    const adjustedVolume = (systemVolume / 20) * ((speakParams.extraParams)!.volume as number);
+    const adjustedVolume = (systemVolume / 20) * (clonedSpeakParams.extraParams.volume as number);
     clonedSpeakParams.extraParams.volume = adjustedVolume;
   }
   return clonedSpeakParams;

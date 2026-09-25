@@ -81,6 +81,18 @@ export class AppWindowAdapter extends BaseAdapter {
     return this.abilityManager.getProxy(id)?.getWindow();
   }
 
+  private getDisplayDensity(): number {
+    try {
+      let d = display.getDefaultDisplaySync().densityPixels;
+      if (d && d > 0) {
+        return d;
+      }
+    } catch (exception) {
+      LogUtil.warn(TAG, 'getDisplayDensity failed: ' + JSON.stringify(exception));
+    }
+    return 1;
+  }
+
   private applyWindowTitleButtonVisible(id: number) {
     let proxy = this.abilityManager.getProxy(id);
     let preferences: WindowPreferences | undefined = proxy?.getWindowPreferences();
@@ -131,25 +143,64 @@ export class AppWindowAdapter extends BaseAdapter {
     const windowProp = windowClass?.getWindowProperties();
     let leftBorder: number = param.hide_title_bar ? 0 : windowProp?.drawableRect.left || 0;
     let topBorder: number = param.hide_title_bar ? 0 : windowProp?.drawableRect.top || 0;
-    let imagePixelMap: image.PixelMap;
+
+    // The engine can request a window without geometry (mobile-emulated
+    // flows send undefined fields, exactly like the empty setBounds calls).
+    // NaN/zero in StartOptions windowWidth/windowHeight fails the system
+    // StartOptions check with 16000067, the ability never launches and the
+    // engine times out waiting for the window. The engine sends no geometry
+    // for these windows, and the starter/vault-chooser UI is designed for
+    // 800x650 DIP - a parent-rect fallback produced a fullscreen window with
+    // a small fixed-size UI floating in it ("cannot fill the screen"). Size
+    // such windows to 800x650 DIP, centered on the display.
+    let bounds = param.bounds;
+    if (!bounds) {
+      bounds = { left: 0, top: 0, width: 0, height: 0 };
+    }
+    const density = this.getDisplayDensity();
+    const invalidSize = (v: number): boolean => {
+      return isNaN(v) || !(v > 0);
+    };
+    let centered = false;
+    if (invalidSize(bounds.width) || invalidSize(bounds.height) ||
+      isNaN(bounds.left) || isNaN(bounds.top)) {
+      bounds = { left: 0, top: 0, width: 800, height: 650 };
+      leftBorder = 0;
+      topBorder = 0;
+      centered = true;
+      LogUtil.warn(TAG, 'createWindow without valid bounds, using 800x650 DIP centered');
+    }
+
+    // Frame borders are symmetric (see setBounds): width grows by 2x the
+    // left border, height by 2x the top border. Upstream mixed leftBorder
+    // into the height, mis-sizing framed windows. Borders are px; the engine
+    // bounds are DIP - convert borders to DIP before adding.
+    let widthDip: number = Math.round(bounds.width + (leftBorder + leftBorder) / density);
+    let heightDip: number = Math.round(bounds.height + (topBorder + topBorder) / density);
+    // StartOptions units (SDK): windowLeft/windowTop are px, while
+    // windowWidth/windowHeight are vp. Engine DIP == vp, so sizes pass
+    // through and only the position converts to px.
+    let outerLeft: number = Math.floor(bounds.left * density) - Math.floor(leftBorder);
+    let outerTop: number = Math.floor(bounds.top * density) - Math.floor(topBorder);
+    if (centered) {
+      const displayClass = display.getDefaultDisplaySync();
+      outerLeft = Math.floor((displayClass.width - widthDip * density) / 2);
+      outerTop = Math.floor((displayClass.height - heightDip * density) / 2);
+    }
     let color = new ArrayBuffer(0);
 
-    image.createPixelMap(color, {
-      size: {
-        height: param.bounds.height + leftBorder + topBorder,
-        width: param.bounds.width + leftBorder + leftBorder,
-      }
-    }).then((data) => {
-      imagePixelMap = data;
+    const launch = (icon: image.PixelMap | undefined): void => {
       let options: StartOptions = {
         processMode: contextConstant.ProcessMode.ATTACH_TO_STATUS_BAR_ITEM,
         startupVisibility: param.show ? contextConstant.StartupVisibility.STARTUP_SHOW : contextConstant.StartupVisibility.STARTUP_HIDE,
-        windowLeft: param.bounds.left - leftBorder,
-        windowTop: param.bounds.top - topBorder,
-        windowWidth: param.bounds.width + leftBorder + leftBorder,
-        windowHeight: param.bounds.height + leftBorder + topBorder,
-        startWindowIcon: imagePixelMap,
+        windowLeft: outerLeft,
+        windowTop: outerTop,
+        windowWidth: widthDip,
+        windowHeight: heightDip,
         startWindowBackgroundColor: this.defaultBackgroundColor
+      };
+      if (icon) {
+        options.startWindowIcon = icon;
       }
       if (param.is_panel) {
         options.windowMode = AbilityConstant.WindowMode.WINDOW_MODE_FULLSCREEN;
@@ -158,13 +209,38 @@ export class AppWindowAdapter extends BaseAdapter {
         options.displayId = param.display_id;
       }
       LaunchHelper.LaunchWithOptions(this.ctxAdapter.getActiveContext(), want, options);
-    })
+    };
+
+    image.createPixelMap(color, {
+      size: {
+        height: Math.round(heightDip * density),
+        width: Math.round(widthDip * density),
+      }
+    }).then((data) => {
+      launch(data);
+    }).catch((err: BusinessError) => {
+      // A failed icon must not silently skip the launch (the engine would
+      // wait for a window that is never started).
+      LogUtil.warn(TAG, 'createPixelMap failed, launching without icon: ' + JSON.stringify(err));
+      launch(undefined);
+    });
   }
 
   @LogMethod
   closeWindow(id: number) {
-    let context = this.abilityManager.getProxy(id)?.getWindowContext() as common.UIAbilityContext;
-    context?.terminateSelf()
+    let proxy = this.abilityManager.getProxy(id);
+    let context = proxy?.getWindowContext() as common.UIAbilityContext;
+    if (!context) {
+      // Without a context the terminate call is a silent no-op and the
+      // engine believes the window closed while it is still on screen.
+      LogUtil.error(TAG, 'closeWindow: no context for window ' + id +
+        ', proxy=' + JSON.stringify(proxy !== undefined));
+      return;
+    }
+    context.terminateSelf()
+      .then(() => {
+        LogUtil.info(TAG, 'closeWindow success: ' + id);
+      })
       .catch((err: BusinessError) => {
         LogUtil.error(TAG, 'Failed to close window. Cause: ' + JSON.stringify(err));
       });
@@ -335,13 +411,41 @@ export class AppWindowAdapter extends BaseAdapter {
 
     const windowProp = windowClass?.getWindowProperties();
 
+    // Mobile-emulated window requests can carry no geometry at all ({}):
+    // moving/resizing with NaN gets rejected by the system (1300010). Treat
+    // missing width/height as "keep the current rect" and fill missing
+    // position fields from the current rect.
+    if (isNaN(bounds.width) || isNaN(bounds.height)) {
+      LogUtil.error(TAG, 'setBounds without geometry, keeping current rect');
+      callback && callback();
+      return;
+    }
+    if (isNaN(bounds.left)) {
+      bounds.left = windowProp?.windowRect.left || 0;
+    }
+    if (isNaN(bounds.top)) {
+      bounds.top = windowProp?.windowRect.top || 0;
+    }
+
     // xComponent bounds need to add a border
     let leftBorder: number = hasFrame ? windowProp?.drawableRect.left || 0 : 0;
     let topBorder: number = hasFrame ? windowProp?.drawableRect.top || 0 : 0;
     bounds.left -= leftBorder;
     bounds.top -= topBorder;
+    // Frame borders are symmetric: the width grows by one border on each
+    // side, the height by the top border on each side. (Upstream added
+    // leftBorder to the height, which mis-sized framed windows whenever the
+    // frame width differed from the frame height.)
     bounds.width = bounds.width + leftBorder + leftBorder;
-    bounds.height = bounds.height + topBorder + leftBorder;
+    bounds.height = bounds.height + topBorder + topBorder;
+
+    // Diagnostic: the engine manages window bounds itself (desktop behavior);
+    // on fullscreen windows the system rejects the calls. Log both the
+    // requested and the actual rect to attribute viewport gaps.
+    LogUtil.error(TAG, 'setBounds requested=' + JSON.stringify(bounds) +
+      ', hasFrame=' + hasFrame +
+      ', actual windowRect=' + JSON.stringify(windowProp?.windowRect) +
+      ', drawableRect=' + JSON.stringify(windowProp?.drawableRect));
 
     windowClass.moveWindowToAsync(bounds.left, bounds.top)
       .then(() => {

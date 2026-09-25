@@ -75,11 +75,13 @@ export class NotificationAdapter extends BaseAdapter {
   @LogMethod
   async sendNotification(request: NotificationAdapterRequest) {
     this.checkNotificationAuthorization(async (grant) => {
-      NOTIFICATION_LIST.push(request);
       if (!grant) {
         LogUtil.error(TAG, 'Failed to grant notification permission');
         return;
       }
+      // Queue only after authorization: requests queued before it would be
+      // flushed stale once a later authorization succeeds.
+      NOTIFICATION_LIST.push(request);
       while (NOTIFICATION_LIST.length > 0) {
         const request = NOTIFICATION_LIST.shift();
         if (!request) {

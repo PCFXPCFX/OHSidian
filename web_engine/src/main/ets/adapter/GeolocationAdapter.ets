@@ -38,15 +38,33 @@ import LogMethod from '../common/LogDecorator';
 @injectable()
 export class GeolocationAdapter extends BaseAdapter {
   private static TAG: string = 'GeolocationAdapter';
+  // The engine may call StartListening more than once (e.g. once per page or
+  // plugin). Each system-level 'locationChange' subscription with a 1s
+  // interval keeps the GNSS at full power, so share ONE subscription among
+  // all engine listeners and forward each fix to all of them.
+  private locationListeners: Array<(location: geoLocationManager.Location) => void> = [];
+  private subscribed: boolean = false;
 
   @LogMethod
   startListening(
     onLocationReport: (location: geoLocationManager.Location) => void,
     onErrorReport: (errorCode: number) => void
   ): void {
+    if (onLocationReport) {
+      this.locationListeners.push(onLocationReport);
+    }
+    if (this.subscribed) {
+      return;
+    }
     let locationChange = (location: geoLocationManager.Location): void => {
       if (location) {
-        onLocationReport(location);
+        for (let i: number = 0; i < this.locationListeners.length; i++) {
+          try {
+            this.locationListeners[i](location);
+          } catch (err) {
+            LogUtil.error(GeolocationAdapter.TAG, 'listener failed: ' + JSON.stringify(err));
+          }
+        }
       }
     };
     let requestInfo: geoLocationManager.LocationRequest = {
@@ -58,6 +76,7 @@ export class GeolocationAdapter extends BaseAdapter {
     };
     try {
       geoLocationManager.on('locationChange', requestInfo, locationChange);
+      this.subscribed = true;
     } catch (err) {
       LogUtil.error(GeolocationAdapter.TAG, 'err:' + JSON.stringify(err));
       onErrorReport((err as BusinessError.BusinessError).code);
@@ -66,6 +85,15 @@ export class GeolocationAdapter extends BaseAdapter {
 
   @LogMethod
   stopListening(): void {
-    geoLocationManager.off('locationChange');
+    this.locationListeners = [];
+    if (!this.subscribed) {
+      return;
+    }
+    this.subscribed = false;
+    try {
+      geoLocationManager.off('locationChange');
+    } catch (err) {
+      LogUtil.error(GeolocationAdapter.TAG, 'off failed: ' + JSON.stringify(err));
+    }
   }
 }

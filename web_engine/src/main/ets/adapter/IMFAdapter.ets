@@ -114,6 +114,9 @@ export class IMFAdapter extends BaseAdapter {
     this.inputMethodController.off('deleteRight');
     this.inputMethodController.off('sendFunctionKey');
     this.inputMethodController.off('moveCursor');
+    // Allow a later attach to re-register the listeners, otherwise the soft
+    // keyboard stops delivering input for the rest of the session.
+    this.IMEonListen = false;
   }
 
   private attachTextInputHelper(textConfigIMF: IMFAdapterTextConfig, requestKeyboardReason: number,

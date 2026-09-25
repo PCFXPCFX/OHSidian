@@ -107,7 +107,13 @@ export class DeviceAdapter extends BaseAdapter {
     }
     let devices: Array<usb.USBDevice> = [];
     if (eventType !== 0 && data.data !== undefined) {
-      let usbDevice: usb.USBDevice = JSON.parse(data.data);
+      let usbDevice: usb.USBDevice;
+      try {
+        usbDevice = JSON.parse(data.data) as usb.USBDevice;
+      } catch (err) {
+        LogUtil.warn(DeviceAdapter.TAG, 'Parse event data error.');
+        return undefined;
+      }
       if (usbDevice === undefined) {
         LogUtil.warn(DeviceAdapter.TAG, 'Parse event data error.');
         return undefined;

@@ -55,11 +55,13 @@ AppStorage.setOrCreate('dragParamList', new Map<string,IDragParams>());
 const BOOKMARK_DEFINED_TYPE: string = "ApplicationDefinedType-bookmark";
 const WEB_CUSTOM_DEFINED_TYPE: string = "ApplicationDefinedType-webCustom";
 const APPLICATION_DEFINE_TYPE: string = "ApplicationDefinedType";
-const FILE_DRAG_DEFAULT_NAME = "/storage/User/currentUser/file.txt";
-const IMAGE_DRAG_DEFAULT_NAME = "/storage/User/currentUser/file.png";
-const VIDEO_DRAG_DEFAULT_NAME = "/storage/User/currentUser/file.mp4";
-const AUDIO_DRAG_DEFAULT_NAME = "/storage/User/currentUser/file.mp3";
-const FOLDER_DRAG_DEFAULT_NAME = "/storage/User/currentUser";
+// System external-storage root is /storage/Users (plural); the trailing drag
+// fallback paths must match, or downstream IO on them fails.
+const FILE_DRAG_DEFAULT_NAME = "/storage/Users/currentUser/file.txt";
+const IMAGE_DRAG_DEFAULT_NAME = "/storage/Users/currentUser/file.png";
+const VIDEO_DRAG_DEFAULT_NAME = "/storage/Users/currentUser/file.mp4";
+const AUDIO_DRAG_DEFAULT_NAME = "/storage/Users/currentUser/file.mp3";
+const FOLDER_DRAG_DEFAULT_NAME = "/storage/Users/currentUser";
 const HYPERLINK_DRAG_DEFAULT_URL = "https://www.exampleholder.com";
 const HYPERLINK_DRAG_DEFAULT_TITLE = "ExampleHolder";
 const PLAINTEXT_DRAG_DEFAULT_VALUE = "ExamplePlainText";
@@ -172,15 +174,15 @@ export class DragParamManager {
         dragContents.push(file);
       }
     }
-    if (dragParams.bookmarkBuffer.byteLength > 0) {
-      LogUtil.info(TAG, `handleDragRecords bookmarkBuffer-length:${dragParams.bookmarkBuffer.byteLength}`);
+    if (dragParams.bookmarkBuffer?.byteLength > 0) {
+      LogUtil.info(TAG, `handleDragRecords bookmarkBuffer-length:${dragParams.bookmarkBuffer?.byteLength}`);
       let record = new unifiedDataChannel.ApplicationDefinedRecord();
       record.applicationDefinedType = BOOKMARK_DEFINED_TYPE;
       record.rawData = new Uint8Array(dragParams.bookmarkBuffer);
       dragContents.push(record);
     }
-    if (dragParams.webCustomBuffer.byteLength > 0) {
-      LogUtil.info(TAG, `handleDragRecords webCustomBuffer-length:${dragParams.webCustomBuffer.byteLength}`);
+    if (dragParams.webCustomBuffer?.byteLength > 0) {
+      LogUtil.info(TAG, `handleDragRecords webCustomBuffer-length:${dragParams.webCustomBuffer?.byteLength}`);
       let record = new unifiedDataChannel.ApplicationDefinedRecord();
       record.applicationDefinedType = WEB_CUSTOM_DEFINED_TYPE;
       record.rawData = new Uint8Array(dragParams.webCustomBuffer);
@@ -262,7 +264,13 @@ export class DragParamManager {
       }
       return dropData;
     }
-    let records: Array<string> = JSON.parse(JSON.stringify(summary.summary));
+    let records: Array<string>;
+    try {
+      records = JSON.parse(JSON.stringify(summary.summary)) as Array<string>;
+    } catch (err) {
+      LogUtil.warn(TAG, `On handleDropDataForEnter summary parse failed: ${JSON.stringify(err)}`);
+      return dropData;
+    }
     if (!records || records.length === 0) {
       LogUtil.warn(TAG, `On handleDropDataForEnter summary records is null`);
       return dropData;
@@ -532,8 +540,8 @@ export class DragParamManager {
 
   private handleBookmarkDragDataForEntries(dragParams: OhosDragParamToJs) {
     let bookmarkStruct: CustomDragData|undefined = undefined;
-    if (dragParams.bookmarkBuffer.byteLength > 0) {
-      LogUtil.info(TAG, `handleDragDataForEntries bookmarkBuffer-length:${dragParams.bookmarkBuffer.byteLength}`);
+    if (dragParams.bookmarkBuffer?.byteLength > 0) {
+      LogUtil.info(TAG, `handleDragDataForEntries bookmarkBuffer-length:${dragParams.bookmarkBuffer?.byteLength}`);
       bookmarkStruct = {
         uniformDataType: BOOKMARK_DEFINED_TYPE,
         bufferData: dragParams.bookmarkBuffer,
@@ -544,8 +552,8 @@ export class DragParamManager {
 
   private handleWebCustomDataForEntries(dragParams: OhosDragParamToJs) {
     let webCustomStruct: CustomDragData|undefined = undefined;
-    if (dragParams.webCustomBuffer.byteLength > 0) {
-      LogUtil.info(TAG, `handleDragDataForEntries webCustomBuffer-length:${dragParams.webCustomBuffer.byteLength}`);
+    if (dragParams.webCustomBuffer?.byteLength > 0) {
+      LogUtil.info(TAG, `handleDragDataForEntries webCustomBuffer-length:${dragParams.webCustomBuffer?.byteLength}`);
       webCustomStruct = {
         uniformDataType: WEB_CUSTOM_DEFINED_TYPE,
         bufferData: dragParams.webCustomBuffer,
@@ -607,10 +615,10 @@ export class DragParamManager {
     if (applicationDefinedItem.rawData.byteLength > 0) {
       if (applicationDefinedItem.applicationDefinedType === BOOKMARK_DEFINED_TYPE) {
         dropData.bookmarkBuffer = applicationDefinedItem.rawData;
-        LogUtil.info(TAG, `loadApplicationDefineData, bookmarkBuffer data length: ${dropData.bookmarkBuffer.byteLength}`);
+        LogUtil.info(TAG, `loadApplicationDefineData, bookmarkBuffer data length: ${dropData.bookmarkBuffer?.byteLength}`);
       } else if (applicationDefinedItem.applicationDefinedType === WEB_CUSTOM_DEFINED_TYPE) {
         dropData.webCustomBuffer = applicationDefinedItem.rawData;
-        LogUtil.info(TAG, `loadApplicationDefineData, webCustomBuffer data length: ${dropData.webCustomBuffer.byteLength}`);
+        LogUtil.info(TAG, `loadApplicationDefineData, webCustomBuffer data length: ${dropData.webCustomBuffer?.byteLength}`);
       } else {
         LogUtil.warn(TAG, `On loadApplicationDefineData dragData,
             APPLICATION_DEFINE_TYPE: ${applicationDefinedItem.applicationDefinedType} not support`);

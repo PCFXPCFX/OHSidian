@@ -5,7 +5,6 @@ import { promptAction, router } from '@kit.ArkUI';
 import { connection } from '@kit.NetworkKit';
 import { authentication } from '@kit.AccountKit';
 import { util } from '@kit.ArkTS';
-import { WebPage } from './WebPage'
 import { ILoginInfo } from 'web_engine';
 
 
@@ -126,6 +125,11 @@ export struct QuickLoginButtonComponent {
     const controller = new authentication.AuthenticationController();
     try {
       controller.executeRequest(authRequest).then((response: authentication.AuthorizationWithHuaweiIDResponse) => {
+        // 防 CSRF:回读 state 与请求时比对(部分系统版本可能不下发 state,此时跳过)
+        if (response.state !== undefined && response.state !== authRequest.state) {
+          hilog.error(this.domainId, this.logTag, 'Authentication state mismatch, dropping response.');
+          return;
+        }
         // 获取到UnionID、OpenID、匿名手机号
         const unionID = response.data?.unionID;
         const openID = response.data?.openID;

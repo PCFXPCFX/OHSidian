@@ -40,6 +40,12 @@ const TAG: string = 'RunningLock';
 @injectable()
 export class RunningLockAdapter extends BaseAdapter {
   private ctxAdapter: ContextAdapter;
+  // Whether the engine currently wants the screen kept on (RunningLock.Start
+  // without a matching Stop). Restored when the app returns to foreground.
+  private engineRequested: boolean = false;
+  // Foreground reference count across all WebAbility instances; the screen
+  // flag is cleared only when the LAST window goes to the background.
+  private foregroundWindows: number = 0;
 
   constructor(@inject(ContextAdapter) ctxAdapter: ContextAdapter) {
     super();
@@ -48,12 +54,35 @@ export class RunningLockAdapter extends BaseAdapter {
 
   @LogMethod
   start() {
+    this.engineRequested = true;
     this.keepScreenOn(true);
   }
 
   @LogMethod
   stop() {
+    this.engineRequested = false;
     this.keepScreenOn(false);
+  }
+
+  // Battery guard, driven by WebAbility.onForeground/onBackground. A leaked
+  // Start (engine or plugin asked for prevent-display-sleep and never
+  // stopped it) must not keep the screen on while the app is backgrounded.
+  // The engine's request is remembered while backgrounded and re-applied on
+  // the first foreground window; the engine can always Start again itself.
+  notifyAppForeground(): void {
+    this.foregroundWindows += 1;
+    if (this.foregroundWindows === 1 && this.engineRequested) {
+      this.keepScreenOn(true);
+    }
+  }
+
+  notifyAppBackground(): void {
+    if (this.foregroundWindows > 0) {
+      this.foregroundWindows -= 1;
+    }
+    if (this.foregroundWindows === 0) {
+      this.keepScreenOn(false);
+    }
   }
 
   private keepScreenOn(isKeepScreenOn: boolean) {

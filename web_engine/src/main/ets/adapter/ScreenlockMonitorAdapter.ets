@@ -67,6 +67,11 @@ export class ScreenlockMonitorAdapter extends BaseAdapter {
   @LogMethod
   startListeningForScreenlock(callback: Function): void {
     try {
+      // Repeated start calls used to overwrite this.subscriber without
+      // unsubscribing, leaking system event listeners.
+      if (this.subscriber) {
+        this.stopListeningForScreenlock();
+      }
       CommonEventManager.createSubscriber(this.subscribeInfo,
         (err: Base.BusinessError, commonEventSubscriber: CommonEventManager.CommonEventSubscriber) => {
           if (err) {
@@ -83,10 +88,14 @@ export class ScreenlockMonitorAdapter extends BaseAdapter {
 
   @LogMethod
   stopListeningForScreenlock(): void {
+    if (!this.subscriber) {
+      return;
+    }
     try {
       CommonEventManager.unsubscribe(this.subscriber, (err:Base.BusinessError) => {
         LogUtil.info(TAG, 'unsubscribe err: ' + JSON.stringify(err));
       });
+      this.subscriber = undefined;
     } catch (err) {
       LogUtil.error(TAG, 'unsubscribe failed, error: ' + JSON.stringify(err));
     }

@@ -160,7 +160,14 @@ export class ElectronAppAdapter extends BaseAdapter {
 
   @LogMethod
   getAvailableArea(displayId: number, callback: (availArea: display.Rect) => void) {
-    let displayClass: display.Display = display.getDisplayByIdSync(displayId);
+    let displayClass: display.Display;
+    try {
+      displayClass = display.getDisplayByIdSync(displayId);
+    } catch (err) {
+      LogUtil.error(TAG, 'getDisplayByIdSync failed. Cause: ' + JSON.stringify(err));
+      callback({ left: 0, top: 0, width: 0, height: 0 });
+      return;
+    }
     if (!displayClass) {
       LogUtil.error(TAG, 'getDisplayByIdSync failed.');
       callback({ left: 0, top: 0, width: 0, height: 0 });

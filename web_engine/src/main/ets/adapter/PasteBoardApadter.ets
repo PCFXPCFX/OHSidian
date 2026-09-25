@@ -253,7 +253,9 @@ export class PasteBoardAdapter extends BaseAdapter {
         let recordData = v.getRecord(i);
         if (recordData.uri !== undefined) {
           fileData = StringUtil.filterFileDocs(recordData.uri);
-          filePaths.push(fileData);
+          if (fileData.length > 0) {
+            filePaths.push(fileData);
+          }
         }
       }
       callback(filePaths);

@@ -39,6 +39,11 @@ export class CloudSyncAdapter extends BaseAdapter {
   private bucket: cloudStorage.StorageBucket | null = null;
   private isInitialized: boolean = false;
   private userId: string = '';
+  private pollTimer: number = -1;
+  // Foreground reference count across all WebAbility instances; the login
+  // trigger poll only runs while this is > 0 (see startLoginTriggerPolling).
+  private foregroundWindows: number = 0;
+  private pollContext: Context | undefined = undefined;
 
   @LogMethod
   initCloudSync(context: Context, onCompleted: (ret: boolean) => void): void {
@@ -58,19 +63,96 @@ export class CloudSyncAdapter extends BaseAdapter {
     }
   }
 
-  @LogMethod
+  // Runs one app-wide polling timer on this singleton. Previously every
+  // WebAbility instance started its own never-cleared interval, so N windows
+  // meant N pollers hammering the filesystem every 3 seconds.
+  //
+  // DORMANT since the 1.13.7 kernel upgrade (round 28): the trigger file
+  // .hcs-login-pending was written by the hcs-login IPC handler the upstream
+  // fork injected into the 1.12.7 asar main.js. That injection did not
+  // migrate to the stock 1.13.7 kernel (update-obsidian.mjs injects only the
+  // touch-mode command, IPC guard, deep-link bridge and Electron version
+  // shim), so nothing writes the trigger file and polling it is dead load.
+  // WebAbility.onCreate therefore no longer calls this. To re-enable:
+  // reintroduce a trigger writer (asar injection or direct JSBind call) and
+  // call startLoginTriggerPolling once from WebAbility.onCreate.
+  //
+  // Battery gating (kept for that re-enable path): the poll only runs while
+  // at least one ability is in the foreground. WebAbility.onForeground/
+  // onBackground report in here; the first call provides the context used by
+  // the poll. While backgrounded the trigger file cannot be acted on anyway
+  // (the login dialog would not be visible), so stopping the timer costs
+  // nothing functionally; on return to the foreground polling resumes
+  // immediately.
+  startLoginTriggerPolling(context: Context): void {
+    if (this.pollContext === undefined) {
+      this.pollContext = context;
+    }
+    this.refreshPolling();
+  }
+
+  stopLoginTriggerPolling(): void {
+    this.clearPollTimer();
+  }
+
+  notifyAppForeground(): void {
+    this.foregroundWindows += 1;
+    this.refreshPolling();
+  }
+
+  notifyAppBackground(): void {
+    if (this.foregroundWindows > 0) {
+      this.foregroundWindows -= 1;
+    }
+    this.refreshPolling();
+  }
+
+  private clearPollTimer(): void {
+    if (this.pollTimer !== -1) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = -1;
+    }
+  }
+
+  private refreshPolling(): void {
+    if (this.foregroundWindows > 0 && this.pollContext !== undefined) {
+      if (this.pollTimer === -1) {
+        this.pollTimer = setInterval((): void => {
+          const ctx: Context | undefined = this.pollContext;
+          if (ctx === undefined) {
+            return;
+          }
+          this.checkLoginTrigger(ctx);
+        }, 3000);
+      }
+    } else {
+      this.clearPollTimer();
+    }
+  }
+
   setUserId(userId: string): void {
     this.userId = userId;
-    LogUtil.info(TAG, 'UserId set: ' + userId);
+    LogUtil.info(TAG, 'UserId set');
+  }
+
+  // Builds "<userId>/vaults/<vaultName>/<filePath>". Segments coming from the
+  // renderer are sanitized so a crafted path ("..", absolute or empty segments)
+  // cannot escape the per-user vault prefix and touch other users' objects.
+  // Strips empty/./.. segments so a crafted name cannot escape the per-user
+  // vault prefix (cloud path traversal).
+  private sanitizeCloudSegment(raw: string): string {
+    return raw.split('/')
+      .filter((segment: string) => segment.length > 0 && segment !== '.' && segment !== '..')
+      .join('/');
   }
 
   private buildCloudPath(vaultName: string, filePath: string): string {
-    let cloudPath: string = this.userId + '/vaults/' + vaultName + '/' + filePath;
-    // Clean up double slashes
-    while (cloudPath.includes('//')) {
-      cloudPath = cloudPath.replace('//', '/');
+    const cleanVault = this.sanitizeCloudSegment(vaultName);
+    const cleanFile = this.sanitizeCloudSegment(filePath);
+    if (cleanVault.length === 0 || cleanFile.length === 0) {
+      return '';
     }
-    return cloudPath;
+    return this.userId + '/vaults/' + cleanVault + '/' + cleanFile;
   }
 
   @LogMethod
@@ -83,6 +165,11 @@ export class CloudSyncAdapter extends BaseAdapter {
     }
 
     const cloudPath: string = this.buildCloudPath(vaultName, filePath);
+    if (cloudPath.length === 0) {
+      LogUtil.error(TAG, 'uploadFile: invalid vault/file path rejected');
+      onCompleted(false);
+      return;
+    }
 
     try {
       const task: object = await this.bucket.uploadFile(getContext() as common.Context, {
@@ -120,6 +207,11 @@ export class CloudSyncAdapter extends BaseAdapter {
     }
 
     const cloudPath: string = this.buildCloudPath(vaultName, filePath);
+    if (cloudPath.length === 0) {
+      LogUtil.error(TAG, 'downloadFile: invalid vault/file path rejected');
+      onCompleted(false);
+      return;
+    }
 
     try {
       const task: object = await this.bucket.downloadFile(getContext() as common.Context, {
@@ -156,7 +248,13 @@ export class CloudSyncAdapter extends BaseAdapter {
       return;
     }
 
-    const prefix: string = this.userId + '/vaults/' + vaultName + '/';
+    const cleanVault = this.sanitizeCloudSegment(vaultName);
+    if (cleanVault.length === 0) {
+      LogUtil.error(TAG, 'listCloudFiles: invalid vault path rejected');
+      onCompleted([]);
+      return;
+    }
+    const prefix: string = this.userId + '/vaults/' + cleanVault + '/';
 
     try {
       const result: object = await this.bucket.list(prefix);
@@ -194,6 +292,11 @@ export class CloudSyncAdapter extends BaseAdapter {
     }
 
     const cloudPath: string = this.buildCloudPath(vaultName, filePath);
+    if (cloudPath.length === 0) {
+      LogUtil.error(TAG, 'deleteCloudFile: invalid vault/file path rejected');
+      onCompleted(false);
+      return;
+    }
 
     try {
       await this.bucket.deleteFile(cloudPath);
@@ -295,8 +398,16 @@ export class CloudSyncAdapter extends BaseAdapter {
                 unionId: loginInfo.unionId,
                 loginTime: Date.now()
               });
-              let f: fileIo.File = fileIo.openSync(userFilePath, fileIo.OpenMode.CREATE |
-                fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);fileIo.writeSync(f.fd, userData);fileIo.closeSync(f);
+              let f: fileIo.File | undefined = undefined;
+              try {
+                f = fileIo.openSync(userFilePath, fileIo.OpenMode.CREATE |
+                  fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
+                fileIo.writeSync(f.fd, userData);
+              } finally {
+                if (f !== undefined) {
+                  fileIo.closeSync(f);
+                }
+              }
             } catch (writeErr) {
               LogUtil.error(TAG, 'Failed to save userId: ' + JSON.stringify(writeErr));
             }
@@ -342,9 +453,9 @@ export class CloudSyncAdapter extends BaseAdapter {
 
   /**
    * Check if Electron requested a login trigger.
-   * Called periodically from WebAbility.
+   * Called periodically from WebAbility. No @LogMethod here: it would emit
+   * two hilog lines (and serialize the whole Context) every 3 seconds.
    */
-  @LogMethod
   checkLoginTrigger(context: Context): void {
     const appContext: common.ApplicationContext = context.getApplicationContext();
     const triggerFile: string = appContext.filesDir + '/.hcs-login-pending';

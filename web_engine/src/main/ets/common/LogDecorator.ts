@@ -31,6 +31,30 @@ import LogUtil from '../utils/LogUtil';
 
 const TAG: string = 'LogMethodCall';
 
+// Adapters are called at high frequency (file ops, the 3s cloud-sync poll,
+// window events). Serializing every argument in full and writing two hilog
+// lines per call costs real CPU/log I/O, and full serialization also leaks
+// clipboard/notification content into the log (see CHANGES 4.2-R7).
+// Cap the dump and make serialization exception-safe: JSON.stringify throws
+// on cyclic structures, and an uncaught throw here would silently replace
+// the wrapped method call itself.
+const MAX_LOG_VALUE_LENGTH: number = 256;
+
+const safeStringify = (value: object): string => {
+  try {
+    const s: string = JSON.stringify(value);
+    if (s === undefined) {
+      return 'undefined';
+    }
+    if (s.length > MAX_LOG_VALUE_LENGTH) {
+      return s.substring(0, MAX_LOG_VALUE_LENGTH) + `...(len=${s.length},truncated)`;
+    }
+    return s;
+  } catch (err) {
+    return '[unserializable]';
+  }
+};
+
 /**
  * Method log decorator
  */
@@ -41,11 +65,11 @@ const LogMethod = (
   const method = propertyDescriptor.value;
 
   propertyDescriptor.value = function (...args: object[]) {
-    const params = args.map(a => JSON.stringify(a)).join();
+    const params = args.map(a => safeStringify(a)).join();
     LogUtil.info(TAG, `${target.constructor.name}#${methodName}(${params}) in `);
 
     const result = method.apply(this, args);
-    const r = JSON.stringify(result);
+    const r = safeStringify(result);
 
     LogUtil.info(TAG, `${target.constructor.name}#${methodName}(${params}) out => ${r}`);
     return result;
@@ -64,11 +88,11 @@ export const LogAll = (target: ObjectConstructor) => {
 
     if (method) {
       propertyDescriptor.value = function (...args: object[]) {
-        const params = args.map(a => JSON.stringify(a)).join();
+        const params = args.map(a => safeStringify(a)).join();
         LogUtil.info(TAG, `${target.name}#${propertyKey.toString()}(${params}) in `);
 
         const result = method.apply(this, args);
-        const r = JSON.stringify(result);
+        const r = safeStringify(result);
 
         LogUtil.info(TAG, `${target.name}#${propertyKey.toString()}(${params}) out => ${r}`);
         return result;

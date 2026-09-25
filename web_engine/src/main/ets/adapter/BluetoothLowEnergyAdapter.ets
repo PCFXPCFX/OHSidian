@@ -69,6 +69,7 @@ export class BluetoothLowEnergyAdapter extends BaseAdapter {
   static SERVICE_MAP: HashMap<string, ble.GattService> = new HashMap();
   static DESCRIPTOR_MAP: HashMap<string, ble.BLEDescriptor> = new HashMap();
   static CHARACTERISTIC_CHANGE_MAP: HashMap<string, (arr: ArrayBuffer, error_code: number) => void> = new HashMap();
+  static NOTIFY_LISTENING_DEVICES: HashMap<string, boolean> = new HashMap();
   static PROPERTY_READ: number = 1 << 1;
   static PROPERTY_WRITE_WITHOUT_RESPONSE: number = 1 << 2;
   static PROPERTY_WRITE: number = 1 << 3;
@@ -300,6 +301,9 @@ export class BluetoothLowEnergyAdapter extends BaseAdapter {
 
       })
       callback(ServiceInfos);
+    }).catch((err: BusinessError) => {
+      LogUtil.error(BluetoothLowEnergyAdapter.TAG, `setServicesMap error, err.code is ${err.code} errMessage is ${err.message}`);
+      callback(ServiceInfos);
     })
   }
 
@@ -397,15 +401,20 @@ export class BluetoothLowEnergyAdapter extends BaseAdapter {
     }
     device.setCharacteristicChangeNotification(characteristic, true);
     BluetoothLowEnergyAdapter.CHARACTERISTIC_CHANGE_MAP.set(id, callback);
-    device.on('BLECharacteristicChange', (chara) => {
-      let identifier = deviceId + "_" + chara.serviceUuid + "_" + chara.characteristicUuid;
-      if (BluetoothLowEnergyAdapter.CHARACTERISTIC_CHANGE_MAP.hasKey(identifier)) {
-        let callback = BluetoothLowEnergyAdapter.CHARACTERISTIC_CHANGE_MAP.get(identifier);
-        callback(chara.characteristicValue, BluetoothLowEnergyAdapter.ERROR_NULL);
-      } else {
-        LogUtil.info(BluetoothLowEnergyAdapter.TAG, `characteristic not regist , id is ${identifier}`);
-      }
-    });
+    // Register at most one system listener per device: every subscription adds
+    // a new listener otherwise, delivering each notification N times.
+    if (!BluetoothLowEnergyAdapter.NOTIFY_LISTENING_DEVICES.hasKey(deviceId)) {
+      BluetoothLowEnergyAdapter.NOTIFY_LISTENING_DEVICES.set(deviceId, true);
+      device.on('BLECharacteristicChange', (chara) => {
+        let identifier = deviceId + "_" + chara.serviceUuid + "_" + chara.characteristicUuid;
+        if (BluetoothLowEnergyAdapter.CHARACTERISTIC_CHANGE_MAP.hasKey(identifier)) {
+          let callback = BluetoothLowEnergyAdapter.CHARACTERISTIC_CHANGE_MAP.get(identifier);
+          callback(chara.characteristicValue, BluetoothLowEnergyAdapter.ERROR_NULL);
+        } else {
+          LogUtil.info(BluetoothLowEnergyAdapter.TAG, `characteristic not regist , id is ${identifier}`);
+        }
+      });
+    }
   }
 
   @LogMethod
@@ -420,6 +429,7 @@ export class BluetoothLowEnergyAdapter extends BaseAdapter {
     try {
       if (BluetoothLowEnergyAdapter.CHARACTERISTIC_CHANGE_MAP.isEmpty()) {
         device.off('BLECharacteristicChange');
+        BluetoothLowEnergyAdapter.NOTIFY_LISTENING_DEVICES.remove(deviceId);
       }
       callback(BluetoothLowEnergyAdapter.ERROR_NULL);
     } catch (err) {
@@ -436,6 +446,7 @@ export class BluetoothLowEnergyAdapter extends BaseAdapter {
     if (descriptor === undefined) {
       LogUtil.error(BluetoothLowEnergyAdapter.TAG, `missing  descriptor, id is ${id}`);
       callback(BluetoothLowEnergyAdapter.ERROR_FAILED);
+      return;
     }
     descriptor.descriptorValue = value;
     try {
@@ -468,6 +479,8 @@ export class BluetoothLowEnergyAdapter extends BaseAdapter {
     let service = BluetoothLowEnergyAdapter.SERVICE_MAP.get(serviceId);
     if (service == undefined) {
       LogUtil.error(BluetoothLowEnergyAdapter.TAG, `missing  service, id is ${serviceId}`);
+      callback(new Array<CharacteristicInfo>());
+      return;
     }
     let CharacteristicInfos = new Array<CharacteristicInfo>();
     service.characteristics.forEach((chara) => {
@@ -508,6 +521,8 @@ export class BluetoothLowEnergyAdapter extends BaseAdapter {
     let characteristic = BluetoothLowEnergyAdapter.CHARACTERISTIC_MAP.get(characteristicId);
     if (characteristic == undefined) {
       LogUtil.error(BluetoothLowEnergyAdapter.TAG, `missing  characteristic, id is ${characteristicId}`);
+      callback(DescriptorInfos);
+      return;
     }
     characteristic.descriptors.forEach((des) => {
       let identifier = deviceId + "_" + des.serviceUuid + "_" + des.characteristicUuid + "_" + des.descriptorUuid;

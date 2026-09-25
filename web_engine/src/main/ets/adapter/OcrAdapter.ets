@@ -56,22 +56,25 @@ export class OcrAdapter extends BaseAdapter {
       pixelMap: imagePixel as image.PixelMap
     };
     textRecognition.recognizeText(visionInfo, (error: BusinessError, data: textRecognition.TextRecognitionResult) => {
-      if (error.code !== 0) {
-        LogUtil.error(TAG, `textRecognition.recognizeText :${JSON.stringify(error.message)}`);
-        callback(wordsArray);
-        return;
-      }
-      for (const block of data.blocks) {
-        for (const line of block.lines) {
-          for (let word of line.words) {
-            let word1: TextWord = word;
-            wordsArray.push(word1);
+      try {
+        if (error.code !== 0) {
+          LogUtil.error(TAG, `textRecognition.recognizeText :${JSON.stringify(error.message)}`);
+          callback(wordsArray);
+          return;
+        }
+        for (const block of data.blocks) {
+          for (const line of block.lines) {
+            for (let word of line.words) {
+              let word1: TextWord = word;
+              wordsArray.push(word1);
+            }
           }
         }
-      }
-      callback(wordsArray, wordsArray.length);
-      if(imagePixel) {
-        imagePixel.release();
+        callback(wordsArray, wordsArray.length);
+      } finally {
+        if (imagePixel) {
+          imagePixel.release();
+        }
       }
     });
   }

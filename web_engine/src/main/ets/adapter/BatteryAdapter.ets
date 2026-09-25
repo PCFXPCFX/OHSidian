@@ -91,6 +91,15 @@ export class BatteryAdapter extends BaseAdapter {
       LogUtil.error(TAG, 'The envent subscriber does not exist');
       return;
     }
+    // Re-subscribing overwrites this.subscriber; unsubscribe the previous one
+    // so repeated register calls do not leak system event listeners.
+    if (this.subscriber) {
+      try {
+        CommonEventManager.unsubscribe(this.subscriber);
+      } catch (unsubErr) {
+        LogUtil.warn(TAG, 'unsubscribe old subscriber failed: ' + JSON.stringify(unsubErr));
+      }
+    }
     this.subscriber = sub;
     CommonEventManager.subscribe(this.subscriber,
       (err: Base.BusinessError, data: CommonEventManager.CommonEventData) => this.subscribeCallBack(err, data, callback));

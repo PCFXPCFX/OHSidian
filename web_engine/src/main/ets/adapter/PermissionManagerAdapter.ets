@@ -182,6 +182,7 @@ export class PermissionManagerAdapter extends BaseAdapter {
       } catch (err) {
         LogUtil.error(TAG, `checkAccessToken failed: ${JSON.stringify(err)}`);
         callback(false);
+        return;
       }
     }
     callback(true);

@@ -44,6 +44,7 @@ const TAG: string = 'Print';
 @injectable()
 export class PrintAdapter extends BaseAdapter {
   private printFilesPath: string [] = [];
+  private printFiles: fs.File [] = [];
   private ctxAdapter: ContextAdapter;
 
   constructor(@inject(ContextAdapter) ctxAdapter: ContextAdapter) {
@@ -69,26 +70,52 @@ export class PrintAdapter extends BaseAdapter {
       filter: {}
     }
     fs.listFile(dirPath, listFileOption).then((filenames: Array<string>) => {
+      // Close previous print fds before re-opening: repeated print jobs used
+      // to leak one fd per file per invocation until openSync failed.
+      this.closePrintFiles();
       for (let i = 0; i < filenames.length; i++) {
         let pngPath = dirPath + '/' + filenames[i];
-        let tempFile: fs.File = fs.openSync(pngPath);
-        let fileFd = 'fd://' + tempFile.fd;
-        this.printFilesPath.push(fileFd);
+        try {
+          let tempFile: fs.File = fs.openSync(pngPath);
+          this.printFiles.push(tempFile);
+          this.printFilesPath.push('fd://' + tempFile.fd);
+        } catch (err) {
+          LogUtil.error(TAG, 'open print file failed: ' + pngPath + ' ' + JSON.stringify(err));
+        }
+      }
+      if (this.printFiles.length === 0) {
+        LogUtil.error(TAG, 'no printable files found in ' + dirPath);
+        return;
       }
       print.print(this.printFilesPath, this.ctxAdapter.getActiveContext())
         .then((printTask: print.PrintTask) => {
           printTask.on('succeed', () => {
             LogUtil.info(TAG, 'print state is succeed');
+            this.closePrintFiles();
           })
           printTask.on('cancel', () => {
             LogUtil.info(TAG, 'print state is cancel');
+            this.closePrintFiles();
           })
         }).catch((error: Error) => {
         LogUtil.error(TAG, 'print err ' + JSON.stringify(error));
+        this.closePrintFiles();
       })
     }).catch((err: BusinessError) => {
       LogUtil.error(TAG, 'list file error: ' + JSON.stringify(err));
     });
+  }
+
+  private closePrintFiles(): void {
+    this.printFiles.forEach((file: fs.File) => {
+      try {
+        fs.closeSync(file);
+      } catch (err) {
+        LogUtil.warn(TAG, 'close print file failed: ' + JSON.stringify(err));
+      }
+    });
+    this.printFiles = [];
+    this.printFilesPath = [];
   }
 
   @LogMethod
