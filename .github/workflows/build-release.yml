@@ -206,33 +206,30 @@ jobs:
             sha256sum "$f" >> SHA256SUMS.txt
             md5sum "$f" >> MD5SUMS.txt
           done
-          # Release body: hashes inline so users can verify without
-          # downloading the checksum files first.
+          # Release body: rendered from scripts/ci/release-notes-template.md
+          # (edit THAT file to change the wording) with the {{HAP_TABLE}},
+          # {{SHA256}}, {{MD5}} markers replaced by generated content.
+          TEMPLATE="scripts/ci/release-notes-template.md"
+          if [ ! -f "$TEMPLATE" ]; then
+            echo "::error::Release notes template missing: $TEMPLATE"
+            exit 1
+          fi
+          HAP_TABLE="$RUNNER_TEMP/hap-table.md"
           {
-            echo "## 下载"
-            echo
             echo "| 文件 | 说明 |"
             echo "| --- | --- |"
             for f in *.hap; do
               echo "| \`$f\` | HarmonyOS HAP 安装包 |"
             done
-            echo
-            echo "## 校验值"
-            echo
-            echo "SHA-256:"
-            echo
-            echo '```'
-            cat SHA256SUMS.txt
-            echo '```'
-            echo
-            echo "MD5:"
-            echo
-            echo '```'
-            cat MD5SUMS.txt
-            echo '```'
-            echo
-            echo "> HAP 为未签名包，安装前需自行签名，步骤见仓库 docs/RELEASE.md。"
-          } > RELEASE_NOTES.md
+          } > "$HAP_TABLE"
+          sed -e "s/{{VERSION}}/$VERSION/g" \
+              -e "/{{HAP_TABLE}}/r $HAP_TABLE" \
+              -e "/{{SHA256}}/r SHA256SUMS.txt" \
+              -e "/{{MD5}}/r MD5SUMS.txt" \
+              "$TEMPLATE" \
+            | sed -e '/{{HAP_TABLE}}/d' -e '/{{SHA256}}/d' -e '/{{MD5}}/d' \
+            > RELEASE_NOTES.md
+          rm -f "$HAP_TABLE"
           cat RELEASE_NOTES.md
           ls -la
 

@@ -43,8 +43,16 @@ HarmonyOS NEXT 之后的 HAP **必须签名才能安装**,签名证书与开发�
 | 方案 | 配置 | 适用 |
 |---|---|---|
 | A. CI 内置签名(推荐) | 配置下述 6 个 Secrets | Release 里的 HAP 开箱即装 |
-| B. 用户自行签名 | 无需配置 | 用户用 DevEco Studio 自动签名后安装 |
+| B. 用户自行签名 | 无需配置 | 用户用图形化工具或 DevEco Studio 签名后安装 |
 | C. 用户自己编译 | 无需配置 | 开发者/贡献者 |
+
+**方案 B 推荐的图形化工具**(写给使用者,Release 页也附同样说明):
+
+- [小白调试助手](https://github.com/likuai2010/auto-installer)(原名
+  Auto-Installer):基于 OpenHarmony HDC 工具的 Flutter 重构项目,图形化
+  安装/调试 HAP;
+- [HoKit](https://github.com/yabi-zzh/HoKit):一站式 Harmony NEXT 应用
+  开发辅助工具,支持应用解析、重签名与一键安装。
 
 **方案 A 需要的 Secrets**(Base64 用 `base64 -w0 文件` 生成):
 
@@ -68,24 +76,29 @@ release Profile 要关联本应用的包名 `com.mikannqaq.obsidian`)。
 
 ## 三、校验哈希
 
-Release 附件里的 `SHA256SUMS.txt` / `MD5SUMS.txt` 与 HAP 同时生成:
+Release 附件里的 `SHA256SUMS.txt` / `MD5SUMS.txt` 与 HAP 同时生成
+(产物命名为 `OHSidian-v<版本>-unsigned.hap`),哈希值同时写进 Release
+正文,可直接比对:
 
 ```bash
 # Linux / macOS
 sha256sum -c SHA256SUMS.txt
 md5sum -c MD5SUMS.txt
 # Windows PowerShell
-Get-FileHash .\electron-default.hap -Algorithm SHA256
-Get-FileHash .\electron-default.hap -Algorithm MD5
+Get-FileHash .\OHSidian-v1.2.0-unsigned.hap -Algorithm SHA256
+Get-FileHash .\OHSidian-v1.2.0-unsigned.hap -Algorithm MD5
 ```
 
 ## 四、发布操作顺序
 
 1. 本地按 `docs/CHANGES-2026-09.md` 的提交计划完成 commit
    (可用 `bash scripts/make-commits.sh` 分批执行);
-2. `git push origin master`(或当前分支);
+2. `git push origin main`(或当前分支);
 3. 确认 GitHub Actions 里的 `build-release`(workflow_dispatch)能跑通;
-4. `git tag v1.1.0 && git push origin v1.1.0`;
+4. 把 `AppScope/app.json5` 的 `versionName`/`versionCode` 提到目标版本,
+   然后 `git tag v1.2.0 && git push origin v1.2.0`(tag 名与 versionName 对齐);
 5. Actions 自动构建并创建 Release,检查附件(hap + 两个哈希文件);
-6. 在 Release 描述里补充:目标设备(API 24 / HarmonyOS 6.1)、
-   已知问题、签名方式说明。
+6. Release 正文由 `scripts/ci/release-notes-template.md` 渲染生成
+   (想改文案直接编辑该模板,`{{HAP_TABLE}}`/`{{SHA256}}`/`{{MD5}}`/
+   `{{VERSION}}` 为自动填充的占位符);如需补充单次发布的已知问题等,
+   在 Release 页面上手动编辑即可。
