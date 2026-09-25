@@ -3,7 +3,6 @@ let util = require('util');
 let os = require('os');
 let crypto = require('crypto');
 let fs = require('fs');
-let zlib = require('zlib');
 let EventEmitter = require('events');
 let electron = require('electron');
 let remote = electron.remote;
@@ -14,15 +13,28 @@ try {
 	console.warn('[HMOS-REMOTE] @electron/remote/main is unavailable, falling back to electron.remote', e);
 	if (!remote) {
 		remote = {
-			initialize: () => {}
+			initialize: () => {},
+			enable: () => {}
 		};
 		electron.remote = remote;
 	}
 }
-let {app, protocol, net} = electron;
+let {app, protocol} = electron;
 
 if (remote && typeof remote.initialize === 'function') {
 	remote.initialize();
+}
+// Explicitly enable @electron/remote for every webContents created later, so
+// renderer-side remote calls (and the touch-mode bridge in the patched asar)
+// keep working regardless of the engine's default webPreferences.
+if (remote && typeof remote.enable === 'function') {
+	app.on('web-contents-created', (event, webContents) => {
+		try {
+			remote.enable(webContents);
+		} catch (e) {
+			console.warn('[HMOS-REMOTE] enable(webContents) failed', e);
+		}
+	});
 }
 
 protocol.registerSchemesAsPrivileged([
@@ -53,8 +65,6 @@ let APP_PATH = (() => {
 	return path;
 })();
 
-let currentBaseVersion = require('./package.json').version || app.getVersion();
-let currentPackageVersion = currentBaseVersion;
 let dataPath = app.getPath('userData');
 
 function itemExists(filePath) {
@@ -142,17 +152,39 @@ function installHarmonyTrashCompat() {
 	let nativeTrashItem = electron.shell.trashItem.bind(electron.shell);
 	electron.shell.trashItem = async function(targetPath) {
 		let existedBefore = itemExists(targetPath);
+		// Fast path (instant): vault files move into the vault's .trash by
+		// rename. The native shell.trashItem on this port reports success
+		// without actually removing the file, which stalled every delete for
+		// the 3s wait before the same rename ran as a fallback.
+		if (existedBefore) {
+			try {
+				if (moveToVaultTrash(targetPath)) {
+					console.log('[HMOS-TRASH] moved to vault trash', targetPath);
+					return;
+				}
+			} catch (trashErr) {
+				console.error('[HMOS-TRASH] vault trash failed', trashErr);
+			}
+			// The rename can legitimately fail for paths outside any vault
+			// (cross-device move): fall through to the system trash.
+		}
 		try {
 			let result = await nativeTrashItem(targetPath);
-			if (!existedBefore || await waitForMissing(targetPath, 3000)) {
+			if (!existedBefore || await waitForMissing(targetPath, 1000)) {
 				console.log('[HMOS-TRASH] native trash succeeded', targetPath);
 				return result;
 			}
 			throw new Error('HarmonyOS native trash returned but the file still exists');
 		} catch (e) {
 			console.error('[HMOS-TRASH] native trash failed', e);
-			if (existedBefore && itemExists(targetPath) && moveToVaultTrash(targetPath)) {
-				return;
+			if (existedBefore && itemExists(targetPath)) {
+				try {
+					if (moveToVaultTrash(targetPath)) {
+						return;
+					}
+				} catch (trashErr) {
+					console.error('[HMOS-TRASH] vault trash fallback failed', trashErr);
+				}
 			}
 			throw e;
 		}
@@ -247,7 +279,13 @@ function logger(logfile) {
 	return fn;
 }
 
-let log = logger(path.join(dataPath, 'obsidian.log'));
+let log;
+try {
+	log = logger(path.join(dataPath, 'obsidian.log'));
+} catch (e) {
+	log = function () {};
+	log.end = function () {};
+}
 
 let idFile = path.join(dataPath, 'id');
 let id;
@@ -265,196 +303,16 @@ try {
 } catch (e) {
 }
 
-// Only start the updater when electron is ready, because the net module requires that.
-let updatePromise = app.whenReady();
+// Auto-update is disabled on this port; Obsidian's manual "check for update"
+// action lands here and must still emit check-end so its UI does not hang.
 let queueUpdate = (manual) => {
 	log('HarmonyOS port: desktop auto-update is disabled');
 	updateEvents.emit('check-end');
-	return;
-	let fn = () => update(manual);
-	updatePromise = updatePromise.then(fn, fn);
 };
 
-// Used for verifying signatures of downloaded asar files
-const SIGNATURE_CERT = '-----BEGIN CERTIFICATE-----\n' +
-	'MIIDjzCCAnegAwIBAgIJAOFHLJ2gTCBzMA0GCSqGSIb3DQEBCwUAMF4xCzAJBgNV\n' +
-	'BAYTAlVTMRMwEQYDVQQIDApTb21lLVN0YXRlMREwDwYDVQQKDAhEeW5hbGlzdDER\n' +
-	'MA8GA1UECwwIRHluYWxpc3QxFDASBgNVBAMMC2R5bmFsaXN0LmlvMB4XDTE2MDUx\n' +
-	'NjAyMTA1NFoXDTQwMDUxMDAyMTA1NFowXjELMAkGA1UEBhMCVVMxEzARBgNVBAgM\n' +
-	'ClNvbWUtU3RhdGUxETAPBgNVBAoMCER5bmFsaXN0MREwDwYDVQQLDAhEeW5hbGlz\n' +
-	'dDEUMBIGA1UEAwwLZHluYWxpc3QuaW8wggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAw\n' +
-	'ggEKAoIBAQDcodSNp30B0oE+2vRUdr//SGfbDow+67OtGuRYQSjn86bn55fQXhMJ\n' +
-	'b5xgZ0natiCriCyllLWgPf+4PnxGRSJZGbm38QSArb0MWR8/yXA+q+7nZisIsN2d\n' +
-	'Xih8B3APImxJ4A50nsK/C+fl7nYdo04iz3oerP0UhLDrsLbL+9rdmshjB1boLPf6\n' +
-	'QpAAC57OTPQpFBd2hFoS6xAnIb708SHOndsrWDIFEFVCPDYcme3WF5jznuT05OFG\n' +
-	'MIX8SZe2jXpg2Vco/1oKRPC7mYFN5B0JTZ7mOH48vB/zPNIsVz8KHh3P9Ru2fC2r\n' +
-	'3nPDXFGKzcUZneJmXh4LIUVqwdEPw7hvAgMBAAGjUDBOMB0GA1UdDgQWBBTF2xMx\n' +
-	'8xVDZ2wteJPsHUe0OCu18TAfBgNVHSMEGDAWgBTF2xMx8xVDZ2wteJPsHUe0OCu1\n' +
-	'8TAMBgNVHRMEBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQB6rgBF+DvDHifP+U6Z\n' +
-	'FqJ4mX1nalEXEPI1jvRZaOheKpkOEBbhkCAosbBEmYxfj8xay1GGgB9nkJk2dodR\n' +
-	'sGVhrZz+CwGR+hSEfYDQwMBvmzm3OcETfEtvwEAU1P93prbxul2oSWP48AVDDYKe\n' +
-	'pxTZvW/yZcnoHI9XzhLNMYIEvOs+wKWAOF0+BjsIukQouaXs6gklul2J99IqpdPh\n' +
-	'w2l4l7mkPx8htCbTE47GTraHt2i2mwyBZSKbfqzi73Fj5SFRtZlWJDNPKoWxcFg2\n' +
-	'91B7IHumd5jwAUdVJit3K5Tgt/q4OzwokcDZcrh5lJg0+Kstsz4RDWDbfzTNJuKn\n' +
-	'oueR\n' +
-	'-----END CERTIFICATE-----';
-
-async function update(manual) {
-	if (!manual && disable) {
-		return;
-	}
-	updateEvents.emit('check-start');
-	try {
-		// Hopefully this can help us catch any updater failures
-		// Or any old buggy versions that may still be operating in the wild.
-		// Don't wait on the async result
-		httpGetBinary('https://releases.obsidian.md/desktop?id=' + id + '&v=' + currentPackageVersion + '&p=' + process.platform).then(() => null, () => null);
-	} catch (e) {
-	}
-
-	try {
-		await runUpdate();
-	} catch (e) {
-		log('Failed to perform update');
-		console.error(e);
-	}
-	updateEvents.emit('check-end');
-}
-
-async function runUpdate() {
-	let updateJson = null;
-
-	try {
-		log('Checking for update using Github');
-		updateJson = JSON.parse(await httpGet('https://raw.githubusercontent.com/obsidianmd/obsidian-releases/master/desktop-releases.json'));
-		log('Success.');
-	} catch (e) {
-		log(`Failed to check for update using Github (${e.message})`);
-		console.error(e);
-	}
-
-	if (updateJson) {
-		try {
-			await downloadUpdate(updateJson);
-			return;
-		} catch (e) {
-			if (e.code !== 'ETIMEDOUT') {
-				throw e;
-			}
-			log('Failed to download update from Github');
-		}
-	}
-
-	try {
-		log('Checking for update using obsidian.md');
-		updateJson = JSON.parse(await httpGet('https://releases.obsidian.md/desktop-releases.json'));
-		log('Success.');
-	} catch (e) {
-		log(`Failed to check for update using obsidian.md (${e.message})`);
-		console.error(e);
-	}
-
-	if (updateJson) {
-		await downloadUpdate(updateJson);
-	}
-}
-
-async function downloadUpdate(updateJson) {
-	let usingInsider = false;
-	if (insider && updateJson.beta) {
-		updateJson = updateJson.beta;
-		usingInsider = true;
-	}
-	let {minimumVersion, latestVersion, downloadUrl, hash, signature} = updateJson;
-
-	if (!minimumVersion || !latestVersion || !downloadUrl || !hash || !signature) {
-		log('Update failed: info incomplete', updateJson);
-		return;
-	}
-
-	log('Latest version is ' + latestVersion + (usingInsider ? ' (insider)' : ''));
-
-	// If minimum version is higher than current electron version, we will require a manual full reinstall
-	if (isV2MoreRecent(app.getVersion(), minimumVersion)) {
-		updateEvents.emit('update-manual-required');
-		log('Update failed: minimum version mismatch. App must be manually updated');
-		return;
-	}
-
-	// A new version is posted, go get it!
-	if (isV2MoreRecent(currentPackageVersion, latestVersion)) {
-		// Download file only if it's not already here
-		let downloadPath = path.join(dataPath, 'obsidian-' + latestVersion + '.asar');
-		if (!fs.existsSync(downloadPath)) {
-			log('Downloading update from', downloadUrl);
-			// Download to a buffer so we can check its signature
-			let compressedBuffer = await httpGetBinary(downloadUrl);
-
-			log('Verifying hash & signature. Size=', compressedBuffer.byteLength);
-			let newHash = crypto.createHash('SHA256')
-				.update(compressedBuffer)
-				.digest('base64')
-			let verifiedHash = hash === newHash;
-			let verifiedSignature =
-				crypto.createVerify('RSA-SHA256')
-					.update(compressedBuffer)
-					.verify(SIGNATURE_CERT, signature, 'base64');
-
-			if (verifiedHash && verifiedSignature) {
-				log('Saving file');
-				let tempDownloadPath = path.join(dataPath, 'obsidian.asar.tmp');
-				let decompressedBuffer = await new Promise((resolve, reject) => {
-					zlib.gunzip(compressedBuffer, {}, (err, data) => {
-						if (err) {
-							return reject(err);
-						}
-						resolve(data);
-					});
-				});
-
-				await fs.promises.writeFile(tempDownloadPath, decompressedBuffer);
-				await fs.promises.rename(tempDownloadPath, downloadPath);
-				log('Update complete.');
-				updateEvents.emit('update-downloaded');
-			}
-			else {
-				if (!verifiedHash) {
-					log('Hash check failed!', newHash);
-				}
-				if (!verifiedSignature) {
-					log('Signature check failed!');
-				}
-			}
-		}
-		else {
-			log('An update is already downloaded.');
-		}
-	}
-	else {
-		log('App is up to date.');
-	}
-
-	// Clean up old updates now that we have the latest version
-	let files = fs.readdirSync(dataPath, {withFileTypes: true});
-	for (let file of files) {
-		let filename = file.name;
-
-		// Delete temporary file
-		if (filename === 'obsidian.asar.tmp') {
-			await fs.promises.unlink(path.join(dataPath, filename));
-		}
-
-		// Delete all versions that aren't the latest version.
-		if (file.isFile() && filename.startsWith('obsidian-') && filename.endsWith('.asar')) {
-			let newVersion = extractVersion(filename);
-			// Make an exception for the current running version.
-			if (newVersion !== currentPackageVersion &&
-				newVersion !== latestVersion) {
-				await fs.promises.unlink(path.join(dataPath, filename));
-			}
-		}
-	}
-}
+// The desktop updater (update/runUpdate/downloadUpdate) was removed: it is
+// disabled on this port and its telemetry/verify logic is dead code here.
+// Obsidian updates ship as new HAPs built by scripts/update-obsidian.mjs.
 
 function loadApp(asarPath) {
 	// Execute asar content
@@ -476,89 +334,19 @@ function loadApp(asarPath) {
 	return false;
 }
 
-function extractVersion(filename) {
-	if (filename.startsWith('obsidian-') && filename.endsWith('.asar')) {
-		return filename.substring('obsidian-'.length, filename.length - '.asar'.length);
-	}
-	return null;
-}
-
-function parseVersion(string) {
-	if (!string) {
-		return null;
-	}
-	let valid = true;
-	let parts = string.split('.').map((part) => {
-		part = parseInt(part);
-		if (isNaN(part)) {
-			valid = false;
-		}
-		return part;
-	});
-	if (valid) {
-		return parts;
-	}
-	return null;
-}
-
-function isMoreRecent(version1, version2) {
-	let length = Math.min(version1.length, version2.length);
-	for (let i = 0; i < length; i++) {
-		if (version1[i] < version2[i]) {
-			return true;
-		}
-		if (version1[i] > version2[i]) {
-			return false;
-		}
-	}
-	if (version1.length < version2.length) {
-		return true;
-	}
-	if (version1.length > version2.length) {
-		return false;
-	}
-	return false;
-}
-
-function isV2MoreRecent(v1, v2) {
-	let version1 = parseVersion(v1);
-	let version2 = parseVersion(v2);
-	if (!version2) {
-		return false;
-	}
-	if (!version1) {
-		return true;
-	}
-	return isMoreRecent(version1, version2);
-}
-
-function httpGet(url) {
-	return httpGetBinary(url).then(buffer => buffer.toString('utf8'));
-}
-
-function httpGetBinary(url) {
-	return new Promise((resolve, reject) => {
-		let request = net.request({
-			method: 'GET',
-			url: url,
-			redirect: 'follow',
-		});
-		request.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.183 Safari/537.36');
-		request.on('login', (authInfo, callback) => callback());
-		request.on('error', reject);
-		request.on('response', (res) => {
-			let data = [];
-			res.on('data', (chunk) => data.push(chunk));
-			res.on('end', () => resolve(Buffer.concat(data)));
-		})
-		request.end();
-	});
-}
-
 // Source: https://github.com/electron/electron/blob/19954126e08c67022b89a886cadb10471ac853ae/lib/browser/init.ts#L20
 process.on('uncaughtException', function (error) {
 	// Don't emit errors for updater
 	if (error.message && error.message.indexOf('net::ERR') !== -1) {
+		console.error('Suppressed network error:', error && error.stack);
+		return;
+	}
+
+	// Accessing an already-destroyed BrowserWindow/WebContents is a benign
+	// shutdown race (e.g. an IPC handler running while its window closes).
+	// Log it and keep the app alive instead of showing the error dialog.
+	if (error.message && error.message.indexOf('Object has been destroyed') !== -1) {
+		console.error('Suppressed destroyed-object error:', error && error.stack);
 		return;
 	}
 
@@ -577,56 +365,18 @@ process.on('uncaughtException', function (error) {
 });
 
 // Actual startup routine
-setInterval(queueUpdate, 60 * 60 * 1000);
-
+// Load the Obsidian app bundled with this HAP. Side-loading obsidian-*.asar
+// from userData was removed for security: those files cannot be verified
+// against the pinned distribution signature (which covers the compressed
+// archive), so anything with userData write access could otherwise gain
+// persistent main-process code execution. Use scripts/update-obsidian.mjs
+// to rebuild the bundled asar instead.
 let asarPath = path.join(APP_PATH, 'obsidian.asar');
-let updatedAsarPath = '';
-let updatedAsarVersion = '';
-
-// Check if we have an updated asar to replace the built-in one
-try {
-	let candidateFile = '';
-	let version = '';
-	let stat = fs.statSync(dataPath);
-	if (stat.isDirectory()) {
-		let files = fs.readdirSync(dataPath, {withFileTypes: true});
-		for (let file of files) {
-			let filename = file.name;
-			if (file.isFile() && filename.startsWith('obsidian-') && filename.endsWith('.asar')) {
-				let newVersion = extractVersion(filename);
-				if (isV2MoreRecent(version, newVersion)) {
-					candidateFile = filename;
-					version = newVersion;
-				}
-			}
-		}
-	}
-
-	// We found an updated asar
-	if (isV2MoreRecent(app.getVersion(), version)) {
-		updatedAsarPath = path.join(dataPath, candidateFile);
-		updatedAsarVersion = version;
-	}
-} catch (e) {
-	if (e.code !== 'ENOENT') {
-		console.error(e);
-	}
-}
-
-let success = false;
-if (updatedAsarPath) {
-	success = loadApp(updatedAsarPath);
-	currentPackageVersion = updatedAsarVersion;
-	log('Loaded updated app package', updatedAsarPath);
-}
-
-if (!success) {
-	success = loadApp(asarPath);
+let success = loadApp(asarPath);
+if (success) {
 	log('Loaded main app package', asarPath);
-}
-
-if (!success) {
-	log('Failed to load both app packages.');
+} else {
+	log('Failed to load app package.');
 }
 
 queueUpdate();
