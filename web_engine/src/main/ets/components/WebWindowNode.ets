@@ -37,6 +37,8 @@ import { MultiInputAdapter } from '../adapter/MultiInputAdapter';
 import { typeNode as TypedNode, NodeController, FrameNode } from '@ohos.arkui.node';
 import { DragParamManager } from '../common/DragParamManager';
 import { window } from '@kit.ArkUI';
+import { EngineFlags } from '../utils/EngineFlags';
+import { SurfaceReady } from '../utils/SurfaceReady';
 
 interface ComponentConfig {
   moduleName: string,
@@ -91,9 +93,14 @@ class WindowNodeController extends NodeController {
       .renderFit(RenderFit.TOP_LEFT)
       .onLoad(() => {
         LogUtil.info(TAG, 'onLoad xComponentId:' + this.config.xComponentId);
-        this.setDefaultBounds();
-        let vec_args = this.buildArgs();
-        this.config.nativeContext.runBrowser(vec_args);
+        // The engine reads the surface size once at browser start; starting
+        // here directly races the first layout pass and latches 0x0 (see
+        // SurfaceReady). Wait for a real surface, then start.
+        SurfaceReady.whenReady(() => this.xComponentController.getXComponentSurfaceRect(), () => {
+          this.setDefaultBounds();
+          let vec_args = this.buildArgs();
+          this.config.nativeContext.runBrowser(vec_args);
+        });
       })
     node.appendChild(this.xComponent);
     return node;
@@ -113,6 +120,8 @@ class WindowNodeController extends NodeController {
         height: prop.windowRect.height
       }
 
+      // The system bars stay visible and system-managed, so drawableRect is
+      // the authoritative content area and must be passed through as-is.
       let drawableRect: WindowBound = {
         left: prop.drawableRect.left,
         top: prop.drawableRect.top,
@@ -133,6 +142,9 @@ class WindowNodeController extends NodeController {
     }
     let resDir = '--bundle-installation-dir=' + getContext().resourceDir;
     let vec_args = [override_ua, resDir, default_uri];
+    EngineFlags.getFlags(getContext().resourceDir).forEach((flag: string) => {
+      vec_args.push(flag);
+    });
     return vec_args;
   }
 }

@@ -1,0 +1,6 @@
+{
+	"comment": "OHSidian engine tuning flags (Chromium switches). touchSlopDistance: tap tolerance, larger = taps register more easily (try 8~48 if buttons are hard to press). forceDeviceScaleFactor: 0 = follow engine default, try 1.25/1.5 if the whole UI is too small on your tablet. extraFlags: raw Chromium switches appended verbatim.",
+	"touchSlopDistance": 16,
+	"forceDeviceScaleFactor": 0,
+	"extraFlags": []
+}

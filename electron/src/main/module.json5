@@ -41,6 +41,19 @@
               "ohos.want.action.viewData"
             ],
             "uris": []
+          },
+          {
+            // Register the obsidian:// scheme so the system/browser can hand
+            // OAuth deep-link callbacks (e.g. Remotely Save / 坚果云 login)
+            // straight back to this app.
+            "actions": [
+              "ohos.want.action.viewData"
+            ],
+            "uris": [
+              {
+                "scheme": "obsidian"
+              }
+            ]
           }
         ],
       },

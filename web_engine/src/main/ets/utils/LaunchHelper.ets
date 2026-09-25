@@ -46,10 +46,51 @@ export default class LaunchHelper {
         return false;
       }
       context.startAbility(want, options)
+        .then(() => {
+          LogUtil.info(TAG, `excute success`);
+        })
         .catch((error: BusinessError) => {
-        LogUtil.error(TAG, `excute failed. Cause: ${JSON.stringify(error)}`);
-        return false;
-      });
+          LogUtil.error(TAG, `excute failed. Cause: ${JSON.stringify(error)}`);
+          // This WMS build rejects parts of the full option set with 16000067
+          // ("The StartOptions check failed") - observed even with valid
+          // geometry, which points at the processMode/startupVisibility pair.
+          // Retry ladder: geometry-only StartOptions (keeps the intended size
+          // and placement), then a bare want (system-default placement).
+          if (error.code === 16000067) {
+            let reduced: StartOptions = {};
+            if (options.windowLeft !== undefined) {
+              reduced.windowLeft = options.windowLeft;
+            }
+            if (options.windowTop !== undefined) {
+              reduced.windowTop = options.windowTop;
+            }
+            if (options.windowWidth !== undefined) {
+              reduced.windowWidth = options.windowWidth;
+            }
+            if (options.windowHeight !== undefined) {
+              reduced.windowHeight = options.windowHeight;
+            }
+            if (options.displayId !== undefined) {
+              reduced.displayId = options.displayId;
+            }
+            LogUtil.warn(TAG, 'retrying with geometry-only StartOptions');
+            context.startAbility(want, reduced)
+              .then(() => {
+                LogUtil.info(TAG, `geometry-only retry succeeded`);
+              })
+              .catch((retryError: BusinessError) => {
+                LogUtil.error(TAG, `geometry-only retry failed: ${JSON.stringify(retryError)} - launching bare`);
+                context.startAbility(want)
+                  .then(() => {
+                    LogUtil.info(TAG, `bare retry succeeded`);
+                  })
+                  .catch((bareError: BusinessError) => {
+                    LogUtil.error(TAG, `bare launch failed. Cause: ${JSON.stringify(bareError)}`);
+                  });
+              });
+          }
+          return false;
+        });
     } catch (exception) {
       LogUtil.error(TAG, `excute failed exception. Cause: ${JSON.stringify(exception)}`);
       return false;

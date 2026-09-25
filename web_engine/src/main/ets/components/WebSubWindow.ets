@@ -34,6 +34,7 @@ import Inject from '../common/InjectModule';
 import LogUtil from '../utils/LogUtil';
 import { MultiInputAdapter } from '../adapter/MultiInputAdapter';
 import { DragParamManager } from '../common/DragParamManager';
+import { SurfaceReady } from '../utils/SurfaceReady';
 
 @Component
 export struct WebSubWindow {
@@ -53,6 +54,7 @@ export struct WebSubWindow {
   private dragDropAdapter: DragDropAdapter = Inject.get(DragDropAdapter);
   private multiInputAdapter: MultiInputAdapter = Inject.get(MultiInputAdapter);
   private dragParamManager = Inject.get(DragParamManager);
+  private xComponentController: XComponentController = new XComponentController();
 
   aboutToAppear(): void {
     this.dragParamManager.addDragContextData({
@@ -69,7 +71,8 @@ export struct WebSubWindow {
     XComponent({
       id: this.MODULE_NAME,
       type: XComponentType.SURFACE,
-      libraryname: this.LIBRARY_NAME
+      libraryname: this.LIBRARY_NAME,
+      controller: this.xComponentController
     })
       .backgroundColor(this.params.initColorRgb)
       .focusable(true)
@@ -115,7 +118,14 @@ export struct WebSubWindow {
       })
       .onLoad(() => {
         LogUtil.info(WebSubWindow.TAG, 'onLoad xComponentId:' + this.xComponentId);
-        this.callback(true, this.xComponentId);
+        // The engine attaches the popup's browser right after this callback
+        // and reads the XComponent surface size once - if the first layout
+        // pass has not run yet it latches 0x0 and the popup renders blank
+        // (the exact race that broke the main window before SurfaceReady).
+        // Report readiness only once the surface has a real size.
+        SurfaceReady.whenReady(() => this.xComponentController.getXComponentSurfaceRect(), () => {
+          this.callback(true, this.xComponentId);
+        });
       })
       .id(this.XCOMPONENT_NAME)
   }

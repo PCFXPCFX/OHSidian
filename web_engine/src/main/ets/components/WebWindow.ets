@@ -37,6 +37,8 @@ import JsBindingUtils from '../utils/JsBindingUtils';
 import { MultiInputAdapter } from '../adapter/MultiInputAdapter';
 import { DragParamManager } from '../common/DragParamManager';
 import { window } from '@kit.ArkUI';
+import { EngineFlags } from '../utils/EngineFlags';
+import { SurfaceReady } from '../utils/SurfaceReady';
 
 import { CommandType } from '../common/Constants';
 import { IMessageBoxParams } from '../adapter/DialogAdapter';
@@ -90,11 +92,16 @@ class WindowNodeController extends NodeController {
       .backgroundColor(Color.Transparent)
       .renderFit(RenderFit.TOP_LEFT)
       .onLoad(() => {
-        this.setDefaultBounds();
-        let vec_args = this.buildArgs();
-        this.config.nativeContext.runBrowser(vec_args);
-        if (this.config.uri)
-          this.config.nativeContext.ExecuteCommand(CommandType.kNewWindow, { url: this.config.uri, is_sync: true });
+        // The engine reads the surface size once at browser start; starting
+        // here directly races the first layout pass and latches 0x0 (see
+        // SurfaceReady). Wait for a real surface, then start.
+        SurfaceReady.whenReady(() => this.xComponentController.getXComponentSurfaceRect(), () => {
+          this.setDefaultBounds();
+          let vec_args = this.buildArgs();
+          this.config.nativeContext.runBrowser(vec_args);
+          if (this.config.uri)
+            this.config.nativeContext.ExecuteCommand(CommandType.kNewWindow, { url: this.config.uri, is_sync: true });
+        });
       })
     node.appendChild(this.xComponent);
     return node;
@@ -112,6 +119,8 @@ class WindowNodeController extends NodeController {
         height: prop.windowRect.height
       }
 
+      // The system bars stay visible and system-managed, so drawableRect is
+      // the authoritative content area and must be passed through as-is.
       let drawableRect: WindowBound = {
         left: prop.drawableRect.left,
         top: prop.drawableRect.top,
@@ -133,6 +142,9 @@ class WindowNodeController extends NodeController {
     let vec_args = [resDir];
     this.config.electronRelaunchArgs.forEach((arg: string) => {
       vec_args.push(arg);
+    });
+    EngineFlags.getFlags(getContext().resourceDir).forEach((flag: string) => {
+      vec_args.push(flag);
     });
     return vec_args;
   }

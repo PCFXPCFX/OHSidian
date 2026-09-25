@@ -36,6 +36,8 @@ import JsBindingUtils from '../utils/JsBindingUtils';
 import { MultiInputAdapter } from '../adapter/MultiInputAdapter';
 import { DragParamManager } from '../common/DragParamManager';
 import { UIExtensionContentSession } from '@kit.AbilityKit';
+import { EngineFlags } from '../utils/EngineFlags';
+import { SurfaceReady } from '../utils/SurfaceReady';
 
 @Component
 export struct WebEmbeddedWindow {
@@ -51,6 +53,7 @@ export struct WebEmbeddedWindow {
   private nativeContext: NativeContext = JsBindingUtils.getNativeContext(ContextType.kMainProcess);
   private multiInputAdapter: MultiInputAdapter = Inject.get(MultiInputAdapter);
   private dragParamManager = Inject.get(DragParamManager);
+  private xComponentController: XComponentController = new XComponentController();
 
   aboutToAppear(): void {
     this.dragParamManager.addDragContextData({
@@ -67,7 +70,8 @@ export struct WebEmbeddedWindow {
     XComponent({
       id: this.MODULE_NAME,
       type: XComponentType.SURFACE,
-      libraryname: this.LIBRARY_NAME
+      libraryname: this.LIBRARY_NAME,
+      controller: this.xComponentController
     })
       .focusable(true)
       .defaultFocus(true)
@@ -123,9 +127,13 @@ export struct WebEmbeddedWindow {
       .onLoad(() => {
         LogUtil.info(WebEmbeddedWindow.TAG, 'onLoad xComponentId:' + this.xComponentId);
         if (this.xComponentId === ConfigData.DEFAULT_WINDOW_ID) {
-          this.setDefaultBounds();
-          let vec_args = this.buildArgs();
-          this.nativeContext.runBrowser(vec_args);
+          // The engine reads the surface size once at browser start; defer to
+          // a real surface (see SurfaceReady) to avoid the 0x0 latch.
+          SurfaceReady.whenReady(() => this.xComponentController.getXComponentSurfaceRect(), () => {
+            this.setDefaultBounds();
+            let vec_args = this.buildArgs();
+            this.nativeContext.runBrowser(vec_args);
+          });
         } else {
           this.nativeContext.ExecuteCommand(
             CommandType.kNewWidget,
@@ -174,6 +182,9 @@ export struct WebEmbeddedWindow {
     }
     let resDir = '--bundle-installation-dir=' + getContext().resourceDir;
     let vec_args = [override_ua, resDir, default_uri];
+    EngineFlags.getFlags(getContext().resourceDir).forEach((flag: string) => {
+      vec_args.push(flag);
+    });
     return vec_args;
   }
 }

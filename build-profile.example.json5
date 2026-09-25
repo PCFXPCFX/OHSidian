@@ -19,6 +19,12 @@
       {
         "name": "default",
         "signingConfig": "default",
+        // compatibleSdkVersion 保持 6.0.2(22):保证 HAP 仍能装在现有系统上。
+        // targetSdkVersion 可按需提升(需对应版本的 DevEco Studio / SDK):
+        //   API 23 = "6.1.0(23)"  (DevEco Studio 6.1.0)
+        //   API 24 = "6.1.1(24)"  (DevEco Studio 6.1.1)
+        // 注意:闭源中间层(libelectron.so 等)是按 API 22 验证的,
+        // 提升 target 后务必真机回归测试窗口/沉浸式行为。
         "compatibleSdkVersion": "6.0.2(22)",
         "targetSdkVersion": "6.0.2(22)",
         "runtimeOS": "HarmonyOS",
