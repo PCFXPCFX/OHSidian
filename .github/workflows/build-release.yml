@@ -1,0 +1,180 @@
+# Builds the OHSidian HAP in CI and publishes it as a GitHub Release.
+#
+# How it works
+#   - The build needs the official HarmonyOS command-line-tools (they bundle
+#     hvigor, ohpm and the HarmonyOS SDK). Huawei rotates the download URL
+#     every release, so the URL is resolved in this order:
+#       1. workflow_dispatch input `cli_tools_url`
+#       2. repository variable  vars.HARMONYOS_CLI_URL   (Settings > Variables)
+#       3. the fallback default below (update it when Huawei ships a new build)
+#     Get the current "Command Line Tools" linux-x64 zip URL from
+#     https://developer.huawei.com/consumer/cn/download/ and put it into the
+#     repository variable for reproducible builds.
+#   - build-profile.json5 is gitignored (it holds local signing credentials);
+#     CI generates it from build-profile.example.json5 and strips the
+#     placeholder signing config, producing an UNSIGNED HAP.
+#   - Optional signing: if the secrets listed in docs/RELEASE.md are set, the
+#     workflow writes them to .ci-sign/ and injects a real signingConfig, so
+#     the released HAP is installable out of the box. Without the secrets the
+#     unsigned HAP is published and users sign it themselves (see docs).
+#
+# Outputs: .hap artifact + SHA256SUMS.txt + MD5SUMS.txt, attached to a GitHub
+# Release when the workflow runs on a v* tag push.
+
+name: build-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      cli_tools_url:
+        description: 'HarmonyOS command-line-tools linux-x64 zip URL (optional override)'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'v*'
+
+# Fallback only - prefer vars.HARMONYOS_CLI_URL in repository settings.
+env:
+  CLI_URL_FALLBACK: 'https://developer.huawei.com/consumer/cn/download/'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # required to create the GitHub Release
+    steps:
+      - name: Checkout (with LFS for libelectron.so / obsidian.asar)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Resolve command-line-tools URL
+        id: cli
+        run: |
+          URL="${{ inputs.cli_tools_url || vars.HARMONYOS_CLI_URL }}"
+          if [ -z "$URL" ]; then
+            echo "::warning::No HARMONYOS_CLI_URL configured - the fallback is a download PAGE, not a zip. Set the repository variable for CI to work."
+            URL="${{ env.CLI_URL_FALLBACK }}"
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Install HarmonyOS command-line-tools
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/ctl"
+          # Huawei direct links carry a signed query string
+          # (?HW-CC-KV=...&HW-CC-Sign=...) - the download must use the FULL
+          # URL, while the archive type is detected from the PATH part.
+          URL_FULL="${{ steps.cli.outputs.url }}"
+          URL_PATH="${URL_FULL%%\?*}"
+          case "$URL_PATH" in
+            *.tar.gz|*.tgz)
+              curl -fL --retry 3 -o "$RUNNER_TEMP/ctl.tar.gz" "$URL_FULL"
+              tar -xzf "$RUNNER_TEMP/ctl.tar.gz" -C "$RUNNER_TEMP/ctl"
+              ;;
+            *.zip)
+              curl -fL --retry 3 -o "$RUNNER_TEMP/ctl.zip" "$URL_FULL"
+              unzip -q "$RUNNER_TEMP/ctl.zip" -d "$RUNNER_TEMP/ctl"
+              ;;
+            *)
+              echo "::error::Cannot detect archive type from HARMONYOS_CLI_URL path: $URL_PATH (expected .tar.gz or .zip)"
+              exit 1
+              ;;
+          esac
+          # The package may extract into commandline-tools/ directly or
+          # nested; locate the root that owns bin/hvigorw and sdk/.
+          HVIGORW_PATH="$(find "$RUNNER_TEMP/ctl" -maxdepth 4 -name hvigorw -type f | head -1)"
+          CTL_ROOT="$(dirname "$(dirname "$HVIGORW_PATH")")"
+          echo "CTL_ROOT=$CTL_ROOT" >> "$GITHUB_ENV"
+          echo "$CTL_ROOT/bin" >> "$GITHUB_PATH"
+          echo "DEVECO_SDK_HOME=$CTL_ROOT/sdk" >> "$GITHUB_ENV"
+
+      - name: Generate build-profile.json5 (unsigned, target API 24)
+        run: |
+          node scripts/ci/gen-build-profile.js
+
+      - name: Optional signing setup (only if secrets are configured)
+        env:
+          SIGN_STORE_P12: ${{ secrets.SIGN_STORE_P12 }}         # base64 .p12
+          SIGN_CERT_CER: ${{ secrets.SIGN_CERT_CER }}           # base64 .cer
+          SIGN_PROFILE_P7B: ${{ secrets.SIGN_PROFILE_P7B }}     # base64 .p7b
+          SIGN_KEY_ALIAS: ${{ secrets.SIGN_KEY_ALIAS }}
+          SIGN_STORE_PASSWORD: ${{ secrets.SIGN_STORE_PASSWORD }}
+          SIGN_KEY_PASSWORD: ${{ secrets.SIGN_KEY_PASSWORD }}
+        run: |
+          if [ -z "$SIGN_STORE_P12" ] || [ -z "$SIGN_CERT_CER" ] || [ -z "$SIGN_PROFILE_P7B" ]; then
+            echo "Signing secrets not set - building an UNSIGNED HAP (users sign it themselves, see docs/RELEASE.md)."
+            exit 0
+          fi
+          mkdir -p .ci-sign
+          echo "$SIGN_STORE_P12" | base64 -d > .ci-sign/keystore.p12
+          echo "$SIGN_CERT_CER" | base64 -d > .ci-sign/app-release.cer
+          echo "$SIGN_PROFILE_P7B" | base64 -d > .ci-sign/profile-release.p7b
+          SIGNING_JSON="$(node -e '
+            const name = "ci";
+            console.log(JSON.stringify({
+              name,
+              type: "HarmonyOS",
+              material: {
+                certpath: ".ci-sign/app-release.cer",
+                keyAlias: process.env.SIGN_KEY_ALIAS,
+                keyPassword: process.env.SIGN_KEY_PASSWORD,
+                profile: ".ci-sign/profile-release.p7b",
+                signAlg: "SHA256withECDSA",
+                storeFile: ".ci-sign/keystore.p12",
+                storePassword: process.env.SIGN_STORE_PASSWORD,
+              },
+            }));
+          ')"
+          export SIGNING_JSON
+          node scripts/ci/gen-build-profile.js
+
+      - name: Install ohpm dependencies
+        run: |
+          ohpm install --all
+
+      - name: Build HAP
+        run: |
+          hvigorw --mode module -p product=default assembleHap --no-daemon
+
+      - name: Collect HAP artifacts
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+          find . -path ./oh_modules -prune -o -name '*.hap' -print
+          find . -path ./oh_modules -prune -o -name '*.hap' -print | xargs -I{} cp {} dist/
+          ls -la dist/
+          cd dist
+          sha256sum *.hap | tee SHA256SUMS.txt
+          md5sum *.hap | tee MD5SUMS.txt
+
+      - name: Upload workflow artifact (every run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohsidian-hap
+          path: |
+            dist/*.hap
+            dist/SHA256SUMS.txt
+            dist/MD5SUMS.txt
+
+      - name: Create GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.hap
+            dist/SHA256SUMS.txt
+            dist/MD5SUMS.txt
