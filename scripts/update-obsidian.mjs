@@ -110,6 +110,9 @@ function isVersionLess(a, b) {
  *    engine never sets that variable. The mode-file poll runs at 400ms
  *    while an editor/input has focus (toolbar must follow the keyboard
  *    quickly) and 5s otherwise.
+ *  - Prefers HarmonyOS system fonts (HarmonyOS Sans) in the default font
+ *    stacks - the engine's SkFontMgr_OHOS exposes /system/fonts, so they
+ *    resolve; user-chosen fonts still override this.
  *  - Registers a command-palette command that cycles the override.
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
@@ -214,6 +217,23 @@ function applyWindowDecor(){
     }
   }catch(e){}
 }
+/* Prefer HarmonyOS system fonts for the default stacks. The engine's
+   Chromium reads /system/fonts via SkFontMgr_OHOS (verified in
+   libelectron.so), so "HarmonyOS Sans" resolves - but Obsidian's stock
+   --font-default is a desktop stack (Segoe UI/Roboto) that mostly misses
+   it. User-chosen fonts (--font-*-override) still win over this. */
+var FONT_STYLE_ID="ohsidian-system-fonts";
+function applySystemFonts(){
+  try{
+    var el=document.getElementById(FONT_STYLE_ID);
+    if(!el&&document.head){
+      el=document.createElement("style");
+      el.id=FONT_STYLE_ID;
+      el.textContent=':root{--font-default:"HarmonyOS Sans","HarmonyOS Sans SC","HarmonyOS Sans TC",ui-sans-serif,-apple-system,BlinkMacSystemFont,system-ui,"Segoe UI",Roboto,sans-serif;}';
+      document.head.appendChild(el);
+    }
+  }catch(e){}
+}
 /* IME height -> web content. The ArkTS layer publishes the keyboard height
    (css px) as cfg.keyboard; Obsidian's mobile formatting toolbar positions
    itself with top: calc(100vh - var(--keyboard-height) - toolbar-height)
@@ -296,10 +316,11 @@ var lastWant=null;
 try{lastWant=syncFromSystem(lastWant)}catch(e){}
 applySafeArea();
 applyWindowDecor();
+applySystemFonts();
 hookTrash();
 applyKeyboard();
 watchBodyStyles();
-document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor();hookTrash();applyKeyboard()});
+document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor();applySystemFonts();hookTrash();applyKeyboard()});
 pollTick();
 /* The touch-mode drawer exposes the vault switcher as a <select> whose
    options are rendered through an engine-native popup. That popup's render

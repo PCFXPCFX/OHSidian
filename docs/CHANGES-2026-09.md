@@ -1652,3 +1652,20 @@ queryDynamicIcons/selectDynamicIcon/disableDynamicIcon 接入命令面板。
   条目(云同步功能未上线,不再宣称);自动更新章节改写为本 Fork
   已关闭更新、升级走 Release;Fork 改进章节的图标描述同步;
   适配层清单/依赖说明中的 CloudSync 条目为代码事实描述,保留。
+
+### 第 49 轮(2026-09-26):接入系统字体(HarmonyOS Sans 优先)
+
+**机制实证**:libelectron.so 内含 SkFontMgr_OHOS、
+OH_Drawing_GetSystemFontConfigInfo、/system/fonts、HarmonyOS Sans——
+引擎 Chromium 已对接鸿蒙系统字体管理器,系统字体对 web 内容可见
+(引擎侧无需任何改动)。
+
+**问题**:Obsidian 的默认字体栈 `--font-default` 是桌面系
+(ui-sans-serif/Segoe UI/Roboto),在鸿蒙上基本落空;设置里
+override(用户自选字体)永远优先,但未设置时的默认渲染没吃到
+系统字体。
+
+**修复**(渲染层补丁):注入常驻样式,把 `--font-default` 改为
+"HarmonyOS Sans"/"HarmonyOS Sans SC"/"HarmonyOS Sans TC" 优先、
+原桌面栈兜底;等宽栈不动(CJK 由逐字回退处理)。用户在
+设置 → 外观里自选的字体仍然优先。
