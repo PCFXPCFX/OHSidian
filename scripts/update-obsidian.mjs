@@ -334,6 +334,63 @@ function hookVaultSelect(){
   }catch(e){}
 }
 hookVaultSelect();
+/* Migrate the current vault into a user-visible folder: HarmonyOS sandboxes
+   app files, so a vault inside userData (the quick-start default) and its
+   .trash can never be reached from 文件管理 or a PC. There is no API to
+   expose a sandbox directory to the system browser (fileShare only grants
+   access to specific apps); the system folder picker (DocumentViewPicker
+   FOLDER mode + FILE_ACCESS_PERSIST, wired through the engine's
+   showOpenDialog) grants access to real user storage instead. Copy every
+   file of the current vault there - including .trash - then open the copy. */
+function migrateVaultToVisibleFolder(){
+  try{
+    var v=window.app&&window.app.vault;
+    if(!v){try{new Notice("OHSidian: 仓库未就绪")}catch(e){}return}
+    var remote=require("@electron/remote");
+    if(!remote||!remote.dialog){try{new Notice("OHSidian: 无法调起文件夹选择器")}catch(e){}return}
+    remote.dialog.showOpenDialog({
+      properties:["openDirectory","createDirectory"],
+      buttonLabel:"迁移仓库到这里"
+    }).then(function(res){
+      try{
+        if(!res||!res.filePaths||!res.filePaths.length)return;
+        var target=res.filePaths[0];
+        var fsMod=require("fs"),pathMod=require("path");
+        var srcDir;
+        try{srcDir=v.adapter.getFullPath("/")}catch(e){}
+        if(!srcDir){try{new Notice("OHSidian: 无法定位仓库根目录")}catch(e){}return}
+        try{new Notice("OHSidian: 开始迁移仓库到 "+target)}catch(e){}
+        var copied=0;
+        var copyDir=function(s,d,cb){
+          fsMod.mkdir(d,{recursive:!0},function(){
+            fsMod.readdir(s,function(err,items){
+              if(err)return cb(err);
+              var pending=items.length,fail=null;
+              if(!pending)return cb(null);
+              var done=function(e2){fail=fail||e2;if(--pending===0)cb(fail)};
+              items.forEach(function(name){
+                var sp=pathMod.join(s,name),dp=pathMod.join(d,name);
+                fsMod.stat(sp,function(err2,st){
+                  if(err2)return done(err2);
+                  if(st.isDirectory()){copyDir(sp,dp,done)}
+                  else{fsMod.copyFile(sp,dp,function(e3){if(!e3)copied++;done(e3)})}
+                });
+              });
+            });
+          });
+        };
+        copyDir(srcDir,target,function(err){
+          if(err){try{new Notice("OHSidian: 迁移失败 "+err.message)}catch(e){}return}
+          try{new Notice("OHSidian: 已复制 "+copied+" 个文件,正在打开新仓库…")}catch(e){}
+          try{
+            var r=remote.ipcRenderer.sendSync("vault-open",target,!1);
+            if(r!==!0){try{new Notice("OHSidian: 打开新仓库返回 "+r)}catch(e){}}
+          }catch(e){try{new Notice("OHSidian: 打开新仓库失败 "+e.message)}catch(e2){}}
+        });
+      }catch(e){try{new Notice("OHSidian: 迁移失败 "+e.message)}catch(e2){}}
+    },function(){/* canceled by user */});
+  }catch(e){}
+}
 var install=function(app){
   if(!app||!app.commands||typeof app.commands.addCommand!=="function")return false;
   try{
@@ -350,6 +407,8 @@ var install=function(app){
         try{new Notice("OHSidian 触屏模式 → "+label+(saved?"":"(写入失败,重启后失效)"))}catch(e){}
         if(want!==null){lastWant=want;applyMobile(want,"手动切换")}
       }});
+    app.commands.addCommand({id:"ohsidian-vault-visible",name:"OHSidian: 迁移仓库到文件管理可见的位置",
+      callback:function(){migrateVaultToVisibleFolder()}});
     return true;
   }catch(e){return false}
 };

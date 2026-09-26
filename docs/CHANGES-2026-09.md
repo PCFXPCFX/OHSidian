@@ -1524,3 +1524,26 @@ var(--keyboard-height))}` 同样消费该变量。
 而事后直读完好——确认 createPackage 落盘与紧随的 rename/read 存在
 Windows 落盘竞争,后续脚本统一带重试验证。终态 vm 语法通过,
 keyboard/pollTick/hookTrash/drawer 全部在位。
+
+### 第 42 轮(2026-09-26):仓库与 .trash 的文件管理器可见性(迁移命令)
+
+**需求**:应用内仓库/垃圾桶(默认在应用沙箱 userData)无法被系统
+文件管理器访问。
+
+**机制结论(asar/引擎代码实证)**:
+- 鸿蒙沙箱是硬约束:应用私有目录无法暴露给系统文件管理器;
+  ohos.file.fileShare 只能对指定应用授权 URI,做不到"整体出现在
+  文件管理器"。
+- 正确姿势 = 把仓库放进**系统文件夹选择器授权的用户可见目录**:
+  DialogAdapter 已实现 DocumentViewPicker(FOLDER 模式)+ 
+  FILE_ACCESS_PERSIST 持久授权("下次打开无需重复授权"),选择器里
+  看到的位置与文件管理器同源,仓库及其 .trash 随之可见。
+
+**新增**:命令面板命令 "OHSidian: 迁移仓库到文件管理可见的位置"——
+调起系统文件夹选择器 → 把当前仓库全部文件(含 .trash、.obsidian 配置)
+递归复制到所选目录 → 经引擎 vault-open 打开新仓库。迁移为纯复制,
+原仓库不动(失败可重试,无数据风险)。
+
+**asar 原位替换第六次**:落盘竞争假象再次出现(重试 8 次内均读到
+截断内容,数秒后自愈)——后续此类脚本的重试窗口需拉长到秒级;
+终态直读 vm 语法通过,migrate/cmd/keyboard/trash 钩子全部在位。
