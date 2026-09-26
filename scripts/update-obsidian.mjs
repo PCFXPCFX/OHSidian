@@ -95,8 +95,9 @@ function isVersionLess(a, b) {
  *    by a MutationObserver so later writes by Obsidian are corrected.
  *  - windowDecor controls the title-bar layout: "system" = free window, the
  *    SYSTEM caption strip (name + min/max/close) is the title bar - hide the
- *    web .titlebar entirely and pad the body by cfg.caption so no content
- *    hides under the strip; "none" = fullscreen, no caption involved.
+ *    web .titlebar entirely (the engine viewport already follows
+ *    drawableRect below the strip, so no extra padding is applied);
+ *    "none" = fullscreen, no caption involved.
  *  - Routes every file deletion to Obsidian's own .trash folder: HarmonyOS
  *    exposes no system recycle-bin API to third-party apps, so the engine's
  *    "system trash" bridge either fails or (worst case) unlinks permanently.
@@ -169,20 +170,17 @@ function applySafeArea(){
   try{
     var b=document.body;
     if(!b)return;
-    var cfg=readMode();
-    var ins=(cfg&&cfg.insets)?{top:+cfg.insets.top||0,bottom:+cfg.insets.bottom||0}:{top:0,bottom:0};
+    var ins=readInsets();
     var want={"--safe-area-inset-top":ins.top+"px","--safe-area-inset-bottom":ins.bottom+"px",
       "--safe-area-inset-left":"0px","--safe-area-inset-right":"0px"};
     for(var k in want){
       if(b.style.getPropertyValue(k)!==want[k]){b.style.setProperty(k,want[k])}
     }
-    /* Free window: the system caption strip (name + min/max/close) overlays
-       the window top; pad the body so no content hides under it. It is the
-       only title bar that exists in every layout. Fullscreen: no caption -
-       the status-bar avoidance runs through the CSS vars above instead. */
-    var cap=(cfg&&cfg.windowDecor==="system")?(+cfg.caption||0):0;
-    var pt=cap>0?cap+"px":"";
-    if(b.style.paddingTop!==pt){b.style.paddingTop=pt}
+    /* NO body padding for the free-window caption strip: the engine's
+       viewport already follows drawableRect, which excludes the system
+       caption (that is the whole point of setWindowDecorVisible(true)).
+       Padding here would avoid the strip twice and leave a blank body
+       strip between the caption and the content. */
   }catch(e){}
 }
 function watchBodyStyles(){

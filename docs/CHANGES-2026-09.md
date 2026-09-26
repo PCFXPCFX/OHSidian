@@ -1547,3 +1547,26 @@ keyboard/pollTick/hookTrash/drawer 全部在位。
 **asar 原位替换第六次**:落盘竞争假象再次出现(重试 8 次内均读到
 截断内容,数秒后自愈)——后续此类脚本的重试窗口需拉长到秒级;
 终态直读 vm 语法通过,migrate/cmd/keyboard/trash 钩子全部在位。
+
+### 第 43 轮(2026-09-26):窗口模式标题栏与内容之间的白条(双重避让)
+
+**现象**:触摸→窗口模式切换后,系统标题栏与内容之间出现白色空条;
+窗口模式直接启动则没有。
+
+**根因(asar/ArkTS 代码实证)**:双重避让。引擎视口在 PC 模式下取
+drawableRect——系统标题栏(setWindowDecorVisible(true) 后)已从可绘制
+区排除,内容天然从标题条下方开始;而渲染层又给 body 加了
+padding-top=caption 高度 → 内容再让一次,两次避让之间露出 body 白底。
+"直接打开无白条"佐证:windowTitleButtonRectChange 首个事件发生在
+监听器注册之前(该回调按引擎要求必须注册于 loadContent 之后),
+captionCss 保持 0,未加 padding。
+
+**修复**:移除渲染层的 body padding(applySafeArea 回归纯 insets 职责);
+caption 字段保留发布(诊断/后续用途),渲染层不再消费。标题条避让
+完全交给引擎 drawableRect 链路。
+
+**asar 原位替换第七次**:确认 @electron/asar 模块在**同一进程内缓存
+归档头**——rename 后同进程 extractFile 走旧头读新文件,必然截断假象
+(本轮重试 20 秒仍失败即为确定性证据);**新进程首次读取才是可信
+验证**。终态直读 vm 语法通过,padding 移除、migrate/keyboard/drawer
+钩子全部在位。
