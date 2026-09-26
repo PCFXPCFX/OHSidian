@@ -1640,3 +1640,15 @@ queryDynamicIcons/selectDynamicIcon/disableDynamicIcon 接入命令面板。
   HAP)→ 创建单一 Release。单发布作业避免两分支竞争同一 tag。
 - 原 app_icon 手动输入移除(矩阵固定两分支);ohsidian-gem/obsidian
   变体文件保留在 icons/ 目录,需要时把矩阵扩成三/四分支即可。
+
+### 第 48 轮(2026-09-26):图标变体更名 + Release 双版本说明 + README 刷新
+
+- 图标变体 `ipados` 更名为 `obsidian`(正常 Obsidian 官方图标,
+  App Store 512×512 资产);矩阵改为 [ohsidian, obsidian];
+  GitHub 头像版(与之几乎相同)移除,避免同质变体;
+- Release 发布说明:下载表格按文件名区分"OHsidian 图标版 /
+  Obsidian 官方图标版",模板正文说明两版本功能一致、按喜好选择;
+- README 刷新:删除华为云同步章节、AGC 配置小节、TOC/简介相关
+  条目(云同步功能未上线,不再宣称);自动更新章节改写为本 Fork
+  已关闭更新、升级走 Release;Fork 改进章节的图标描述同步;
+  适配层清单/依赖说明中的 CloudSync 条目为代码事实描述,保留。

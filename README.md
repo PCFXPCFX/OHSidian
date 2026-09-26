@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  在 HarmonyOS 设备上运行你熟悉的 Obsidian 笔记体验 —— 支持多窗口、华为账号一键登录、华为云同步以及完整的系统级原生适配。
+  在 HarmonyOS 设备上运行你熟悉的 Obsidian 笔记体验 —— 支持多窗口、华为账号一键登录以及完整的系统级原生适配。
 </p>
 
 <p align="center">
@@ -29,7 +29,6 @@
 - [功能特性](#功能特性)
 - [模块结构](#模块结构)
 - [适配层](#适配层)
-- [华为云同步](#华为云同步)
 - [构建与运行](#构建与运行)
 - [项目结构](#项目结构)
 - [依赖说明](#依赖说明)
@@ -96,7 +95,7 @@
 
 - `obsidian://` 深链桥接:Remotely Save 等插件的浏览器 OAuth 登录可用;
 - GitHub Actions 全自动构建:Release 附 SHA-256/MD5,可选签名、
-  图标变体(ohsidian / ohsidian-gem / obsidian / ipados)、
+  同版双图标发布(OHsidian 图标 / Obsidian 官方图标)与可选变体、
   SDK 组合与构建模式;
 - **关闭 release 构建的 ArkGuard 混淆**——原版以 release 模式构建会
   因混淆在启动时闪退,这是本 Fork 能正常分发的关键修复。
@@ -161,7 +160,6 @@
 ### 华为生态集成
 
 - **华为账号一键登录** —— 通过 Account Kit 的 `LoginWithHuaweiIDButton` 实现无感认证
-- **华为云同步** —— 基于 Cloud Foundation Kit 实现 Vault 的云端备份与多端同步
 - **状态栏扩展** —— 通过 `StatusBarViewExtensionAbility` 常驻系统状态栏
 
 ### 系统级原生适配
@@ -178,9 +176,10 @@
 
 ### 自动更新
 
-- 检测 `obsidian-{version}.asar` 更新包
-- RSA-SHA256 签名校验 + SHA256 哈希校验
-- 替换 asar 后热加载新版本
+- 本 Fork **关闭了 Obsidian 的自动更新**：鸿蒙分发走本仓库 Release，
+  引擎内的更新链路（检测 `obsidian-{version}.asar` 更新包、RSA 校验、
+  热加载）保留但不会触发，避免无意义的联网探测；
+- 版本升级：下载新版本 Release 包覆盖安装即可。
 
 ---
 
@@ -314,56 +313,6 @@ JsBindingUtils.bindFunction("CloudSync.listCloudFiles", cloudSyncAdapter.listClo
 
 ---
 
-## 华为云同步
-
-OHsidian 实现了基于华为 Cloud Foundation Kit 的 Vault 云同步功能。
-
-### 同步架构
-
-```
-┌──────────────┐     ┌──────────────────┐     ┌─────────────────────┐
-│   Obsidian   │────▶│  CloudSyncAdapter │────▶│  CloudFoundation Kit │
-│   写入触发    │     │  (ArkTS 适配层)    │     │  (华为云存储)         │
-└──────────────┘     └──────────────────┘     └─────────────────────┘
-                                                   │
-                                             ┌─────▼──────────┐
-                                             │  Bucket:        │
-                                             │  ohsidian-vault │
-                                             │  -sync-75ued    │
-                                             └────────────────┘
-```
-
-### 存储结构
-
-```
-{userId}/
-  └── vaults/
-      └── {vaultName}/
-          ├── file1.md
-          ├── attachments/
-          │   └── image.png
-          └── ...
-```
-
-### 同步操作
-
-| 操作 | 说明 |
-|------|------|
-| `uploadFile` | 上传本地文件到云端 |
-| `downloadFile` | 从云端下载文件 |
-| `listCloudFiles` | 列出云端文件列表 |
-| `deleteCloudFile` | 删除云端文件 |
-| `getSyncStatus` | 获取同步状态 |
-
-### 登录流程
-
-1. Obsidian 侧写入 `.hcs-login-pending` 标记文件
-2. HarmonyOS 侧通过 3 秒轮询检测该标记
-3. 弹出 `hcs-login` 对话框，显示华为账号一键登录按钮
-4. 用户授权后，userId 写入 `hcs-user.json` 供 Obsidian 侧读取
-5. 后续同步操作基于该 userId 构建云端路径
-
----
 
 ## 构建与运行
 
@@ -421,14 +370,6 @@ hvigorw assembleHap
 }
 ```
 
-### 华为 AGC 配置
-
-1. 在 [AppGallery Connect](https://developer.huawei.com/consumer/cn/service/josp/agc/) 创建应用
-2. 下载 `agconnect-services.json`
-3. 放置到 `electron/src/main/resources/rawfile/agconnect-services.json`
-4. 开启 Account Kit 和 Cloud Storage 服务
-
----
 
 ## 项目结构
 

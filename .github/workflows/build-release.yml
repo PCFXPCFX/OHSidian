@@ -64,7 +64,7 @@ jobs:
       fail-fast: false
       matrix:
         # One build per launcher icon; both HAPs attach to the same Release.
-        icon: [ohsidian, ipados]
+        icon: [ohsidian, obsidian]
     steps:
       - name: Checkout (with LFS for libelectron.so / obsidian.asar)
         uses: actions/checkout@v5
@@ -159,7 +159,7 @@ jobs:
           # variant comes from the build matrix.
           ICON="${{ matrix.icon }}"
           case "$ICON" in
-            ohsidian|ohsidian-gem|obsidian|ipados) ;;
+            ohsidian|ohsidian-gem|obsidian) ;;
             *) echo "::error::Unknown app_icon variant: $ICON"; exit 1 ;;
           esac
           SRC="icons/${ICON}.png"
@@ -301,7 +301,11 @@ jobs:
             echo "| 文件 | 说明 |"
             echo "| --- | --- |"
             for f in *.hap; do
-              echo "| \`$f\` | HarmonyOS HAP 安装包 |"
+              case "$f" in
+                *-obsidian-*) desc="HarmonyOS HAP 安装包(Obsidian 官方图标版)" ;;
+                *)            desc="HarmonyOS HAP 安装包(OHsidian 图标版)" ;;
+              esac
+              echo "| \`$f\` | $desc |"
             done
           } > "$HAP_TABLE"
           sed -e "s/{{VERSION}}/$VERSION/g" \
