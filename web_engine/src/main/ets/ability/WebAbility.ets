@@ -59,6 +59,10 @@ export class WebAbility extends WebBaseAbility {
   // onWindowStageCreate. Drives the forced-maximize policy and the touch-mode
   // file.
   private pcModeEnabled: boolean = false;
+  // Free-window caption strip height in CSS px (1 vp == 1 css px), tracked
+  // from windowTitleButtonRectChange and published through the mode file so
+  // the web content can avoid the strip. 0 = fullscreen / no caption.
+  private captionCss: number = 0;
   private mainWindow: window.Window | undefined = undefined;
 
   // Display-mode state machine (see updateWindowPcmodeSwitchStatus):
@@ -129,16 +133,14 @@ export class WebAbility extends WebBaseAbility {
     // Physical px -> CSS px (Chromium maps 1 css px to one density pixel).
     const topCss: number = Math.round(topPx / density * 100) / 100;
     const bottomCss: number = Math.round(bottomPx / density * 100) / 100;
-    // Title-bar handling for free windows: the WMS caption
-    // (minimize/maximize/close) floats OVER the app content and collides
-    // with the web UI's top-right controls. Obsidian draws its own complete
-    // title bar (name + window buttons wired through the engine), so prefer
-    // hiding the system chrome and letting the web bar be THE title bar
-    // (decor 'app'). If the system buttons cannot be hidden, fall back to
-    // 'system' - the renderer then hides the web controls instead (at least
-    // no double close button). Fullscreen windows have no caption ('none').
-    // Re-evaluated on every windowSizeChange: the caption only exists once
-    // the window becomes a free window.
+    // Title-bar handling for free windows: the WMS caption strip (name +
+    // minimize/maximize/close) is the only title bar that exists in EVERY
+    // layout - the emulated-mobile web layout has none at all (hiding the
+    // system caption there left the window with no bar whatsoever). Keep it
+    // visible and let the web content avoid it via the published caption
+    // height. Fullscreen windows have no caption. Re-evaluated on every
+    // windowSizeChange: the caption only exists once the window becomes a
+    // free window.
     let decor: string = 'none';
     try {
       const displayClass = display.getDefaultDisplaySync();
@@ -149,24 +151,23 @@ export class WebAbility extends WebBaseAbility {
           rect.height >= displayClass.height;
       }
       if (winObj !== undefined && !fullscreenLike) {
-        let hidden: boolean = false;
         try {
-          winObj.setWindowDecorVisible(false);
-          winObj.setWindowTitleButtonVisible(false, false, false);
-          hidden = true;
+          winObj.setWindowDecorVisible(true);
+          winObj.setWindowTitleButtonVisible(true, true, true);
         } catch (captionException) {
-          LogUtil.warn(TAG, 'hide system caption failed: ' + JSON.stringify(captionException));
+          LogUtil.warn(TAG, 'show system caption failed: ' + JSON.stringify(captionException));
         }
-        decor = hidden ? 'app' : 'system';
+        decor = 'system';
       }
     } catch (exception) {
       decor = 'none';
     }
-    this.writeInsetsToFile(topCss, bottomCss, decor);
+    this.writeInsetsToFile(topCss, bottomCss, decor, this.captionCss);
   }
 
   // Read-modify-write for ohsidian-mode.json, preserving systemMode/override.
-  private writeInsetsToFile(topCss: number, bottomCss: number, decor: string): void {
+  private writeInsetsToFile(topCss: number, bottomCss: number, decor: string,
+    captionCss: number): void {
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
       const filePath: string = filesDir + '/ohsidian-mode.json';
@@ -185,6 +186,7 @@ export class WebAbility extends WebBaseAbility {
       // windowSizeChange fires continuously during drag-resizes; skip the
       // file write when nothing actually changed.
       const unchanged: boolean = cfg['windowDecor'] === decor &&
+        cfg['caption'] === captionCss &&
         cfg['insets'] !== undefined &&
         (cfg['insets'] as Record<string, number>)['top'] === topCss &&
         (cfg['insets'] as Record<string, number>)['bottom'] === bottomCss;
@@ -193,6 +195,7 @@ export class WebAbility extends WebBaseAbility {
       }
       cfg['insets'] = insets;
       cfg['windowDecor'] = decor;
+      cfg['caption'] = captionCss;
       const file = fileIo.openSync(filePath,
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
       try {
@@ -506,7 +509,12 @@ export class WebAbility extends WebBaseAbility {
         // the full window size.
         const startupSettleDelays: Array<number> = [600, 1500, 3000];
         startupSettleDelays.forEach((delayMs: number) => {
-          this.settleViewportLater(delayMs, false);
+          // Touch mode needs the FULL display rect; the system may restore a
+          // smaller (PC-mode session) rect on first launch. Force it here -
+          // the engine latches the surface size once, so the window must be
+          // final before the browser starts (SurfaceReady gates on that).
+          const force: boolean = deviceInfo.deviceType === 'tablet' && !this.pcModeEnabled;
+          this.settleViewportLater(delayMs, force);
         });
       }
       // hide title bar
@@ -569,6 +577,15 @@ export class WebAbility extends WebBaseAbility {
             height: vp2px(titleButtonRect.height)
           };
           this.nativeContext.OnCaptionButtonRectChange(this.xcomponentId, rect);
+          // Track the caption strip height for the web content (1 vp == 1
+          // css px: the buttons sit inside the strip, so bottom-of-buttons
+          // approximates the strip height). Re-publish the mode file when it
+          // changes so the renderer can pad the content below the strip.
+          const caption: number = Math.round(titleButtonRect.top + titleButtonRect.height);
+          if (caption !== this.captionCss) {
+            this.captionCss = caption;
+            this.pushSafeAreaInsets();
+          }
         });
       } catch (exception) {
         LogUtil.error(TAG, 'Failed to register window title button change callback: ' + JSON.stringify(exception));

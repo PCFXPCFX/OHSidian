@@ -93,12 +93,10 @@ function isVersionLess(a, b) {
  *  - Applies the REAL system-bar insets (cfg.insets) as body inline CSS vars,
  *    overriding Obsidian's simulated iPhone notch / desktop zeroing, guarded
  *    by a MutationObserver so later writes by Obsidian are corrected.
- *  - windowDecor controls the title-bar layout: "app" = the system caption
- *    buttons were successfully hidden, Obsidian's own title bar (name +
- *    min/max/close) is THE title bar - keep it visible; "system" = the
- *    system caption could not be hidden, hide the web controls
- *    (.titlebar-button-container.mod-right) instead to avoid a double close
- *    button; "none" = fullscreen, no caption involved.
+ *  - windowDecor controls the title-bar layout: "system" = free window, the
+ *    SYSTEM caption strip (name + min/max/close) is the title bar - hide the
+ *    web .titlebar entirely and pad the body by cfg.caption so no content
+ *    hides under the strip; "none" = fullscreen, no caption involved.
  *  - Routes every file deletion to Obsidian's own .trash folder: HarmonyOS
  *    exposes no system recycle-bin API to third-party apps, so the engine's
  *    "system trash" bridge either fails or (worst case) unlinks permanently.
@@ -164,12 +162,20 @@ function applySafeArea(){
   try{
     var b=document.body;
     if(!b)return;
-    var ins=readInsets();
+    var cfg=readMode();
+    var ins=(cfg&&cfg.insets)?{top:+cfg.insets.top||0,bottom:+cfg.insets.bottom||0}:{top:0,bottom:0};
     var want={"--safe-area-inset-top":ins.top+"px","--safe-area-inset-bottom":ins.bottom+"px",
       "--safe-area-inset-left":"0px","--safe-area-inset-right":"0px"};
     for(var k in want){
       if(b.style.getPropertyValue(k)!==want[k]){b.style.setProperty(k,want[k])}
     }
+    /* Free window: the system caption strip (name + min/max/close) overlays
+       the window top; pad the body so no content hides under it. It is the
+       only title bar that exists in every layout. Fullscreen: no caption -
+       the status-bar avoidance runs through the CSS vars above instead. */
+    var cap=(cfg&&cfg.windowDecor==="system")?(+cfg.caption||0):0;
+    var pt=cap>0?cap+"px":"";
+    if(b.style.paddingTop!==pt){b.style.paddingTop=pt}
   }catch(e){}
 }
 function watchBodyStyles(){
@@ -181,13 +187,12 @@ function watchBodyStyles(){
     document.addEventListener("DOMContentLoaded",hook);
   }catch(e){}
 }
-/* Tablet PC mode runs free windows whose caption (minimize/maximize/close)
-   is drawn by the SYSTEM. The desktop web UI would render its own duplicate
-   controls on top of it (two close buttons), so when the ArkTS layer
-   publishes cfg.windowDecor === "system", hide Obsidian's
-   .titlebar-button-container.mod-right. Fullscreen/touch layout has no
-   titlebar at all and non-PC-mode windows keep their controls (decor
-   "none"), so the rule is toggled off again by the same channel. */
+/* Tablet PC mode / free windows: the system caption strip (name + window
+   buttons) is the only title bar that exists in every web layout, so the
+   ArkTS layer keeps it visible and publishes its height (cfg.caption).
+   Obsidian's own desktop .titlebar would be a second bar under it, so hide
+   the whole web bar while the system one is up. Fullscreen publishes
+   windowDecor "none" - no caption, no hiding. */
 var DECOR_STYLE_ID="ohsidian-window-decor";
 function applyWindowDecor(){
   try{
@@ -197,7 +202,7 @@ function applyWindowDecor(){
     if(system&&!el&&document.head){
       el=document.createElement("style");
       el.id=DECOR_STYLE_ID;
-      el.textContent=".titlebar-button-container.mod-right{display:none!important}";
+      el.textContent=".titlebar{display:none!important}";
       document.head.appendChild(el);
     }else if(!system&&el){
       if(el.parentNode){el.parentNode.removeChild(el)}

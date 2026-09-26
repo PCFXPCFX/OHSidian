@@ -1472,3 +1472,32 @@ true——启动时 `setWindowTitleButtonVisible(true,true,true)` 是**主动请
 
 渲染层补丁无需改动('system' 才注入隐藏 CSS,'app'/'none' 均不注入,
 与新语义天然一致);touch-mode 补丁文档注释更新。
+
+### 第 40 轮(2026-09-26):首次进入视口超宽 + 多窗口标题栏消失(以代码为准的再修)
+
+**问题 1(触摸模式首次进入上下超宽,重进缓解)**:引擎只在浏览器启动时
+读取一次 XComponent surface 尺寸;首次进入时窗口几何仍在过渡(恢复矩形
+→ 强制整屏),首次非零报告冻结了过渡期视口 → 内容溢出屏幕边缘。退出再
+进入时窗口直接以最终尺寸创建,首次读取即正确 → 症状消失。
+修复:
+- SurfaceReady 门控加**稳定条件**:相同的非零矩形连续 3 次轮询
+  (150ms)才启动浏览器, MAX_ATTEMPTS 兜底不变;
+- 首次启动的 startupSettle 强制参数从 false 改为
+  `tablet && !pcModeEnabled`——触摸模式首启也强制整屏矩形,消除过渡。
+
+**问题 2(多窗口模式标题栏整条消失)**:上一轮的"隐藏系统按钮 + 期待
+Obsidian 自带标题栏"在**模拟移动布局**下失效——移动布局根本没有
+.titlebar(全局 isMobile 化),系统按钮又被我们藏了 → 整条消失。
+修复:反转回"让系统添加"——自由窗口保留并显示系统标题条
+(setWindowDecorVisible(true) + 按钮全显),windowDecor='system';
+新增 captionCss 字段(windowTitleButtonRectChange → 条高 ≈ top+height,
+1vp==1csspx)发布到模式文件 cfg.caption;渲染层在 'system' 时**整体
+隐藏 web .titlebar**(避免双栏)并给 body 加 paddingTop=caption,
+两种布局下内容都避让系统标题条;整屏 'none' 不涉及。
+教训:装饰显隐调用发生在启动时(窗口还是全屏,自由窗口标题条尚不
+存在),必须随窗口尺寸变化重新求值(上一轮已加,本轮延续)。
+
+**asar 原位替换第四次**(app.js 补丁刷新):vm 语法校验通过(注:
+createPackage 落盘与紧随的 rename/读取存在瞬时竞争,两次出现
+"Unexpected end of input"假象,重新读取验证均完好;后续脚本需加
+重试验证)。main.js 本轮未动。

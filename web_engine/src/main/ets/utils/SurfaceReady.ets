@@ -34,23 +34,44 @@ const TAG: string = 'SurfaceReady';
 export class SurfaceReady {
   private static POLL_INTERVAL_MS: number = 50;
   private static MAX_ATTEMPTS: number = 100;
+  // The surface reports non-zero while the window is still settling into
+  // its final geometry (first launch: restored rect -> forced fullscreen;
+  // mode switches). The engine latches the FIRST size, so starting on the
+  // first non-zero report freezes a transitional viewport - seen as content
+  // overflowing the screen edges until the app is restarted. Require the
+  // same non-zero rect on several consecutive polls before starting.
+  private static REQUIRED_STABLE_POLLS: number = 3;
 
   // The engine reads the XComponent surface size exactly once, when the
   // browser starts. At XComponent onLoad the surface exists but the first
   // layout pass has not run yet, so that query returns 0x0 (seen in device
   // logs as "Get xcomponent surface size success:0 0") and the browser
   // renders into a zero/default-size viewport - the window never fills the
-  // screen on cold start. Poll the surface rect until it reports a real
-  // size, then run the start callback.
+  // screen on cold start. Poll the surface rect until it reports a real,
+  // stable size, then run the start callback.
   static whenReady(getRect: () => SurfaceRect, start: () => void): void {
     let attempts: number = 0;
+    let lastWidth: number = -1;
+    let lastHeight: number = -1;
+    let stablePolls: number = 0;
     const poll = () => {
       let ready: boolean = false;
       let size: string = 'unknown';
       try {
         const rect: SurfaceRect = getRect();
         size = rect.surfaceWidth + 'x' + rect.surfaceHeight;
-        ready = rect.surfaceWidth > 0 && rect.surfaceHeight > 0;
+        if (rect.surfaceWidth > 0 && rect.surfaceHeight > 0) {
+          if (rect.surfaceWidth === lastWidth && rect.surfaceHeight === lastHeight) {
+            stablePolls++;
+          } else {
+            stablePolls = 1;
+            lastWidth = rect.surfaceWidth;
+            lastHeight = rect.surfaceHeight;
+          }
+          ready = stablePolls >= SurfaceReady.REQUIRED_STABLE_POLLS;
+        } else {
+          stablePolls = 0;
+        }
       } catch (exception) {
         ready = false;
       }
@@ -60,10 +81,12 @@ export class SurfaceReady {
         return;
       }
       if (ready) {
-        LogUtil.info(TAG, 'surface ready after ' + attempts + ' poll(s): ' + size);
+        LogUtil.info(TAG, 'surface ready after ' + attempts + ' poll(s): ' + size +
+          ' (stable for ' + stablePolls + ' polls)');
       } else {
         // Never block the browser indefinitely on a layout hiccup.
-        LogUtil.warn(TAG, 'surface size unknown after ' + attempts + ' poll(s), starting anyway');
+        LogUtil.warn(TAG, 'surface size unknown/unstable after ' + attempts +
+          ' poll(s), starting anyway');
       }
       start();
     };
