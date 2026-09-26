@@ -1426,3 +1426,25 @@ insets 恒为真实条高;若 layout fullscreen 被拒,WMS 会把窗口钳到工
 **验证路径**:重建后触摸模式看状态栏(应用背景应在状态栏下延伸、内容
 避让);窗口模式应只剩系统标题按钮一个 X;hilog 中 avoid-area
 diagnostics 行可核对 systemAvoid.topRect.height 与发布的 top 一致。
+
+### 第 38 轮(2026-09-26):首次启动"快速开始"报 folder not found 根修
+
+**链路还原**(asar 实证):
+- starter 快速开始按钮:`get-default-vault-path` → `vault-open(路径,true)`
+  → 失败后**去掉创建标志重试** `vault-open(路径,false)` → 再失败则弹窗
+  "Failed to open vault <错误>."(用户看到的 folder not found);
+- `get-default-vault-path` 返回 `Kt=<Documents>/Obsidian Vault`
+  (`F=app.getPath("documents")`),而鸿蒙沙箱内应用 Documents 不可写:
+  vault-open 的 mkdirSync 抛 EACCES → 重试时目录不存在 → p() 返回
+  "folder not found";
+- 引擎对 asar 内部路径有完整 fs 支持(libelectron 内嵌完整
+  asar-fs-wrapper),排除沙盒模板复制源问题。
+
+**修复**(MAIN_PROCESS_PATCH 追加 IIFE):app ready 后注册
+`get-default-vault-path` 的**后置监听器**(覆盖 returnValue),把默认
+仓库重定向到 `<userData>/Obsidian Vault`(模式文件同根,可写性已被
+实证),并用 mkdirSync 预创建。globalThis 守卫防重复注册。
+
+**asar 原位替换第三次**:main.js 前缀刷新(正文保留更新器锁死与版本门);
+vm.Script 语法通过,DefaultVault/updater latch/gate/deeplink/END×1 全部
+在位;app.js 未动(hookTrash×4/decor×4/guard7×1)。

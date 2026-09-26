@@ -402,6 +402,28 @@ setInterval(function(){
     }
   }catch(e){}
 },1500);
+}catch(e){}})();
+/* Quick Start fix: the starter's "get-default-vault-path" returns
+   <documents>/Obsidian Vault, but on HarmonyOS the engine's documents path
+   is not app-writable - vault-open's mkdir fails, the starter retries
+   without the create flag and pops "Failed to open vault ... folder not
+   found". Re-point the default vault into userData (same writable root as
+   the ohsidian-mode.json channel) and pre-create it. Registered on ready so
+   this listener runs AFTER Obsidian's own and its returnValue wins. */
+;(function(){try{
+if(globalThis.__ohsidianDefaultVault)return;globalThis.__ohsidianDefaultVault=true;
+var __ohDvApp=require("electron").app;
+var __ohDvRegister=function(){
+  try{
+    var __ohDvPath=require("path").join(__ohDvApp.getPath("userData"),"Obsidian Vault");
+    try{require("fs").mkdirSync(__ohDvPath,{recursive:true})}catch(e){}
+    require("electron").ipcMain.on("get-default-vault-path",function(evt){
+      try{evt.returnValue=__ohDvPath}catch(e){}
+    });
+    try{console.log("[OHSidian] default vault path -> "+__ohDvPath)}catch(e){}
+  }catch(e){}
+};
+if(__ohDvApp.isReady()){__ohDvRegister()}else{__ohDvApp.on("ready",__ohDvRegister)}
 }catch(e){}})();/*OHSIDIAN-IPC-GUARD-END*/
 `;
 
