@@ -1623,3 +1623,20 @@ IPC,但那只影响引擎内部窗口图标,不动桌面启动图标。
 属分发模式硬约束。图标变体维持构建期选择(CI app_icon 输入)。
 若未来转 AppGallery 分发,appInfoManager 路线可用,届时可按
 queryDynamicIcons/selectDynamicIcon/disableDynamicIcon 接入命令面板。
+
+### 第 47 轮(2026-09-26):CI 构建矩阵——每个 Release 同时出 ohsidian/ipados 两种图标
+
+**需求**:一次构建同时产出两种图标的包(原 OHSidian / iPadOS 官方),
+供用户按桌面观感选择下载。
+
+**实现**:工作流重构为两段——
+- `build` 作业以 strategy.matrix(icon: [ohsidian, ipados])并行双分支,
+  各自物化图标 → 构建 → 产物命名
+  `OHSidian-v<版本>-<icon>-<unsigned|signed>.hap`(避免同名冲突),
+  独立上传 artifact;
+- 新增 `release` 作业(needs: build,仅 tag 触发):checkout 模板与
+  版本号 → download-artifact(merge-multiple)合并两分支产物 →
+  重新汇总 SHA256/MD5 → 渲染发布说明(模板表格循环自动列出两个
+  HAP)→ 创建单一 Release。单发布作业避免两分支竞争同一 tag。
+- 原 app_icon 手动输入移除(矩阵固定两分支);ohsidian-gem/obsidian
+  变体文件保留在 icons/ 目录,需要时把矩阵扩成三/四分支即可。

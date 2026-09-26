@@ -18,8 +18,9 @@
 #     the released HAP is installable out of the box. Without the secrets the
 #     unsigned HAP is published and users sign it themselves (see docs).
 #
-# Outputs: .hap artifact + SHA256SUMS.txt + MD5SUMS.txt, attached to a GitHub
-# Release when the workflow runs on a v* tag push.
+# Outputs (build matrix): one .hap per launcher icon (ohsidian / ipados),
+# each with SHA256SUMS.txt + MD5SUMS.txt. A follow-up "release" job merges
+# both builds and attaches everything to a GitHub Release on a v* tag push.
 
 name: build-release
 
@@ -46,16 +47,6 @@ on:
         options:
           - release
           - debug
-      app_icon:
-        description: 'Launcher icon variant (HarmonyOS cannot switch icons at runtime)'
-        required: false
-        default: 'ohsidian'
-        type: choice
-        options:
-          - ohsidian
-          - ohsidian-gem
-          - obsidian
-          - ipados
   push:
     tags:
       - 'v*'
@@ -69,6 +60,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # required to create the GitHub Release
+    strategy:
+      fail-fast: false
+      matrix:
+        # One build per launcher icon; both HAPs attach to the same Release.
+        icon: [ohsidian, ipados]
     steps:
       - name: Checkout (with LFS for libelectron.so / obsidian.asar)
         uses: actions/checkout@v5
@@ -159,9 +155,9 @@ jobs:
         run: |
           set -euxo pipefail
           # HarmonyOS cannot switch the launcher icon at runtime; the icon is
-          # baked from AppScope/resources/base/media at build time. Choice
-          # order: dispatch input > APP_ICON variable > ohsidian default.
-          ICON="${{ inputs.app_icon || vars.APP_ICON || 'ohsidian' }}"
+          # baked from AppScope/resources/base/media at build time. The icon
+          # variant comes from the build matrix.
+          ICON="${{ matrix.icon }}"
           case "$ICON" in
             ohsidian|ohsidian-gem|obsidian|ipados) ;;
             *) echo "::error::Unknown app_icon variant: $ICON"; exit 1 ;;
@@ -240,7 +236,8 @@ jobs:
           mkdir -p dist
           find . -path ./oh_modules -prune -o -name '*.hap' -print
           # Rename hvigor's <module>-<product>-<mode>[-unsigned].hap to
-          # OHSidian-v<version>-<signed|unsigned>.hap for the Release.
+          # OHSidian-v<version>-<icon>-<signed|unsigned>.hap so both matrix
+          # builds can attach to the same Release without name clashes.
           find . -path ./oh_modules -prune -o -name '*.hap' -print | while read -r f; do
             base="$(basename "$f")"
             case "$base" in
@@ -248,20 +245,52 @@ jobs:
               *signed*)   suffix="signed" ;;
               *)          suffix="build" ;;
             esac
-            cp "$f" "dist/OHSidian-v${VERSION}-${suffix}.hap"
+            cp "$f" "dist/OHSidian-v${VERSION}-${{ matrix.icon }}-${suffix}.hap"
           done
           cd dist
-          : > SHA256SUMS.txt
-          : > MD5SUMS.txt
-          for f in *.hap; do
-            sha256sum "$f" >> SHA256SUMS.txt
-            md5sum "$f" >> MD5SUMS.txt
-          done
+          sha256sum *.hap > SHA256SUMS.txt
+          md5sum *.hap > MD5SUMS.txt
+          ls -la
+
+      - name: Upload workflow artifact (every run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohsidian-v${{ env.APP_VERSION }}-${{ matrix.icon }}-hap
+          path: |
+            dist/*.hap
+            dist/SHA256SUMS.txt
+            dist/MD5SUMS.txt
+
+  # Merges the matrix builds' artifacts into ONE GitHub Release (a single
+  # release job avoids two jobs racing on the same tag).
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write # required to create the GitHub Release
+    steps:
+      - name: Checkout (release notes template + app version)
+        uses: actions/checkout@v5
+
+      - name: Download built HAPs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ohsidian-v*-hap
+          merge-multiple: true
+          path: dist
+
+      - name: Merge checksums and render release notes
+        run: |
+          set -euxo pipefail
+          cd dist
+          rm -f SHA256SUMS.txt MD5SUMS.txt
+          sha256sum *.hap > SHA256SUMS.txt
+          md5sum *.hap > MD5SUMS.txt
+          VERSION="$(sed -nE 's/.*"versionName"\s*:\s*"([^"]+)".*/\1/p' ../AppScope/app.json5 | head -1)"
           # Release body: rendered from scripts/ci/release-notes-template.md
-          # (edit THAT file to change the wording) with the {{HAP_TABLE}},
-          # {{SHA256}}, {{MD5}} markers replaced by generated content.
-          # The script has cd'd into dist/ above, so repo-root paths must be
-          # anchored on GITHUB_WORKSPACE, not the current directory.
+          # (edit THAT file to change the wording). The script has cd'd into
+          # dist/, so repo-root paths anchor on GITHUB_WORKSPACE.
           TEMPLATE="$GITHUB_WORKSPACE/scripts/ci/release-notes-template.md"
           if [ ! -f "$TEMPLATE" ]; then
             echo "::error::Release notes template missing: $TEMPLATE"
@@ -286,17 +315,7 @@ jobs:
           cat RELEASE_NOTES.md
           ls -la
 
-      - name: Upload workflow artifact (every run)
-        uses: actions/upload-artifact@v4
-        with:
-          name: ohsidian-v${{ env.APP_VERSION }}-hap
-          path: |
-            dist/*.hap
-            dist/SHA256SUMS.txt
-            dist/MD5SUMS.txt
-
-      - name: Create GitHub Release (tag pushes only)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
