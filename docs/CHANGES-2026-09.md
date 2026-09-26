@@ -1344,3 +1344,30 @@ AbilityStage 初始化;系统按 Kill Reason: Js Error 杀进程)。
 - workflow_dispatch 新增 compatible_sdk/target_sdk/build_mode 输入,
   默认对齐真机验证组合 6.1.1(24)/6.1.1(24)/release;
 - 签名 Secrets 未配置时仍发 unsigned 包,文档引导用户用图形化工具签名。
+
+### 第 35 轮(2026-09-26):窗口模式双关闭按钮修复(系统标题栏 vs Obsidian 自绘控件)
+
+**现象**:release 包在平板 PC 模式(自由多窗)的窗口模式下,窗口顶部出现
+两个关闭按钮:系统为自由窗口绘制的标题栏(min/max/close)与 Obsidian
+桌面 UI 自绘的 `.titlebar-button-container.mod-right` 叠加。全屏(触摸
+模式)下系统不画标题栏,故无冲突。
+
+**修复**(信号通道复用 ohsidian-mode.json):
+- ArkTS `pushSafeAreaInsets` 增加 `windowDecor` 字段:'system' 当
+  pcModeEnabled(平板 PC 模式自由窗口,系统绘制标题栏),'none' 其他;
+  启动(543/549)与 PC 模式切换(697)路径均已覆盖,写入即时生效;
+- 渲染层补丁升 v7(TOUCH_MODE_PATCH):`applyWindowDecor` 按
+  cfg.windowDecor==='system' 挂载/卸载
+  `.titlebar-button-container.mod-right{display:none!important}`;
+  启动、DOMContentLoaded、5s 轮询三处调用;guard 6→7 防旧补丁残留;
+- update-obsidian.mjs 文档注释同步(补丁 v7)。
+
+**asar 原位替换**:仓库 asar 已含 v6 补丁,update-obsidian.mjs 是
+"下载原版→打补丁"流程,不适合重跑;采用剥离 v6(精确前缀 + END 标记)
+→ 前置 v7 → createPackage 重打包,验证:vm.Script 语法通过、v6 残留 0、
+guard 7×1、applyWindowDecor×4(1 定义 + 3 调用)、END×1、
+openVaultChooser 钩子保留。
+
+**遗留说明**:2in1 设备窗口若系统同样绘制标题栏,需另行确认后把
+windowDecor 条件扩展;补丁生效依赖模式文件,切换 PC 模式后有系统
+重载,延迟可忽略,轮询兜底 ≤5s。

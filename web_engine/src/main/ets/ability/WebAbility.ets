@@ -129,11 +129,16 @@ export class WebAbility extends WebBaseAbility {
     // Physical px -> CSS px (Chromium maps 1 css px to one density pixel).
     const topCss: number = Math.round(topPx / density * 100) / 100;
     const bottomCss: number = Math.round(bottomPx / density * 100) / 100;
-    this.writeInsetsToFile(topCss, bottomCss);
+    // Tablet PC mode runs free windows whose caption (minimize/maximize/
+    // close) is drawn by the SYSTEM; the desktop web UI must not render its
+    // own duplicate controls on top (two close buttons). Fullscreen (touch
+    // mode) has no system caption and 2in1 windows keep today's behavior.
+    const decor: string = this.pcModeEnabled ? 'system' : 'none';
+    this.writeInsetsToFile(topCss, bottomCss, decor);
   }
 
   // Read-modify-write for ohsidian-mode.json, preserving systemMode/override.
-  private writeInsetsToFile(topCss: number, bottomCss: number): void {
+  private writeInsetsToFile(topCss: number, bottomCss: number, decor: string): void {
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
       const filePath: string = filesDir + '/ohsidian-mode.json';
@@ -150,6 +155,7 @@ export class WebAbility extends WebBaseAbility {
       }
       const insets: Record<string, number> = { 'top': topCss, 'bottom': bottomCss };
       cfg['insets'] = insets;
+      cfg['windowDecor'] = decor;
       const file = fileIo.openSync(filePath,
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
       try {

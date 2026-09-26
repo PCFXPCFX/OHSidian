@@ -84,19 +84,23 @@ function isVersionLess(a, b) {
 }
 
 /**
- * The touch-mode patch (v5):
+ * The touch-mode patch (v7):
  *  - Reads <userData>/ohsidian-mode.json (written by the ArkTS layer on tablet
  *    PC-mode switches): { systemMode: "touch"|"desktop", override: "auto"|"touch"|"desktop",
- *    insets: { top: cssPx, bottom: cssPx } }.
+ *    insets: { top: cssPx, bottom: cssPx }, windowDecor: "system"|"none" }.
  *  - "auto" follows systemMode; "touch"/"desktop" force Obsidian's mobile layout
  *    (EmulateMobile) on/off. Applied at boot and polled, reloading on change.
  *  - Applies the REAL system-bar insets (cfg.insets) as body inline CSS vars,
  *    overriding Obsidian's simulated iPhone notch / desktop zeroing, guarded
  *    by a MutationObserver so later writes by Obsidian are corrected.
+ *  - Hides Obsidian's own desktop window controls (.titlebar-button-container
+ *    .mod-right) when cfg.windowDecor === "system", i.e. tablet PC-mode free
+ *    windows whose caption (min/max/close) is drawn by the system - without
+ *    this both sets appear stacked (two close buttons).
  *  - Registers a command-palette command that cycles the override.
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
-if(window.__ohsidianTouchPatch==="6")return;window.__ohsidianTouchPatch="6";
+if(window.__ohsidianTouchPatch==="7")return;window.__ohsidianTouchPatch="7";
 /* Keep the renderer's view of the Electron major consistent with the main
    process shim: app.js requires >= 28.2.3 (Iie) before it stops showing the
    "manual update" notice. Replace the whole versions object - mutating the
@@ -170,6 +174,29 @@ function watchBodyStyles(){
     document.addEventListener("DOMContentLoaded",hook);
   }catch(e){}
 }
+/* Tablet PC mode runs free windows whose caption (minimize/maximize/close)
+   is drawn by the SYSTEM. The desktop web UI would render its own duplicate
+   controls on top of it (two close buttons), so when the ArkTS layer
+   publishes cfg.windowDecor === "system", hide Obsidian's
+   .titlebar-button-container.mod-right. Fullscreen/touch layout has no
+   titlebar at all and non-PC-mode windows keep their controls (decor
+   "none"), so the rule is toggled off again by the same channel. */
+var DECOR_STYLE_ID="ohsidian-window-decor";
+function applyWindowDecor(){
+  try{
+    var cfg=readMode();
+    var system=!!(cfg&&cfg.windowDecor==="system");
+    var el=document.getElementById(DECOR_STYLE_ID);
+    if(system&&!el&&document.head){
+      el=document.createElement("style");
+      el.id=DECOR_STYLE_ID;
+      el.textContent=".titlebar-button-container.mod-right{display:none!important}";
+      document.head.appendChild(el);
+    }else if(!system&&el){
+      if(el.parentNode){el.parentNode.removeChild(el)}
+    }
+  }catch(e){}
+}
 function applyMobile(on,reason){
   try{
     var cur=!!localStorage.getItem(KEY);
@@ -190,9 +217,10 @@ function syncFromSystem(lastWant){
 var lastWant=null;
 try{lastWant=syncFromSystem(lastWant)}catch(e){}
 applySafeArea();
+applyWindowDecor();
 watchBodyStyles();
-document.addEventListener("DOMContentLoaded",applySafeArea);
-setInterval(function(){try{lastWant=syncFromSystem(lastWant)}catch(e){}},5000);
+document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor()});
+setInterval(function(){try{lastWant=syncFromSystem(lastWant)}catch(e){}try{applyWindowDecor()}catch(e){}},5000);
 /* The touch-mode drawer exposes the vault switcher as a <select> whose
    options are rendered through an engine-native popup. That popup's render
    is filtered by the engine (a blank one-row strip, size 536x61) and its
