@@ -102,10 +102,10 @@ export class WebAbility extends WebBaseAbility {
   private pushSafeAreaInsets(): void {
     let topPx: number = 0;
     let bottomPx: number = 0;
+    const winObj = this.mainWindow;
     try {
       const handheld: boolean = deviceInfo.deviceType === 'tablet' ||
         deviceInfo.deviceType === 'phone';
-      const winObj = this.mainWindow;
       if (handheld && !this.pcModeEnabled && winObj) {
         const sysAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
         const navAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
@@ -139,12 +139,14 @@ export class WebAbility extends WebBaseAbility {
     // which is the reported "two close buttons" case.
     let decor: string = 'none';
     try {
-      const winProps = winObj ? winObj.getWindowProperties() : undefined;
       const displayClass = display.getDefaultDisplaySync();
-      const fullscreenLike: boolean = winProps !== undefined &&
-        winProps.windowRect.width >= displayClass.width &&
-        winProps.windowRect.height >= displayClass.height;
-      if (winObj && (!fullscreenLike || this.pcModeEnabled)) {
+      let fullscreenLike: boolean = false;
+      if (winObj !== undefined) {
+        const rect = winObj.getWindowProperties().windowRect;
+        fullscreenLike = rect.width >= displayClass.width &&
+          rect.height >= displayClass.height;
+      }
+      if (winObj !== undefined && (!fullscreenLike || this.pcModeEnabled)) {
         decor = 'system';
       }
     } catch (exception) {
