@@ -4,8 +4,9 @@
  * - Strips the placeholder signing config (produces an UNSIGNED build target)
  *   unless SIGNING_JSON is set, in which case that JSON is used verbatim as
  *   app.signingConfigs and products[0].signingConfig points at it.
- * - Pins the locally tested SDK combination: compatible 6.0.2(22),
- *   target 6.1.1(24) (override via TARGET_SDK env if ever needed).
+ * - Pins the device-validated SDK combination (compatible 6.1.1(24),
+ *   target 6.1.1(24)); override via COMPATIBLE_SDK / TARGET_SDK env if ever
+ *   needed.
  */
 // ESM: scripts/package.json declares "type": "module".
 import fs from 'node:fs';
@@ -27,7 +28,7 @@ if (process.env.SIGNING_JSON) {
 }
 
 cfg.app.products[0].compatibleSdkVersion =
-  process.env.COMPATIBLE_SDK || '6.0.2(22)';
+  process.env.COMPATIBLE_SDK || '6.1.1(24)';
 cfg.app.products[0].targetSdkVersion = process.env.TARGET_SDK || '6.1.1(24)';
 
 fs.writeFileSync('build-profile.json5', JSON.stringify(cfg, null, 2));

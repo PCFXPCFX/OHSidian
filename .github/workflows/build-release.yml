@@ -30,6 +30,22 @@ on:
         description: 'HarmonyOS command-line-tools linux-x64 zip URL (optional override)'
         required: false
         default: ''
+      compatible_sdk:
+        description: 'compatibleSdkVersion (default = device-validated combo)'
+        required: false
+        default: '6.1.1(24)'
+      target_sdk:
+        description: 'targetSdkVersion'
+        required: false
+        default: '6.1.1(24)'
+      build_mode:
+        description: 'buildMode: release or debug (debug = closer to a local DevEco build)'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
   push:
     tags:
       - 'v*'
@@ -131,6 +147,8 @@ jobs:
 
       - name: Generate build-profile.json5 (unsigned, target API 24)
         run: |
+          export COMPATIBLE_SDK="${{ inputs.compatible_sdk || '6.1.1(24)' }}"
+          export TARGET_SDK="${{ inputs.target_sdk || '6.1.1(24)' }}"
           node scripts/ci/gen-build-profile.js
 
       - name: Optional signing setup (only if secrets are configured)
@@ -175,7 +193,7 @@ jobs:
 
       - name: Build HAP
         run: |
-          hvigorw --mode module -p product=default -p buildMode=release assembleHap --no-daemon
+          hvigorw --mode module -p product=default -p buildMode=${{ inputs.build_mode || 'release' }} assembleHap --no-daemon
 
       - name: Collect HAP artifacts
         run: |
