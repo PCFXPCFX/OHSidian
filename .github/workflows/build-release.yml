@@ -46,6 +46,15 @@ on:
         options:
           - release
           - debug
+      app_icon:
+        description: 'Launcher icon variant (HarmonyOS cannot switch icons at runtime)'
+        required: false
+        default: 'ohsidian'
+        type: choice
+        options:
+          - ohsidian
+          - obsidian
+          - ipados
   push:
     tags:
       - 'v*'
@@ -144,6 +153,29 @@ jobs:
           else
             echo "::warning::ohpm binary not found under $CTL_ROOT - the ohpm install step will fail"
           fi
+
+      - name: Select launcher icon
+        run: |
+          set -euxo pipefail
+          # HarmonyOS cannot switch the launcher icon at runtime; the icon is
+          # baked from AppScope/resources/base/media at build time. Choice
+          # order: dispatch input > APP_ICON variable > ohsidian default.
+          ICON="${{ inputs.app_icon || vars.APP_ICON || 'ohsidian' }}"
+          case "$ICON" in
+            ohsidian|obsidian|ipados) ;;
+            *) echo "::error::Unknown app_icon variant: $ICON"; exit 1 ;;
+          esac
+          SRC="AppScope/resources/base/media/icons/${ICON}.png"
+          if [ ! -f "$SRC" ]; then
+            echo "::warning::Icon variant '$ICON' missing at $SRC - keeping the ohsidian default"
+            ICON="ohsidian"
+            SRC="AppScope/resources/base/media/icons/${ICON}.png"
+          fi
+          # The launcher icon (app.json5) and the startup-window icon
+          # (module.json5 startWindowIcon) both resolve to AppScope media.
+          cp "$SRC" AppScope/resources/base/media/app_icon.png
+          cp "$SRC" AppScope/resources/base/media/startIcon.png
+          echo "launcher icon: $ICON"
 
       - name: Generate build-profile.json5 (unsigned, target API 24)
         run: |

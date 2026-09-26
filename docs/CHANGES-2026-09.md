@@ -1570,3 +1570,26 @@ caption 字段保留发布(诊断/后续用途),渲染层不再消费。标题�
 (本轮重试 20 秒仍失败即为确定性证据);**新进程首次读取才是可信
 验证**。终态直读 vm 语法通过,padding 移除、migrate/keyboard/drawer
 钩子全部在位。
+
+### 第 44 轮(2026-09-26):应用图标变体(构建期选择)
+
+**需求**:在 Obsidian 里切换应用图标(OHSidian / 原版 Obsidian / iPadOS 风格)。
+
+**能力边界(先核实)**:鸿蒙**没有运行时更换桌面启动图标的公开 API**
+(安卓的 activity-alias 技巧不存在;bundleManager 的 ability 启停是
+系统 API)——"应用内切换立即生效"做不到。引擎虽有 set-icon/get-icon
+IPC,但那只影响引擎内部窗口图标,不动桌面启动图标。
+
+**方案:构建期选择**(确定性路径):
+- 三套图标入库 `AppScope/resources/base/media/icons/`:ohsidian.png
+  (现有图标,深蓝光环合成)、obsidian.png(官方 GitHub 头像,深底宝石
+  460×460)、ipados.png(官方 App Store 图标,iTunes API artworkUrl512,
+  512×512,JPEG→PNG 转换)。注意:asar 内的 icon.png 是 OHSidian 自己
+  的宝石元素,不是官方独立图标(用户指正后已替换为真官方资产);
+- CI 新增 `app_icon` 输入(ohsidian/obsidian/ipados,默认 ohsidian;
+  也可用仓库变量 APP_ICON 做标签构建的默认值),构建前把所选图标
+  复制为 `app_icon.png` + `startIcon.png`(启动图标同源,均解析到
+  AppScope media);变体文件缺失时告警并回退 ohsidian。
+
+**使用**:手动触发出包时在 app_icon 下拉里选;要换桌面图标=用对应
+变体重装(覆盖安装,数据保留)。标签构建默认 ohsidian。
