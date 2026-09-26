@@ -16,7 +16,16 @@
 # Keep options:
 # -keep-property-name: specifies property names that you want to keep
 # -keep-global-name: specifies names that you want to keep in the global scope
--enable-property-obfuscation
--enable-toplevel-obfuscation
--enable-filename-obfuscation
--enable-export-obfuscation
+
+# Obfuscation MUST stay off for this project: the closed-source engine
+# (libelectron.so/libadapter.so) calls into ArkTS adapters by name through
+# JSBind and dynamic lookups, so renamed properties/exports/filenames make
+# callbacks resolve to undefined and crash the process at startup
+# (observed as "TypeError: undefined is not callable" in a TimerCallback,
+# obfuscated frames like "at e85 (c1/q1.ts:9:25)"). Debug builds skip the
+# obfuscator, which is why local debug builds worked while release crashed.
+-disable-obfuscation
+# -enable-property-obfuscation
+# -enable-toplevel-obfuscation
+# -enable-filename-obfuscation
+# -enable-export-obfuscation

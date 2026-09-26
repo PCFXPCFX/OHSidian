@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.mikannqaq.obsidian",
     "vendor": "Mikann",
-    "versionCode": 1020000,
-    "versionName": "1.2.0",
+    "versionCode": 1020001,
+    "versionName": "1.2.1",
     "icon": "$media:app_icon",
     "label": "$string:app_name",
     "configuration": "$profile:configuration",

@@ -1310,3 +1310,37 @@ StartOptions**(windowLeft/Top/Width/Height,保留居中位置与设计尺寸)
 兼具耗电与日志泄漏修复)——三者为早期耗电轮次产物,本次补审计并入。
 make-commits.sh 增补 WebSubWindow.ets/LaunchHelper.ets/make-commits.sh
 自身;BuildProfile.ets 守卫验证有效。
+
+### 第 34 轮(2026-09-26):CI Release 包真机闪退根因修复(ArkGuard 混淆)与发布基建
+
+**现象**:用户自行签名安装 CI 构建的 v1.2.0 unsigned HAP,启动即闪退
+(约 0.2s,JSCrash:`TypeError: undefined is not callable`,堆栈为混淆名
+`at e85 (c1/q1.ts:9:25)`,触发点为 libtimer 的 TimerCallback,发生于
+AbilityStage 初始化;系统按 Kill Reason: Js Error 杀进程)。
+
+**排查**:
+- 排除 LFS:仓库 LFS tracked 文件经 checkout lfs:true 正常入包
+  (Release HAP 208.7MB,与 libelectron.so 160MB + asar 25MB 吻合);
+- 排除签名:签名错误会在安装环节失败,不会进入运行时;
+- 排除 SDK 组合:本地验证过的组合为 compatible/target 6.1.1(24),
+  CI 原默认 compatible 6.0.2(22) 已改齐(2e864c7 并参数化 build_mode,
+  供隔离验证用);
+- 实锤:两模块 build-profile.json5 的 release buildMode 启用 ArkGuard
+  (ruleOptions.enable: true),且 obfuscation-rules.txt 四项全开
+  (property/toplevel/filename/export)。debug 构建不跑混淆器,故本地
+  一直正常。闭源引擎经 JSBind 按名回调 ArkTS + 动态查找,改名后回调
+  解析为 undefined。
+
+**修复**:
+- electron/web_engine 两个 obfuscation-rules.txt 改为
+  `-disable-obfuscation`(四项 -enable-* 注释保留)并注释原因;
+- AppScope/app.json5 版本提 1.2.1(versionCode 1020001);
+- `napi_unwrap fail` 判定为模块注册期良性探测(崩前 40ms 出现,非死因)。
+
+**发布基建**(此前轮次延续):
+- 产物重命名 OHSidian-v<版本>-<unsigned|signed>.hap,哈希与工具指引
+  (小白调试助手/DevEco)写入 Release 正文,正文来自可编辑模板
+  scripts/ci/release-notes-template.md;
+- workflow_dispatch 新增 compatible_sdk/target_sdk/build_mode 输入,
+  默认对齐真机验证组合 6.1.1(24)/6.1.1(24)/release;
+- 签名 Secrets 未配置时仍发 unsigned 包,文档引导用户用图形化工具签名。
