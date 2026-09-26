@@ -1371,3 +1371,29 @@ openVaultChooser 钩子保留。
 **遗留说明**:2in1 设备窗口若系统同样绘制标题栏,需另行确认后把
 windowDecor 条件扩展;补丁生效依赖模式文件,切换 PC 模式后有系统
 重载,延迟可忽略,轮询兜底 ≤5s。
+
+### 第 36 轮(2026-09-26):关闭自动更新、删除路由到 .trash、图标答疑
+
+**1. 关闭默认自动更新**(主进程补丁):main.js 的更新器门控为
+`(at||D.updateDisabled)&&(e.emit("disable",!0)`;文本替换为
+`(at||(D.updateDisabled=!0))&&...`——每次启动锁死 updateDisabled 并
+广播 disable,设置页显示"Updates are disabled"。注意 `||` 优先级高于
+`=`,赋值必须自带括号(第一版 `(at||D.updateDisabled=!0)` 是非法
+左值,vm.Script 语法校验拦下后已修正)。鸿蒙分发走本仓库 Release,
+更新器只会白白耗电探测 obsidian.md。
+
+**2. 应用内删除 → 回收站**:HarmonyOS 不向三方应用开放系统回收站
+API,引擎的 fs.trash 桥要么失败要么(最坏)直接 unlink。补丁 v7 增加
+hookTrash:实例级覆写 vault.trash 强制走 trashLocal 分支(Obsidian
+自带 .trash 文件夹,纯 JS mkdir+rename,可恢复),并覆写
+getConfig("trashOption") 返回 "local" 保证删除确认框文案诚实;
+boot/DOMContentLoaded/5s 轮询三处接线,插件调用同样受益。
+
+**3. 图标答疑**:AppScope/resources/base/media/app_icon.png 随包分发,
+桌面正常显示(日志 getCombIcon combinePicLength:40682 实证);
+HarmonyOS 无运行时换图标机制,"自定义图标"= 替换该资源重新打包。
+
+**asar 原位替换第二次**(app.js v7+hookTrash、main.js 更新门控):
+双文件 vm.Script 语法校验通过;hookTrash×4、decor×4、guard7×1、
+END×1、GATE_DEF/IPC guard/deeplink bridge/openVaultChooser 钩子全部
+保留;UPDATER_DST 修正后重打包验证。

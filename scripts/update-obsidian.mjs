@@ -97,6 +97,11 @@ function isVersionLess(a, b) {
  *    .mod-right) when cfg.windowDecor === "system", i.e. tablet PC-mode free
  *    windows whose caption (min/max/close) is drawn by the system - without
  *    this both sets appear stacked (two close buttons).
+ *  - Routes every file deletion to Obsidian's own .trash folder: HarmonyOS
+ *    exposes no system recycle-bin API to third-party apps, so the engine's
+ *    "system trash" bridge either fails or (worst case) unlinks permanently.
+ *    vault.trash() is forced to the local branch and getConfig("trashOption")
+ *    reports "local" so the delete dialog shows the honest label.
  *  - Registers a command-palette command that cycles the override.
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
@@ -197,6 +202,32 @@ function applyWindowDecor(){
     }
   }catch(e){}
 }
+/* Deletion safety net. vault.trash(file, system) dispatches to
+   adapter.trashSystem (engine bridge; HarmonyOS has no recycle-bin API for
+   apps, so it may fail silently or unlink the file outright) or to
+   adapter.trashLocal (pure-JS: mkdir .trash + rename, works everywhere).
+   Force the local branch and make getConfig("trashOption") report "local"
+   so Obsidian's own delete dialog labels the action correctly. */
+function hookTrash(){
+  try{
+    var v=window.app&&window.app.vault;
+    if(!v||v.__ohsidianTrashHook)return;
+    if(typeof v.trash!=="function")return;
+    v.__ohsidianTrashHook=true;
+    var origTrash=v.trash;
+    v.trash=function(file,system){
+      try{return origTrash.call(this,file,false)}
+      catch(e){return origTrash.call(this,file,system)}
+    };
+    if(typeof v.getConfig==="function"){
+      var origGetConfig=v.getConfig;
+      v.getConfig=function(key){
+        if(key==="trashOption")return "local";
+        return origGetConfig.apply(this,arguments);
+      };
+    }
+  }catch(e){}
+}
 function applyMobile(on,reason){
   try{
     var cur=!!localStorage.getItem(KEY);
@@ -218,9 +249,10 @@ var lastWant=null;
 try{lastWant=syncFromSystem(lastWant)}catch(e){}
 applySafeArea();
 applyWindowDecor();
+hookTrash();
 watchBodyStyles();
-document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor()});
-setInterval(function(){try{lastWant=syncFromSystem(lastWant)}catch(e){}try{applyWindowDecor()}catch(e){}},5000);
+document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor();hookTrash()});
+setInterval(function(){try{lastWant=syncFromSystem(lastWant)}catch(e){}try{applyWindowDecor()}catch(e){}try{hookTrash()}catch(e){}},5000);
 /* The touch-mode drawer exposes the vault switcher as a <select> whose
    options are rendered through an engine-native popup. That popup's render
    is filtered by the engine (a blank one-row strip, size 536x61) and its
@@ -472,6 +504,23 @@ async function main() {
       log('version-floor gate patched (bo floored at 28)');
     } else if (mainSrc.includes('no longer supported')) {
       log('WARNING: version-floor gate pattern not found - upstream may have changed it; investigate manually');
+    }
+    /* Disable the auto-updater: on HarmonyOS there is nothing to update
+       into (HAPs are distributed through this repo's Releases), and the
+       updater would only burn battery checking obsidian.md. main.js gates
+       the updater on (workBuild || D.updateDisabled) and emits "disable"
+       when set - force the flag so every boot starts with updates off,
+       regardless of what the global config says. */
+    const UPDATER_DISABLE_SRC = '(at||D.updateDisabled)&&(e.emit("disable",!0)';
+    // NOTE: `||` binds tighter than `=`, so the assignment MUST get its own
+    // parens - `(at||D.updateDisabled=!0)` would parse as
+    // `(at||D.updateDisabled)=!0` and fail with "Invalid left-hand side".
+    const UPDATER_DISABLE_DST = '(at||(D.updateDisabled=!0))&&(e.emit("disable",!0)';
+    if (mainSrc.includes(UPDATER_DISABLE_SRC)) {
+      mainSrc = mainSrc.replace(UPDATER_DISABLE_SRC, UPDATER_DISABLE_DST);
+      log('auto-updater force-disabled (updateDisabled latched true)');
+    } else {
+      log('WARNING: updater gate pattern not found - auto-update stays controllable from settings');
     }
     fs.writeFileSync(asarMainJs, MAIN_PROCESS_PATCH + mainSrc);
   }
