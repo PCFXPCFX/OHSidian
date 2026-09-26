@@ -53,6 +53,7 @@ on:
         type: choice
         options:
           - ohsidian
+          - ohsidian-gem
           - obsidian
           - ipados
   push:
@@ -162,7 +163,7 @@ jobs:
           # order: dispatch input > APP_ICON variable > ohsidian default.
           ICON="${{ inputs.app_icon || vars.APP_ICON || 'ohsidian' }}"
           case "$ICON" in
-            ohsidian|obsidian|ipados) ;;
+            ohsidian|ohsidian-gem|obsidian|ipados) ;;
             *) echo "::error::Unknown app_icon variant: $ICON"; exit 1 ;;
           esac
           SRC="AppScope/resources/base/media/icons/${ICON}.png"

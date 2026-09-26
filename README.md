@@ -24,6 +24,7 @@
 ## 目录
 
 - [项目简介](#项目简介)
+- [本 Fork 相对原版的改进](#本-fork-相对原版的改进)
 - [技术架构](#技术架构)
 - [功能特性](#功能特性)
 - [模块结构](#模块结构)
@@ -47,11 +48,58 @@
 |---------|------|
 | 应用 ID | `com.mikannqaq.obsidian` |
 | 版本号 | 1.0.0（versionCode: 1000000） |
-| 目标 SDK | HarmonyOS 6.0.2(22) / API 22 |
+| 目标 SDK | HarmonyOS 6.1.1(24) / API 24(CI 构建组合;兼容 6.0.2(22)) |
 | 目标设备 | 2in1（折叠屏/平板）、平板 |
 | 开发语言 | ArkTS (TypeScript) |
 | 构建系统 | Hvigor |
 | 内核版本 | Obsidian 1.13.7 |
+
+---
+
+## 本 Fork 相对原版的改进
+
+本 Fork([PCFXPCFX/OHSidian](https://github.com/PCFXPCFX/OHSidian))基于
+原版([HanversionOvO/OHSidian](https://github.com/HanversionOvO/OHSidian),
+作者 Mikann/MikannQAQ)构建,在其 Electron 兼容层之上做了大量窗口、
+输入、数据与工程化修复。完整变更记录见
+[docs/CHANGES-2026-09.md](docs/CHANGES-2026-09.md)(45 轮,含逐轮审计)。
+
+### 窗口与显示
+
+- 按官方沉浸式规范重做窗口链路:layout fullscreen + 真实系统条 insets,
+  触摸模式状态栏/导航条正确避让;修复启动铺不满、底部死区;
+- 引擎只读一次 surface 尺寸:增加几何稳定门控与首启强制整屏,
+  修复首次进入视口超宽、控件超出屏幕;
+- 多窗口(自由窗口):系统标题条 + 内容避让,消除双关闭按钮与白条;
+  恢复矩形超出屏幕时自动钳制到 80% 居中;
+- 触摸/多窗口模式跟随系统 PC 模式开关自动切换。
+
+### 输入与首次启动
+
+- 修复触摸模式下仓库切换/管理(绕过引擎有缺陷的原生下拉弹窗);
+- 发布输入法高度(--keyboard-height),移动格式化工具栏(加粗等)
+  正确悬浮在键盘上方;
+- 修复快速开始 "folder not found"(默认仓库重定向到可写目录)。
+
+### 数据安全与耗电
+
+- 应用内删除强制进入仓库 `.trash` 文件夹(引擎回收站桥在鸿蒙上
+  行为不可控,可能永久删除);
+- 命令面板新增 "迁移仓库到文件管理可见的位置":把仓库(含 .trash)
+  复制到系统文件夹选择器授权的目录,文件管理器/电脑可直接访问
+  (沙箱目录本身无法暴露,这是鸿蒙约束);
+- 自动更新彻底关闭(鸿蒙分发走本仓库 Release);
+- 移除无效的云同步轮询、GNSS 单订阅共享、亮屏锁前台守卫、
+  日志截断——更省电。
+
+### 深链与工程化
+
+- `obsidian://` 深链桥接:Remotely Save 等插件的浏览器 OAuth 登录可用;
+- GitHub Actions 全自动构建:Release 附 SHA-256/MD5,可选签名、
+  图标变体(ohsidian / ohsidian-gem / obsidian / ipados)、
+  SDK 组合与构建模式;
+- **关闭 release 构建的 ArkGuard 混淆**——原版以 release 模式构建会
+  因混淆在启动时闪退,这是本 Fork 能正常分发的关键修复。
 
 ---
 

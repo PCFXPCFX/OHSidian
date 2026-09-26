@@ -1593,3 +1593,13 @@ IPC,但那只影响引擎内部窗口图标,不动桌面启动图标。
 
 **使用**:手动触发出包时在 app_icon 下拉里选;要换桌面图标=用对应
 变体重装(覆盖安装,数据保留)。标签构建默认 ohsidian。
+
+### 第 45 轮(2026-09-26):图标第四变体 + README 对外说明
+
+- 图标新增 `ohsidian-gem`(原版 OHSidian 裸宝石,自 asar 提取)——
+  用户指正 asar 内宝石即 OHSidian 图标元素,与光环合成版并列为两个
+  OHSidian 变体;CI `app_icon` 选项扩为
+  ohsidian / ohsidian-gem / obsidian / ipados;
+- README 新增 "本 Fork 相对原版的改进" 章节(窗口与显示/输入与首次
+  启动/数据安全与耗电/深链与工程化,链接 CHANGES 全记录),并修正
+  过时的版本信息表(1.0.0→1.2.1,API 22→24)。
