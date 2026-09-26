@@ -1501,3 +1501,26 @@ Obsidian 自带标题栏"在**模拟移动布局**下失效——移动布局根
 createPackage 落盘与紧随的 rename/读取存在瞬时竞争,两次出现
 "Unexpected end of input"假象,重新读取验证均完好;后续脚本需加
 重试验证)。main.js 本轮未动。
+
+### 第 41 轮(2026-09-26):输入法高度透传,修复移动格式化工具栏被键盘遮挡
+
+**机制(asar 实证)**:触摸模式下编辑器底部的格式化工具栏(加粗等)定位
+为 `top: calc(100vh - var(--keyboard-height) - var(--mobile-toolbar-height))`,
+并监听 keyboardWillShow/keyboardWillHide DOM 事件做动画——真机上这些由
+Capacitor 键盘插件提供,引擎侧 IMFAdapter 只转发文字输入事件
+(insertText/delete/cursor),**键盘高度从未进入渲染层**,工具栏沉底被
+键盘盖住。CSS 另有 `.is-mobile .app-container{max-height:calc(100vh -
+var(--keyboard-height))}` 同样消费该变量。
+
+**修复**:
+- ArkTS:主窗口监听 `keyboardHeightChange`(物理 px ÷ density → css px),
+  变化时经 pushSafeAreaInsets 发布 `cfg.keyboard`;
+- 渲染层:applyKeyboard 在 documentElement 上设置 `--keyboard-height` 并
+  派发 keyboardWillShow/keyboardWillHide,复用 Obsidian 自己的动画与定位;
+- 轮询改自适应:编辑焦点内 400ms(工具栏须快速跟随键盘),空闲 5s(省电),
+  setTimeout 链替代固定 setInterval。
+
+**asar 原位替换第五次**:本机验证脚本连续 5 次 "Unexpected end of input"
+而事后直读完好——确认 createPackage 落盘与紧随的 rename/read 存在
+Windows 落盘竞争,后续脚本统一带重试验证。终态 vm 语法通过,
+keyboard/pollTick/hookTrash/drawer 全部在位。

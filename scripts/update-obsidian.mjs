@@ -102,6 +102,13 @@ function isVersionLess(a, b) {
  *    "system trash" bridge either fails or (worst case) unlinks permanently.
  *    vault.trash() is forced to the local branch and getConfig("trashOption")
  *    reports "local" so the delete dialog shows the honest label.
+ *  - Publishes the IME height (cfg.keyboard) as --keyboard-height on
+ *    documentElement and dispatches keyboardWillShow/keyboardWillHide:
+ *    Obsidian's mobile formatting toolbar positions itself with
+ *    top: calc(100vh - var(--keyboard-height) - toolbar-height) and the
+ *    engine never sets that variable. The mode-file poll runs at 400ms
+ *    while an editor/input has focus (toolbar must follow the keyboard
+ *    quickly) and 5s otherwise.
  *  - Registers a command-palette command that cycles the override.
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
@@ -209,6 +216,41 @@ function applyWindowDecor(){
     }
   }catch(e){}
 }
+/* IME height -> web content. The ArkTS layer publishes the keyboard height
+   (css px) as cfg.keyboard; Obsidian's mobile formatting toolbar positions
+   itself with top: calc(100vh - var(--keyboard-height) - toolbar-height)
+   and reacts to keyboardWillShow/keyboardWillHide DOM events - on real
+   mobile those come from the Capacitor keyboard plugin, which the engine
+   never emulates. Set the variable on documentElement and dispatch the
+   events whenever the published height changes. */
+var lastKeyboard=-1;
+function applyKeyboard(){
+  try{
+    var cfg=readMode();
+    var kb=(cfg&&+cfg.keyboard)||0;
+    if(kb===lastKeyboard)return;
+    lastKeyboard=kb;
+    var de=document.documentElement;
+    if(de){de.style.setProperty("--keyboard-height",kb+"px")}
+    try{window.dispatchEvent(new Event(kb>0?"keyboardWillShow":"keyboardWillHide"))}catch(e){}
+  }catch(e){}
+}
+/* Adaptive mode-file poll: fast while an editor/input has focus (the
+   keyboard can appear/disappear there and the toolbar must follow within
+   a fraction of a second), slow otherwise to stay easy on the battery. */
+function isEditing(){
+  try{
+    var ae=document.activeElement;
+    return !!ae&&(ae.tagName==="INPUT"||ae.tagName==="TEXTAREA"||ae.isContentEditable===!0);
+  }catch(e){return false}
+}
+function pollTick(){
+  try{lastWant=syncFromSystem(lastWant)}catch(e){}
+  try{applyWindowDecor()}catch(e){}
+  try{hookTrash()}catch(e){}
+  try{applyKeyboard()}catch(e){}
+  setTimeout(pollTick,isEditing()?400:5000);
+}
 /* Deletion safety net. vault.trash(file, system) dispatches to
    adapter.trashSystem (engine bridge; HarmonyOS has no recycle-bin API for
    apps, so it may fail silently or unlink the file outright) or to
@@ -257,9 +299,10 @@ try{lastWant=syncFromSystem(lastWant)}catch(e){}
 applySafeArea();
 applyWindowDecor();
 hookTrash();
+applyKeyboard();
 watchBodyStyles();
-document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor();hookTrash()});
-setInterval(function(){try{lastWant=syncFromSystem(lastWant)}catch(e){}try{applyWindowDecor()}catch(e){}try{hookTrash()}catch(e){}},5000);
+document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor();hookTrash();applyKeyboard()});
+pollTick();
 /* The touch-mode drawer exposes the vault switcher as a <select> whose
    options are rendered through an engine-native popup. That popup's render
    is filtered by the engine (a blank one-row strip, size 536x61) and its

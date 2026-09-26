@@ -63,6 +63,11 @@ export class WebAbility extends WebBaseAbility {
   // from windowTitleButtonRectChange and published through the mode file so
   // the web content can avoid the strip. 0 = fullscreen / no caption.
   private captionCss: number = 0;
+  // IME height in CSS px, from keyboardHeightChange; published through the
+  // mode file: Obsidian's mobile formatting toolbar positions itself with
+  // top: calc(100vh - var(--keyboard-height) - toolbar-height) and nothing
+  // in the engine sets that variable.
+  private keyboardCss: number = 0;
   private mainWindow: window.Window | undefined = undefined;
 
   // Display-mode state machine (see updateWindowPcmodeSwitchStatus):
@@ -162,12 +167,12 @@ export class WebAbility extends WebBaseAbility {
     } catch (exception) {
       decor = 'none';
     }
-    this.writeInsetsToFile(topCss, bottomCss, decor, this.captionCss);
+    this.writeInsetsToFile(topCss, bottomCss, decor, this.captionCss, this.keyboardCss);
   }
 
   // Read-modify-write for ohsidian-mode.json, preserving systemMode/override.
   private writeInsetsToFile(topCss: number, bottomCss: number, decor: string,
-    captionCss: number): void {
+    captionCss: number, keyboardCss: number): void {
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
       const filePath: string = filesDir + '/ohsidian-mode.json';
@@ -187,6 +192,7 @@ export class WebAbility extends WebBaseAbility {
       // file write when nothing actually changed.
       const unchanged: boolean = cfg['windowDecor'] === decor &&
         cfg['caption'] === captionCss &&
+        cfg['keyboard'] === keyboardCss &&
         cfg['insets'] !== undefined &&
         (cfg['insets'] as Record<string, number>)['top'] === topCss &&
         (cfg['insets'] as Record<string, number>)['bottom'] === bottomCss;
@@ -196,6 +202,7 @@ export class WebAbility extends WebBaseAbility {
       cfg['insets'] = insets;
       cfg['windowDecor'] = decor;
       cfg['caption'] = captionCss;
+      cfg['keyboard'] = keyboardCss;
       const file = fileIo.openSync(filePath,
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
       try {
@@ -462,6 +469,23 @@ export class WebAbility extends WebBaseAbility {
         });
       } catch (exception) {
        LogUtil.error(TAG, 'Failed to register callback: ' + JSON.stringify(exception));
+      }
+
+      try {
+        // IME height -> web content. Obsidian's mobile formatting toolbar
+        // positions itself with top: calc(100vh - var(--keyboard-height) -
+        // toolbar-height); the engine never sets that variable, so publish
+        // it through the mode-file channel (physical px -> css px).
+        mainWin.on('keyboardHeightChange', (data: number) => {
+          const density: number = display.getDefaultDisplaySync().densityPixels || 1;
+          const keyboard: number = Math.round(data / density);
+          if (keyboard !== this.keyboardCss) {
+            this.keyboardCss = keyboard;
+            this.pushSafeAreaInsets();
+          }
+        });
+      } catch (exception) {
+        LogUtil.error(TAG, 'Failed to register keyboard height listener: ' + JSON.stringify(exception));
       }
     });
 
