@@ -216,12 +216,53 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
+  // Window mode: the system restores the window in whatever rect it last
+  // had - including the full-display rect of a touch-mode session - which
+  // leaves the window bottom behind the navigation area (content below the
+  // fold). Clamp such rects into the work area (80%, centered) so the whole
+  // window is visible. Main window only; PC mode only.
+  private clampWindowToWorkArea(): void {
+    if (this.xcomponentId !== ConfigData.DEFAULT_WINDOW_ID) {
+      return;
+    }
+    const winObj = this.mainWindow;
+    if (!winObj || !this.pcModeEnabled) {
+      return;
+    }
+    try {
+      const displayClass = display.getDefaultDisplaySync();
+      const work = displayClass.workArea;
+      const rect = winObj.getWindowProperties().windowRect;
+      if (rect.width <= work.width && rect.height <= work.height &&
+        rect.left >= work.left && rect.top >= work.top) {
+        return;
+      }
+      const width: number = Math.min(rect.width, Math.round(work.width * 0.8));
+      const height: number = Math.min(rect.height, Math.round(work.height * 0.8));
+      const left: number = work.left + Math.round((work.width - width) / 2);
+      const top: number = work.top + Math.round((work.height - height) / 2);
+      winObj.resize(width, height)
+        .then(() => {
+          return winObj.moveWindowTo(left, top);
+        })
+        .then(() => {
+          LogUtil.info(TAG, 'clamped window to work area: ' + width + 'x' +
+            height + ' @ (' + left + ',' + top + ')');
+          this.pushSafeAreaInsets();
+        })
+        .catch((err: BusinessError) => {
+          LogUtil.warn(TAG, 'clamp to work area failed: ' + JSON.stringify(err));
+        });
+    } catch (exception) {
+      LogUtil.warn(TAG, 'clamp to work area threw: ' + JSON.stringify(exception));
+    }
+  }
+
   // The engine can latch the viewport and miss resize events that fire before
   // its surface is attached (first launch), or keep a stale inset across
   // tablet/PC-mode switches. Re-push the current bounds so the viewport
   // converges to the actual window.
-  private repushViewportBounds(): void {
-    try {
+  private repushViewportBounds(): void {    try {
       const win = this.mainWindow;
       if (!win) {
         return;
@@ -778,6 +819,13 @@ export class WebAbility extends WebBaseAbility {
       // Floating PC-mode windows never overlap the bars -> publish zero
       // insets; back in tablet mode the real avoid areas apply again.
       this.pushSafeAreaInsets();
+      // Entering window mode: the system may restore a rect taller/wider
+      // than the visible work area (e.g. the full-display rect of the
+      // previous touch-mode session), which hides the window bottom behind
+      // the navigation area. Clamp it into the work area.
+      if (newStatus) {
+        this.clampWindowToWorkArea();
+      }
       if (deviceInfo.deviceType !== 'tablet') {
         return;
       }
