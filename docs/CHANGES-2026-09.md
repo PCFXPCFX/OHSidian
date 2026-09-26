@@ -1397,3 +1397,32 @@ HarmonyOS 无运行时换图标机制,"自定义图标"= 替换该资源重新�
 双文件 vm.Script 语法校验通过;hookTrash×4、decor×4、guard7×1、
 END×1、GATE_DEF/IPC guard/deeplink bridge/openVaultChooser 钩子全部
 保留;UPDATER_DST 修正后重打包验证。
+
+### 第 37 轮(2026-09-26):按官方沉浸式链路重推窗口状态机(顶部避让 + 双 X 根修)
+
+**官方链路(API 24)应为**:① loadContent 前 setWindowLayoutFullScreen(true);
+② 窗口矩形 = 整块屏幕 (0,0,display.w,display.h),不做避让加减;
+③ avoidAreaChange/windowSizeChange → 读 TYPE_SYSTEM/TYPE_NAVIGATION_INDICATOR
+的窗口相对矩形;④ 发布真实 insets 给渲染层 CSS 避让;⑤ 自由窗口的标题按钮
+由 WMS 绘制,渲染层藏自绘控件。
+
+**断点 1(顶部避让)**:forceFullscreenWindow 旧实现 resize 成
+display.height−topInset 并挪到 y=topInset——状态栏区域变成窗口外死区
+(应用背景不延伸到状态栏下),且窗口相对避让矩形归零,渲染层永远拿到
+top=0。这解释了"底部好了、顶部没好"(窗口底部贴屏底,insets 有效)。
+修复:resize(display.w, display.h) + moveWindowTo(0,0),死区消失,
+insets 恒为真实条高;若 layout fullscreen 被拒,WMS 会把窗口钳到工作区,
+几何避让自动生效,两条路都成立。
+
+**断点 2(双 X)**:windowDecor='system' 只认 PC 模式开关,浮窗/分屏等
+非 PC 模式自由窗口不触发。修复:按窗口实际尺寸判定——不铺满整屏的窗口
+(PC 窗口/浮窗/2in1 桌面窗口)WMS 必画标题按钮 → 'system';铺满整屏的
+触摸模式窗口 → 'none'。顺带覆盖 2in1 遗留项。
+
+**配套**:windowSizeChange 监听器补 pushSafeAreaInsets(普通 resize 不
+触发 avoidAreaChange,decor/insets 需跟随窗口矩形刷新);writeInsetsToFile
+加变化检测(拖动高频触发时跳过未变化的文件写入与日志)。
+
+**验证路径**:重建后触摸模式看状态栏(应用背景应在状态栏下延伸、内容
+避让);窗口模式应只剩系统标题按钮一个 X;hilog 中 avoid-area
+diagnostics 行可核对 systemAvoid.topRect.height 与发布的 top 一致。

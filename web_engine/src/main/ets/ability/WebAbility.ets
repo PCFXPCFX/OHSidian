@@ -129,11 +129,27 @@ export class WebAbility extends WebBaseAbility {
     // Physical px -> CSS px (Chromium maps 1 css px to one density pixel).
     const topCss: number = Math.round(topPx / density * 100) / 100;
     const bottomCss: number = Math.round(bottomPx / density * 100) / 100;
-    // Tablet PC mode runs free windows whose caption (minimize/maximize/
-    // close) is drawn by the SYSTEM; the desktop web UI must not render its
-    // own duplicate controls on top (two close buttons). Fullscreen (touch
-    // mode) has no system caption and 2in1 windows keep today's behavior.
-    const decor: string = this.pcModeEnabled ? 'system' : 'none';
+    // System caption detection: WMS draws the free-window caption
+    // (minimize/maximize/close) for ANY window that does not cover the whole
+    // display - PC-mode windows, floating/split windows, 2in1 desktop
+    // windows. setWindowDecorVisible(false) does not remove that caption, so
+    // the web UI must hide its own duplicate controls there. The fullscreen
+    // touch-mode window (whole display) has no system caption. Gating on the
+    // PC-mode switch alone missed floating windows entered without PC mode,
+    // which is the reported "two close buttons" case.
+    let decor: string = 'none';
+    try {
+      const winProps = winObj ? winObj.getWindowProperties() : undefined;
+      const displayClass = display.getDefaultDisplaySync();
+      const fullscreenLike: boolean = winProps !== undefined &&
+        winProps.windowRect.width >= displayClass.width &&
+        winProps.windowRect.height >= displayClass.height;
+      if (winObj && (!fullscreenLike || this.pcModeEnabled)) {
+        decor = 'system';
+      }
+    } catch (exception) {
+      decor = this.pcModeEnabled ? 'system' : 'none';
+    }
     this.writeInsetsToFile(topCss, bottomCss, decor);
   }
 
@@ -154,6 +170,15 @@ export class WebAbility extends WebBaseAbility {
         cfg = {};
       }
       const insets: Record<string, number> = { 'top': topCss, 'bottom': bottomCss };
+      // windowSizeChange fires continuously during drag-resizes; skip the
+      // file write when nothing actually changed.
+      const unchanged: boolean = cfg['windowDecor'] === decor &&
+        cfg['insets'] !== undefined &&
+        (cfg['insets'] as Record<string, number>)['top'] === topCss &&
+        (cfg['insets'] as Record<string, number>)['bottom'] === bottomCss;
+      if (unchanged) {
+        return;
+      }
       cfg['insets'] = insets;
       cfg['windowDecor'] = decor;
       const file = fileIo.openSync(filePath,
@@ -204,9 +229,17 @@ export class WebAbility extends WebBaseAbility {
   // session - and in tablet mode the touch experience needs a fullscreen
   // window. maximize() does not reliably fill the screen for a restored
   // floating window (WMS may time out or leave a clamped rect, observed as
-  // 2385x1711 against a 2800x1753 work area), so set the rect explicitly:
-  // the full display, offset by the current status-bar avoid area so the
-  // standard avoidance still applies when layout fullscreen is rejected.
+  // 2385x1711 against a 2800x1753 work area), so set the rect explicitly.
+  //
+  // Official immersive pattern (API 24): the rect is the WHOLE display at
+  // (0,0) - no avoid-area subtraction. With layout fullscreen the window
+  // then extends under the visible status bar / navigation indicator, and
+  // the window-relative avoid areas are exactly the bar heights, which
+  // pushSafeAreaInsets publishes to the web content. The previous
+  // display.height-minus-inset rect at y=inset left the status-bar strip
+  // OUTSIDE the window (dead background above the app) and zeroed the
+  // window-relative top avoid area, so the renderer never received a top
+  // inset - the reported "top bar not avoided" symptom.
   //
   // MAIN WINDOW ONLY: every EntryAbility instance (including new windows)
   // extends WebAbility and would otherwise yank itself to fullscreen right
@@ -226,26 +259,19 @@ export class WebAbility extends WebBaseAbility {
       const displayClass = display.getDefaultDisplaySync();
       // Already fullscreen-sized (layout fullscreen succeeded, window at
       // [0,0,display.w,display.h])? Resizing again is rejected by WMS with
-      // 1300002 ("window state abnormal") and would only shrink the window
-      // by the avoid-area inset - leave it alone.
+      // 1300002 ("window state abnormal") - leave it alone.
       const prop = winObj.getWindowProperties();
       if (prop.windowRect.width >= displayClass.width &&
         prop.windowRect.height >= displayClass.height) {
         return;
       }
-      let topInset: number = 0;
-      try {
-        topInset = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM).topRect.height;
-      } catch (exception) {
-        LogUtil.warn(TAG, 'read system avoid area failed: ' + JSON.stringify(exception));
-      }
-      winObj.resize(displayClass.width, displayClass.height - topInset)
+      winObj.resize(displayClass.width, displayClass.height)
         .then(() => {
-          return winObj.moveWindowTo(0, topInset);
+          return winObj.moveWindowTo(0, 0);
         })
         .then(() => {
           LogUtil.info(TAG, 'forced fullscreen rect: ' + displayClass.width + 'x' +
-            (displayClass.height - topInset) + ' @ (0,' + topInset + ')');
+            displayClass.height + ' @ (0,0)');
         })
         .catch((err: BusinessError) => {
           LogUtil.warn(TAG, 'force fullscreen (rect) failed: ' + JSON.stringify(err));
@@ -369,6 +395,10 @@ export class WebAbility extends WebBaseAbility {
 
       try {
         data.on('windowSizeChange', (size) => {
+          // Re-publish on every resize: the window-relative avoid areas AND
+          // the system-caption detection (whole-display test) both follow the
+          // window rect, and a plain resize does not fire avoidAreaChange.
+          this.pushSafeAreaInsets();
           this.nativeContext.OnWindowSizeChange(this.xcomponentId,
             this.computeViewportBound(data.getWindowProperties()));
         });
