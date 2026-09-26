@@ -217,10 +217,11 @@ export class WebAbility extends WebBaseAbility {
   }
 
   // Window mode: the system restores the window in whatever rect it last
-  // had - including the full-display rect of a touch-mode session - which
-  // leaves the window bottom behind the navigation area (content below the
-  // fold). Clamp such rects into the work area (80%, centered) so the whole
-  // window is visible. Main window only; PC mode only.
+  // had, and converting a fullscreen window into a free window can push the
+  // bottom (or right) edge beyond the display - the reported "bottom of the
+  // window is not visible". Clamp such rects back into the display and
+  // shrink them to a comfortable size (80%, centered). Main window only;
+  // PC mode only.
   private clampWindowToWorkArea(): void {
     if (this.xcomponentId !== ConfigData.DEFAULT_WINDOW_ID) {
       return;
@@ -231,30 +232,31 @@ export class WebAbility extends WebBaseAbility {
     }
     try {
       const displayClass = display.getDefaultDisplaySync();
-      const work = displayClass.workArea;
       const rect = winObj.getWindowProperties().windowRect;
-      if (rect.width <= work.width && rect.height <= work.height &&
-        rect.left >= work.left && rect.top >= work.top) {
+      const fits: boolean = rect.left >= 0 && rect.top >= 0 &&
+        rect.left + rect.width <= displayClass.width &&
+        rect.top + rect.height <= displayClass.height;
+      if (fits) {
         return;
       }
-      const width: number = Math.min(rect.width, Math.round(work.width * 0.8));
-      const height: number = Math.min(rect.height, Math.round(work.height * 0.8));
-      const left: number = work.left + Math.round((work.width - width) / 2);
-      const top: number = work.top + Math.round((work.height - height) / 2);
+      const width: number = Math.min(rect.width, Math.round(displayClass.width * 0.8));
+      const height: number = Math.min(rect.height, Math.round(displayClass.height * 0.8));
+      const left: number = Math.max(0, Math.round((displayClass.width - width) / 2));
+      const top: number = Math.max(0, Math.round((displayClass.height - height) / 2));
       winObj.resize(width, height)
         .then(() => {
           return winObj.moveWindowTo(left, top);
         })
         .then(() => {
-          LogUtil.info(TAG, 'clamped window to work area: ' + width + 'x' +
+          LogUtil.info(TAG, 'clamped window into display: ' + width + 'x' +
             height + ' @ (' + left + ',' + top + ')');
           this.pushSafeAreaInsets();
         })
         .catch((err: BusinessError) => {
-          LogUtil.warn(TAG, 'clamp to work area failed: ' + JSON.stringify(err));
+          LogUtil.warn(TAG, 'clamp window failed: ' + JSON.stringify(err));
         });
     } catch (exception) {
-      LogUtil.warn(TAG, 'clamp to work area threw: ' + JSON.stringify(exception));
+      LogUtil.warn(TAG, 'clamp window threw: ' + JSON.stringify(exception));
     }
   }
 
