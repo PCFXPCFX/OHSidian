@@ -1603,3 +1603,23 @@ IPC,但那只影响引擎内部窗口图标,不动桌面启动图标。
 - README 新增 "本 Fork 相对原版的改进" 章节(窗口与显示/输入与首次
   启动/数据安全与耗电/深链与工程化,链接 CHANGES 全记录),并修正
   过时的版本信息表(1.0.0→1.2.1,API 22→24)。
+
+### 第 46 轮(2026-09-26):应用内切换图标可行性调研(以本地 SDK 代码为准)
+
+**需求**:在 Obsidian 内切换启动图标(OHSidian/原版宝石/官方/iPadOS)。
+用户提供了官方动态图标文档(appInfoManager,@kit.AppGalleryKit,API 15+)。
+
+**SDK 实证结论**(DevEco 本地 SDK d.ts 核对):
+- `@hms.core.appgalleryservice.appInfoManager.d.ts`:DynamicIconInfo
+  的 iconUrl 为远程 URL,错误码含 service extension connect failed——
+  动态图标由 AppGallery Connect 云侧管理、图库服务扩展下发,
+  **要求应用市场分发身份**;自签名侧载(GitHub Release 分发)无
+  AGC 记录,queryDynamicIcons 返回 1006800010/连接失败;
+- `bundleManager.setAbilityEnabled`(安卓多 LAUNCHER ability 技巧的
+  对应物):公开 SDK 中仅有文档交叉引用,**无函数声明**——@systemapi
+  系统接口,公开 SDK 已剔除。
+
+**结论**:自签名分发模式下,应用内切换启动图标的两条官方路线均不可用,
+属分发模式硬约束。图标变体维持构建期选择(CI app_icon 输入)。
+若未来转 AppGallery 分发,appInfoManager 路线可用,届时可按
+queryDynamicIcons/selectDynamicIcon/disableDynamicIcon 接入命令面板。
