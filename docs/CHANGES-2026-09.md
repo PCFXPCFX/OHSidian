@@ -1448,3 +1448,27 @@ diagnostics 行可核对 systemAvoid.topRect.height 与发布的 top 一致。
 **asar 原位替换第三次**:main.js 前缀刷新(正文保留更新器锁死与版本门);
 vm.Script 语法通过,DefaultVault/updater latch/gate/deeplink/END×1 全部
 在位;app.js 未动(hookTrash×4/decor×4/guard7×1)。
+
+### 第 39 轮(2026-09-26):窗口模式标题栏反转——系统按钮隐藏,Obsidian 自带标题栏成为唯一标题栏
+
+**用户反馈**:右上角 X 与右上角功能打架,要求独立的信息栏(名称+关闭/
+放大/缩小),不与内容混叠。
+
+**关键发现**:WebBaseAbility 的 minimizable/maximizable/closable 默认全
+true——启动时 `setWindowTitleButtonVisible(true,true,true)` 是**主动请求
+系统按钮显示**。双 X 的来源是应用自己的请求,不是 API 失效;因此隐藏
+请求同样可信。
+
+**新方案**(pushSafeAreaInsets 重构):
+- 自由窗口(非整屏):setWindowDecorVisible(false) +
+  setWindowTitleButtonVisible(false,false,false) 隐藏系统标题按钮,
+  windowDecor='app' → 渲染层不藏任何东西,Obsidian 自带标题栏(名称+
+  三个按钮,经引擎接真实窗口操作)成为唯一标题栏,与内容分离;
+- 系统 API 抛错时 windowDecor='system' 回退(渲染层藏自绘按钮,至少
+  消除双 X);
+- 整屏(触摸模式)windowDecor='none' 不涉及。
+- 每次窗口尺寸变化/PC 模式切换重新求值(标题按钮只在成为自由窗口后
+  存在,启动时的一次性调用覆盖不到)。
+
+渲染层补丁无需改动('system' 才注入隐藏 CSS,'app'/'none' 均不注入,
+与新语义天然一致);touch-mode 补丁文档注释更新。

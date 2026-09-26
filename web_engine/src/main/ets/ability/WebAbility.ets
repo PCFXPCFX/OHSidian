@@ -129,14 +129,16 @@ export class WebAbility extends WebBaseAbility {
     // Physical px -> CSS px (Chromium maps 1 css px to one density pixel).
     const topCss: number = Math.round(topPx / density * 100) / 100;
     const bottomCss: number = Math.round(bottomPx / density * 100) / 100;
-    // System caption detection: WMS draws the free-window caption
-    // (minimize/maximize/close) for ANY window that does not cover the whole
-    // display - PC-mode windows, floating/split windows, 2in1 desktop
-    // windows. setWindowDecorVisible(false) does not remove that caption, so
-    // the web UI must hide its own duplicate controls there. The fullscreen
-    // touch-mode window (whole display) has no system caption. Gating on the
-    // PC-mode switch alone missed floating windows entered without PC mode,
-    // which is the reported "two close buttons" case.
+    // Title-bar handling for free windows: the WMS caption
+    // (minimize/maximize/close) floats OVER the app content and collides
+    // with the web UI's top-right controls. Obsidian draws its own complete
+    // title bar (name + window buttons wired through the engine), so prefer
+    // hiding the system chrome and letting the web bar be THE title bar
+    // (decor 'app'). If the system buttons cannot be hidden, fall back to
+    // 'system' - the renderer then hides the web controls instead (at least
+    // no double close button). Fullscreen windows have no caption ('none').
+    // Re-evaluated on every windowSizeChange: the caption only exists once
+    // the window becomes a free window.
     let decor: string = 'none';
     try {
       const displayClass = display.getDefaultDisplaySync();
@@ -146,11 +148,19 @@ export class WebAbility extends WebBaseAbility {
         fullscreenLike = rect.width >= displayClass.width &&
           rect.height >= displayClass.height;
       }
-      if (winObj !== undefined && (!fullscreenLike || this.pcModeEnabled)) {
-        decor = 'system';
+      if (winObj !== undefined && !fullscreenLike) {
+        let hidden: boolean = false;
+        try {
+          winObj.setWindowDecorVisible(false);
+          winObj.setWindowTitleButtonVisible(false, false, false);
+          hidden = true;
+        } catch (captionException) {
+          LogUtil.warn(TAG, 'hide system caption failed: ' + JSON.stringify(captionException));
+        }
+        decor = hidden ? 'app' : 'system';
       }
     } catch (exception) {
-      decor = this.pcModeEnabled ? 'system' : 'none';
+      decor = 'none';
     }
     this.writeInsetsToFile(topCss, bottomCss, decor);
   }

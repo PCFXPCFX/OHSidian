@@ -87,16 +87,18 @@ function isVersionLess(a, b) {
  * The touch-mode patch (v7):
  *  - Reads <userData>/ohsidian-mode.json (written by the ArkTS layer on tablet
  *    PC-mode switches): { systemMode: "touch"|"desktop", override: "auto"|"touch"|"desktop",
- *    insets: { top: cssPx, bottom: cssPx }, windowDecor: "system"|"none" }.
+ *    insets: { top: cssPx, bottom: cssPx }, windowDecor: "app"|"system"|"none" }.
  *  - "auto" follows systemMode; "touch"/"desktop" force Obsidian's mobile layout
  *    (EmulateMobile) on/off. Applied at boot and polled, reloading on change.
  *  - Applies the REAL system-bar insets (cfg.insets) as body inline CSS vars,
  *    overriding Obsidian's simulated iPhone notch / desktop zeroing, guarded
  *    by a MutationObserver so later writes by Obsidian are corrected.
- *  - Hides Obsidian's own desktop window controls (.titlebar-button-container
- *    .mod-right) when cfg.windowDecor === "system", i.e. tablet PC-mode free
- *    windows whose caption (min/max/close) is drawn by the system - without
- *    this both sets appear stacked (two close buttons).
+ *  - windowDecor controls the title-bar layout: "app" = the system caption
+ *    buttons were successfully hidden, Obsidian's own title bar (name +
+ *    min/max/close) is THE title bar - keep it visible; "system" = the
+ *    system caption could not be hidden, hide the web controls
+ *    (.titlebar-button-container.mod-right) instead to avoid a double close
+ *    button; "none" = fullscreen, no caption involved.
  *  - Routes every file deletion to Obsidian's own .trash folder: HarmonyOS
  *    exposes no system recycle-bin API to third-party apps, so the engine's
  *    "system trash" bridge either fails or (worst case) unlinks permanently.
