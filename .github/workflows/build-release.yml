@@ -166,11 +166,11 @@ jobs:
             ohsidian|ohsidian-gem|obsidian|ipados) ;;
             *) echo "::error::Unknown app_icon variant: $ICON"; exit 1 ;;
           esac
-          SRC="AppScope/resources/base/media/icons/${ICON}.png"
+          SRC="icons/${ICON}.png"
           if [ ! -f "$SRC" ]; then
             echo "::warning::Icon variant '$ICON' missing at $SRC - keeping the ohsidian default"
             ICON="ohsidian"
-            SRC="AppScope/resources/base/media/icons/${ICON}.png"
+            SRC="icons/${ICON}.png"
           fi
           # The launcher icon (app.json5) and the startup-window icon
           # (module.json5 startWindowIcon) both resolve to AppScope media.
