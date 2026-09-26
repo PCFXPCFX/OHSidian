@@ -476,9 +476,9 @@ export class WebAbility extends WebBaseAbility {
         // positions itself with top: calc(100vh - var(--keyboard-height) -
         // toolbar-height); the engine never sets that variable, so publish
         // it through the mode-file channel (physical px -> css px).
-        mainWin.on('keyboardHeightChange', (data: number) => {
+        data.on('keyboardHeightChange', (kbHeight: number) => {
           const density: number = display.getDefaultDisplaySync().densityPixels || 1;
-          const keyboard: number = Math.round(data / density);
+          const keyboard: number = Math.round(kbHeight / density);
           if (keyboard !== this.keyboardCss) {
             this.keyboardCss = keyboard;
             this.pushSafeAreaInsets();
