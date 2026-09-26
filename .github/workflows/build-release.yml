@@ -227,7 +227,9 @@ jobs:
           # Release body: rendered from scripts/ci/release-notes-template.md
           # (edit THAT file to change the wording) with the {{HAP_TABLE}},
           # {{SHA256}}, {{MD5}} markers replaced by generated content.
-          TEMPLATE="scripts/ci/release-notes-template.md"
+          # The script has cd'd into dist/ above, so repo-root paths must be
+          # anchored on GITHUB_WORKSPACE, not the current directory.
+          TEMPLATE="$GITHUB_WORKSPACE/scripts/ci/release-notes-template.md"
           if [ ! -f "$TEMPLATE" ]; then
             echo "::error::Release notes template missing: $TEMPLATE"
             exit 1
