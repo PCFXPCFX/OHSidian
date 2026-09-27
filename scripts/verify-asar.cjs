@@ -1,0 +1,57 @@
+// Fresh-process asar verification: syntax-check app.js/main.js and assert
+// all patch markers are present. Run from repo root:
+//   node scripts/verify-asar.cjs
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const { extractFile } = require('@electron/asar');
+
+const asarPath = path.join(__dirname, '..', 'web_engine/src/main/resources/resfile/resources/app/obsidian.asar');
+try {
+  const app = extractFile(asarPath, 'app.js').toString('utf8');
+  const main = extractFile(asarPath, 'main.js').toString('utf8');
+  try { new vm.Script(app); console.log('  OK  app.js syntax'); } catch (e) {
+    console.log('  FAIL app.js syntax:', e.message);
+    const m = e.stack && e.stack.match(/<anonymous>:(\d+):(\d+)/);
+    if (m) {
+      const lines = app.split('\n');
+      const line = +m[1];
+      console.log('  context:', JSON.stringify((lines[line - 1] || '').slice(0, 200)));
+    }
+    process.exit(1);
+  }
+  try { new vm.Script(main); console.log('  OK  main.js syntax'); } catch (e) {
+    console.log('  FAIL main.js syntax:', e.message);
+    process.exit(1);
+  }
+  const checks = {
+    'app touch patch v7': app.includes('__ohsidianTouchPatch==="7"'),
+    'app event-driven keyboard (modePollMs=200)': app.includes('modePollMs=200'),
+    'app system fonts style': app.includes('ohsidian-system-fonts'),
+    'app restore-fonts command': app.includes('restoreSystemFonts'),
+    'app vault migrate cmd': app.includes('ohsidian-vault-visible'),
+    'app trash hook': app.includes('__ohsidianTrashHook'),
+    'app mode-switch file sync': app.includes('syncActiveFileToTargetLayout'),
+    'app font scale follower': app.includes('applyFontScale'),
+    'app documents-dir migration': app.includes('pickMigration') && app.includes('当前仓库在应用沙箱内'),
+    'app migration self-copy guard': app.includes('目标目录在当前仓库内'),
+    'app font family cycle command': app.includes('ohsidian-font-family'),
+    'app desktop safe-pad (viewportAware)': app.includes('viewportAvoidsBars'),
+    'main documents vault default': main.includes('__ohDvResolve'),
+    'app no adaptive keyboard poll': !app.includes('isEditing()?'),
+    'main IPC guard': main.includes('__ohsidianIpcGuard'),
+    'main updater disabled': main.includes('(at||(D.updateDisabled=!0))'),
+    'main default vault fix': main.includes('__ohsidianDefaultVault'),
+    'main deeplink bridge': main.includes('__ohsidianDeepLink'),
+  };
+  let ok = true;
+  for (const [k, v] of Object.entries(checks)) {
+    if (!v) ok = false;
+    console.log((v ? '  OK  ' : '  FAIL') + ' ' + k);
+  }
+  console.log(ok ? 'FRESH-PROCESS VERIFY: SYNTAX OK | all markers present' : 'FRESH-PROCESS VERIFY: FAILURES');
+  process.exit(ok ? 0 : 1);
+} catch (e) {
+  console.error('FRESH-PROCESS VERIFY: ERROR ' + e.message);
+  process.exit(1);
+}

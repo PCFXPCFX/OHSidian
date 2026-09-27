@@ -37,11 +37,6 @@ logs/
 *.new
 *.oldlocktest
 .cache/
-
-# HarmonyOS specific
-.preview/
-.hvigor/
-oh_modules
 # Test coverage
 coverage/
 
@@ -51,6 +46,16 @@ coverage/
 .env.development.local
 .env.test.local
 .env.production.local
+
+# HarmonyOS specific
+.preview/
+.hvigor/
+oh_modules/
+/build/
+# hvigor generated module build dirs + machine-specific generated files
+electron/build/
+web_engine/build/
+**/BuildProfile.ets
 
 # Huawei AGC credentials (contains API keys and client secrets)
 **/agconnect-services.json
@@ -77,4 +82,11 @@ local.properties
 scripts/node_modules/
 scripts/package-lock.json
 scripts/.tmp-update/
+scripts/.tmp-refresh/
+
+# ZCode workspace config
+.zcodeignore
+
+# Local working notes (personal TODO, not for distribution)
+TODO.md
 
