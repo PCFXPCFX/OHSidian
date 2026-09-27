@@ -18,9 +18,12 @@
 #     the released HAP is installable out of the box. Without the secrets the
 #     unsigned HAP is published and users sign it themselves (see docs).
 #
-# Outputs (build matrix): one .hap per launcher icon (ohsidian / ipados),
-# each with SHA256SUMS.txt + MD5SUMS.txt. A follow-up "release" job merges
-# both builds and attaches everything to a GitHub Release on a v* tag push.
+# Outputs (build matrix): one .hap per launcher icon (ohsidian / obsidian),
+# named OHSidian-v<version>-<icon>-icon-<signed|unsigned>.hap, each with
+# SHA256SUMS.txt + MD5SUMS.txt plus a preview PNG of its launcher icon
+# (docs/images/icon-<icon>.png). A follow-up "release" job merges both
+# builds, renders release notes whose download table shows each HAP's icon
+# inline, and attaches everything to a GitHub Release on a v* tag push.
 
 name: build-release
 
@@ -236,8 +239,10 @@ jobs:
           mkdir -p dist
           find . -path ./oh_modules -prune -o -name '*.hap' -print
           # Rename hvigor's <module>-<product>-<mode>[-unsigned].hap to
-          # OHSidian-v<version>-<icon>-<signed|unsigned>.hap so both matrix
-          # builds can attach to the same Release without name clashes.
+          # OHSidian-v<version>-<icon>-icon-<signed|unsigned>.hap (e.g.
+          # OHSidian-v1.2.0-obsidian-icon-signed.hap) so the icon variant is
+          # readable straight from the file name and both matrix builds can
+          # attach to the same Release without name clashes.
           find . -path ./oh_modules -prune -o -name '*.hap' -print | while read -r f; do
             base="$(basename "$f")"
             case "$base" in
@@ -245,8 +250,15 @@ jobs:
               *signed*)   suffix="signed" ;;
               *)          suffix="build" ;;
             esac
-            cp "$f" "dist/OHSidian-v${VERSION}-${{ matrix.icon }}-${suffix}.hap"
+            cp "$f" "dist/OHSidian-v${VERSION}-${{ matrix.icon }}-icon-${suffix}.hap"
           done
+          # Ship a small preview PNG of this build's launcher icon so the
+          # Release download table can show what each HAP's icon looks like.
+          if [ -f "docs/images/icon-${{ matrix.icon }}.png" ]; then
+            cp "docs/images/icon-${{ matrix.icon }}.png" "dist/icon-${{ matrix.icon }}.png"
+          else
+            echo "::warning::Icon preview missing: docs/images/icon-${{ matrix.icon }}.png"
+          fi
           cd dist
           sha256sum *.hap > SHA256SUMS.txt
           md5sum *.hap > MD5SUMS.txt
@@ -255,11 +267,12 @@ jobs:
       - name: Upload workflow artifact (every run)
         uses: actions/upload-artifact@v4
         with:
-          name: ohsidian-v${{ env.APP_VERSION }}-${{ matrix.icon }}-hap
+          name: ohsidian-v${{ env.APP_VERSION }}-${{ matrix.icon }}-icon-hap
           path: |
             dist/*.hap
             dist/SHA256SUMS.txt
             dist/MD5SUMS.txt
+            dist/icon-*.png
 
   # Merges the matrix builds' artifacts into ONE GitHub Release (a single
   # release job avoids two jobs racing on the same tag).
@@ -276,7 +289,7 @@ jobs:
       - name: Download built HAPs
         uses: actions/download-artifact@v4
         with:
-          pattern: ohsidian-v*-hap
+          pattern: ohsidian-v*-icon-hap
           merge-multiple: true
           path: dist
 
@@ -298,14 +311,22 @@ jobs:
           fi
           HAP_TABLE="$RUNNER_TEMP/hap-table.md"
           {
-            echo "| 文件 | 说明 |"
-            echo "| --- | --- |"
+            echo "| 桌面图标 | 文件 | 说明 |"
+            echo "| --- | --- | --- |"
+            IMG_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/docs/images"
             for f in *.hap; do
               case "$f" in
-                *-obsidian-*) desc="HarmonyOS HAP 安装包(Obsidian 官方图标版)" ;;
-                *)            desc="HarmonyOS HAP 安装包(OHsidian 图标版)" ;;
+                *-obsidian-icon-*)     icon="obsidian";     desc="Obsidian 官方图标版" ;;
+                *-ohsidian-gem-icon-*) icon="ohsidian-gem"; desc="OHsidian 宝石图标版" ;;
+                *-ohsidian-icon-*)     icon="ohsidian";     desc="OHsidian 图标版(本移植版专属)" ;;
+                *)                     icon="";             desc="HarmonyOS HAP 安装包" ;;
               esac
-              echo "| \`$f\` | $desc |"
+              if [ -n "$icon" ] && [ -f "icon-${icon}.png" ]; then
+                cell="<img src=\"${IMG_BASE}/icon-${icon}.png\" width=\"48\" alt=\"${icon}\">"
+              else
+                cell="—"
+              fi
+              echo "| $cell | \`$f\` | $desc |"
             done
           } > "$HAP_TABLE"
           sed -e "s/{{VERSION}}/$VERSION/g" \
@@ -328,3 +349,4 @@ jobs:
             dist/*.hap
             dist/SHA256SUMS.txt
             dist/MD5SUMS.txt
+            dist/icon-*.png

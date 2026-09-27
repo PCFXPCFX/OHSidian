@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Run the Obsidian note-taking experience you know and love on HarmonyOS devices — with multi-window support, one-tap Huawei Account sign-in, Huawei Cloud sync, and comprehensive native system integration.
+  Run the Obsidian note-taking experience you know and love on HarmonyOS tablets and 2-in-1 PCs — with multi-window support, one-tap Huawei Account sign-in, Huawei Cloud sync, and comprehensive native system integration.<br>Tablets and 2-in-1 PCs only; phones are not supported.
 </p>
 
 <p align="center">
@@ -48,7 +48,7 @@ At its core, OHsidian **shims the Electron API surface using HarmonyOS native ca
 | App ID | `com.mikannqaq.obsidian` |
 | Version | 1.0.0 (versionCode: 1000000) |
 | Target SDK | HarmonyOS 6.0.2(22) / API 22 |
-| Target Devices | 2in1 (foldable/tablet), Tablet |
+| Target Devices | 2in1 (foldable/tablet), Tablet (phones not supported) |
 | Language | ArkTS (TypeScript) |
 | Build System | Hvigor |
 | Obsidian Engine | 1.13.7 |

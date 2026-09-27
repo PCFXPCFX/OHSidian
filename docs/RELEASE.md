@@ -77,16 +77,18 @@ release Profile 要关联本应用的包名 `com.mikannqaq.obsidian`)。
 ## 三、校验哈希
 
 Release 附件里的 `SHA256SUMS.txt` / `MD5SUMS.txt` 与 HAP 同时生成
-(产物命名为 `OHSidian-v<版本>-unsigned.hap`),哈希值同时写进 Release
+(产物命名为 `OHSidian-v<版本>-<图标>-icon-<signed|unsigned>.hap`,
+如 `OHSidian-v1.2.0-obsidian-icon-unsigned.hap`,图标段
+`ohsidian` / `obsidian` 对应两种桌面图标变体),哈希值同时写进 Release
 正文,可直接比对:
 
 ```bash
 # Linux / macOS
 sha256sum -c SHA256SUMS.txt
 md5sum -c MD5SUMS.txt
-# Windows PowerShell
-Get-FileHash .\OHSidian-v1.2.0-unsigned.hap -Algorithm SHA256
-Get-FileHash .\OHSidian-v1.2.0-unsigned.hap -Algorithm MD5
+# Windows PowerShell(通配符同时匹配两种图标变体)
+Get-FileHash .\OHSidian-v1.2.0-*-icon-unsigned.hap -Algorithm SHA256
+Get-FileHash .\OHSidian-v1.2.0-*-icon-unsigned.hap -Algorithm MD5
 ```
 
 ## 四、发布操作顺序

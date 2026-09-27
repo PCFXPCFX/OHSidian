@@ -1,4 +1,4 @@
-OHSidian 是 [Obsidian](https://obsidian.md) 的非官方 HarmonyOS 移植版：在 HarmonyOS 手机 / 平板上直接运行原版 Obsidian。
+OHSidian 是 [Obsidian](https://obsidian.md) 的非官方 HarmonyOS 移植版：在 HarmonyOS **平板 / 2in1 电脑**上直接运行原版 Obsidian。仅支持平板与 2in1 电脑，暂不支持手机。
 
 > 目标系统：HarmonyOS NEXT / HarmonyOS 6（API 24 真机验证）。遇到问题欢迎提 [Issue](https://github.com/PCFXPCFX/OHSidian/issues)。
 
@@ -6,10 +6,11 @@ OHSidian 是 [Obsidian](https://obsidian.md) 的非官方 HarmonyOS 移植版：
 
 {{HAP_TABLE}}
 
-同一版本提供两种桌面图标：**OHsidian 图标版**（本移植版专属）与
+同一版本提供两种桌面图标（下载表第一列即为图标预览）：**OHsidian 图标版**（本移植版专属）与
 **Obsidian 官方图标版**，功能完全一致，按桌面图标喜好选择下载。
-两个包签名后任选其一安装；换装另一版本时请先卸载（或使用同一
-签名直接覆盖）。
+文件名中也带有图标标识，如 `OHSidian-v{{VERSION}}-obsidian-icon-unsigned.hap`
+为 Obsidian 官方图标版。两个包签名后任选其一安装；换装另一版本时请先卸载
+（或使用同一签名直接覆盖）。
 
 ## 安装与签名
 
@@ -28,7 +29,7 @@ HAP **未签名**，不能直接安装到设备。推荐使用图形化工具完
 下载后建议先校验文件完整性：
 
 - Linux / macOS / Git Bash：`sha256sum -c SHA256SUMS.txt`
-- Windows PowerShell：`Get-FileHash .\OHSidian-v{{VERSION}}-unsigned.hap -Algorithm SHA256`
+- Windows PowerShell：`Get-FileHash .\OHSidian-v{{VERSION}}-*-icon-unsigned.hap -Algorithm SHA256`
 
 SHA-256:
 

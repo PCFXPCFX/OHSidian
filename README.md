@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  在 HarmonyOS 设备上运行你熟悉的 Obsidian 笔记体验 —— 支持多窗口、华为账号一键登录以及完整的系统级原生适配。
+  在 HarmonyOS 平板 / 2in1 电脑上运行你熟悉的 Obsidian 笔记体验 —— 支持多窗口、华为账号一键登录以及完整的系统级原生适配。<br>仅支持平板与 2in1 电脑，暂不支持手机。
 </p>
 
 <p align="center">
@@ -48,7 +48,7 @@
 | 应用 ID | `com.mikannqaq.obsidian` |
 | 版本号 | 1.0.0（versionCode: 1000000） |
 | 目标 SDK | HarmonyOS 6.1.1(24) / API 24(CI 构建组合;兼容 6.0.2(22)) |
-| 目标设备 | 2in1（折叠屏/平板）、平板 |
+| 目标设备 | 2in1（折叠屏/平板）、平板（不支持手机） |
 | 开发语言 | ArkTS (TypeScript) |
 | 构建系统 | Hvigor |
 | 内核版本 | Obsidian 1.13.7 |
