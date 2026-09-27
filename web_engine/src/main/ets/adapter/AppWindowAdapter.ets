@@ -34,7 +34,7 @@ import { BusinessError } from '@ohos.base';
 import common from '@ohos.app.ability.common';
 import { contextConstant, StartOptions } from '@kit.AbilityKit';
 import { display, window } from '@kit.ArkUI';
-import { deviceInfo } from '@kit.BasicServicesKit';
+import { deviceInfo, settings } from '@kit.BasicServicesKit';
 import { image } from '@kit.ImageKit';
 import Want from '@ohos.app.ability.Want';
 
@@ -91,6 +91,22 @@ export class AppWindowAdapter extends BaseAdapter {
       LogUtil.warn(TAG, 'getDisplayDensity failed: ' + JSON.stringify(exception));
     }
     return 1;
+  }
+
+  // Mirrors WebAbility.pcModeEnabled for window-creation decisions: reads
+  // the same system setting the ability tracks. 'true' = tablet PC mode
+  // (floating desktop windows), 'false'/unavailable = tablet touch mode
+  // (windows are fullscreen).
+  private isTabletPcMode(): boolean {
+    try {
+      let ctx = this.ctxAdapter.getActiveContext() || this.ctxAdapter.getContext();
+      let value = settings.getValueSync(ctx, 'window_pcmode_switch_status', 'false',
+        settings.domainName.USER_PROPERTY);
+      return value === 'true';
+    } catch (exception) {
+      LogUtil.warn(TAG, 'isTabletPcMode read failed: ' + JSON.stringify(exception));
+      return false;
+    }
   }
 
   private applyWindowTitleButtonVisible(id: number) {
@@ -204,6 +220,19 @@ export class AppWindowAdapter extends BaseAdapter {
       }
       if (param.is_panel) {
         options.windowMode = AbilityConstant.WindowMode.WINDOW_MODE_FULLSCREEN;
+      }
+      // Tablet touch mode: every engine-created window (starter vault
+      // chooser, vault windows opened from it) must fill the display -
+      // the engine requests desktop-sized bounds (800x600/800x650 DIP)
+      // which land as a small floating rect on the tablet (the reported
+      // "仓库管理初始界面跳转后长宽不对"). Read the same system setting
+      // WebAbility tracks (window_pcmode_switch_status): 'false' on a
+      // tablet means touch mode → launch fullscreen. PC mode / 2in1 keep
+      // the desktop-window behavior.
+      if (deviceInfo.deviceType === 'tablet' && !this.isTabletPcMode()) {
+        options.windowMode = AbilityConstant.WindowMode.WINDOW_MODE_FULLSCREEN;
+        options.windowLeft = 0;
+        options.windowTop = 0;
       }
       if (param.display_id != -1) {
         options.displayId = param.display_id;
@@ -588,7 +617,13 @@ export class AppWindowAdapter extends BaseAdapter {
     let windowClass = proxy?.getWindow();
     try {
       windowClass?.setWindowDecorVisible(useNativeFrame);
-      windowClass?.setWindowTitleMoveEnabled(useNativeFrame);
+      // Keep title-bar dragging enabled regardless of the frame style: on
+      // this engine the web content has no -webkit-app-region support, so
+      // the system caption is the only drag surface. When the native frame
+      // is hidden (Obsidian-drawn style), the WMS caption strip is not
+      // drawn anyway, so enabling move costs nothing and keeps free
+      // windows draggable whenever the caption is re-shown.
+      windowClass?.setWindowTitleMoveEnabled(true);
       let preferences: WindowPreferences | undefined = proxy?.getWindowPreferences();
       if (preferences) {
         preferences.hideTitleBar = !useNativeFrame;

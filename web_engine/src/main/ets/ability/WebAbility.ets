@@ -34,6 +34,8 @@ import Want from '@ohos.app.ability.Want';
 import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import { BusinessError, deviceInfo, settings } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
+import environment from '@ohos.file.environment';
+import font from '@ohos.font';
 import { NativeThemeAdapter } from '../adapter/NativeThemeAdapter';
 import { AbilityManager } from '../common/AbilityManager';
 import { Configuration } from '@ohos.app.ability.Configuration';
@@ -68,36 +70,83 @@ export class WebAbility extends WebBaseAbility {
   // top: calc(100vh - var(--keyboard-height) - toolbar-height) and nothing
   // in the engine sets that variable.
   private keyboardCss: number = 0;
+  // System font-size scale (settings.fontSizeScale, followSystem). The
+  // engine applies it to native fp text but the WEB content never sees it
+  // (no engine binding queries it), so publish it through the mode file and
+  // let the renderer scale --font-text-size. 1.0 = default.
+  private fontScale: number = 1.0;
   private mainWindow: window.Window | undefined = undefined;
 
-  // Display-mode state machine (see updateWindowPcmodeSwitchStatus):
-  // Official immersive pattern: the window uses layout fullscreen, so the
-  // app background extends edge-to-edge under the (visible, system-managed)
-  // status bar and navigation indicator; the WEB CONTENT avoids them using
-  // the real insets we publish through ohsidian-mode.json (see
-  // pushSafeAreaInsets). We never hide the bars.
-  //  - tablet, PC mode off  -> fullscreen layout; window forced back to
-  //    maximize on launch / after PC-mode switches (the system restores the
-  //    app in whatever state it last had, including a floating window);
-  //    maximize follows the app's fullscreen setting, so the bars stay.
-  //  - tablet, PC mode on   -> free-floating windows; insets published as 0
-  //    (floating windows never overlap the bars).
-  //  - phone                -> same fullscreen layout with real insets.
-  //  - 2in1 / PC            -> plain windowed behavior, insets 0.
+  // Display-mode state machine (docs/window-state-machine.md is the spec;
+  // keep this comment and that document in sync):
+  //  - tablet, PC mode off (touch) -> the window IS the whole display and
+  //    layout fullscreen is requested (API 24 tablets reject it with
+  //    "device not support" - harmless, the forced display rect below is
+  //    the real mechanism); the real bar insets are published through
+  //    ohsidian-mode.json (see pushSafeAreaInsets) for the web content.
+  //  - tablet, PC mode on / free windows / 2in1 -> plain window semantics.
+  //    Layout fullscreen is explicitly RESET to false: leaving it enabled
+  //    makes the web surface extend under the WMS caption strip and eat its
+  //    drag hot zone - the "system title bar cannot move the window" bug.
+  //    Insets are 0 (floating windows never overlap the bars).
+  //  - phone                       -> same as touch.
+  // There are NO timed settle/re-push compensations in this file: the engine
+  // starts the browser only after the XComponent surface reports a stable
+  // size (utils/SurfaceReady.ets), so every push below reacts to a real
+  // window-geometry event.
 
-  // Synthesizes the engine viewport from window properties. With layout
-  // fullscreen the system reports drawableRect == windowRect (no bars are
-  // subtracted), so the full window rect is correct; PC-mode floating
-  // windows keep the decorated drawableRect semantics in case a frame is
-  // present. All bounds listeners and the re-push timer share this single
-  // implementation.
+  // Synthesizes the engine viewport from window properties. Two regimes:
+  //  - Touch mode (full = true): the window IS the display; the real bar
+  //    insets are published separately and the web content avoids them.
+  //  - PC mode / free windows: the viewport is the window rect minus the
+  //    REAL avoid areas (status bar / nav indicator) and the caption strip.
+  //    Using drawableRect here is NOT enough: when a freeform window is
+  //    maximized on a tablet the system reports drawableRect covering the
+  //    nav-indicator strip (the window extends edge-to-edge while the
+  //    indicator floats on top) - the stale viewport left the bottom strip
+  //    of content hidden behind the navigation bar. Subtract the avoid
+  //    areas explicitly so maximized and restored states both converge.
   private computeViewportBound(prop: window.WindowProperties): WindowBound {
+    const winObj = this.mainWindow;
     const full = !this.pcModeEnabled;
+    if (full || !winObj) {
+      return {
+        left: prop.windowRect.left,
+        top: prop.windowRect.top,
+        width: prop.windowRect.width,
+        height: prop.windowRect.height,
+      };
+    }
+    // PC mode / free window: start from the window rect, subtract the
+    // caption (decor) area reported by drawableRect.top (0 when no caption)
+    // and any system-bar avoid areas that overlap the window.
+    let leftPx: number = prop.drawableRect.left;
+    let topPx: number = prop.drawableRect.top;
+    let widthPx: number = prop.drawableRect.width;
+    let heightPx: number = prop.drawableRect.height;
+    try {
+      const displayClass = display.getDefaultDisplaySync();
+      const rect = prop.windowRect;
+      const fullscreenLike: boolean = rect.width >= displayClass.width &&
+        rect.height >= displayClass.height;
+      if (fullscreenLike) {
+        // Maximized free window: drawableRect ignores the bars that float
+        // on top of the edge-to-edge window - subtract them explicitly.
+        const sysAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+        const navAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+        const bottomPx: number = Math.max(navAvoid.bottomRect.height, sysAvoid.bottomRect.height);
+        heightPx = Math.max(0, heightPx - bottomPx);
+        widthPx = Math.max(0, widthPx - Math.max(0,
+          Math.max(sysAvoid.leftRect.width, sysAvoid.rightRect.width)));
+      }
+    } catch (exception) {
+      LogUtil.warn(TAG, 'viewport avoid-area adjust failed: ' + JSON.stringify(exception));
+    }
     return {
-      left: full ? prop.windowRect.left : prop.windowRect.left + prop.drawableRect.left,
-      top: full ? prop.windowRect.top : prop.windowRect.top + prop.drawableRect.top,
-      width: full ? prop.windowRect.width : prop.drawableRect.width,
-      height: full ? prop.windowRect.height : prop.drawableRect.height,
+      left: prop.windowRect.left + leftPx,
+      top: prop.windowRect.top + topPx,
+      width: widthPx,
+      height: heightPx,
     };
   }
 
@@ -115,13 +164,28 @@ export class WebAbility extends WebBaseAbility {
     try {
       const handheld: boolean = deviceInfo.deviceType === 'tablet' ||
         deviceInfo.deviceType === 'phone';
-      if (handheld && !this.pcModeEnabled && winObj) {
-        const sysAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
-        const navAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
-        topPx = sysAvoid.topRect.height;
-        // Gesture indicator on tablets/phones; the system nav bar (three-key
-        // mode) reports through TYPE_SYSTEM instead - take whichever applies.
-        bottomPx = Math.max(navAvoid.bottomRect.height, sysAvoid.bottomRect.height);
+      if (handheld && winObj) {
+        // Touch-mode windows ALWAYS overlap the bars. PC-mode free windows
+        // don't - EXCEPT when maximized: a maximized freeform window covers
+        // the whole display edge-to-edge with the nav indicator floating on
+        // top, so its avoid areas are real and must be published (the
+        // renderer pads the content bottom; round 61 fix for the missing
+        // bottom avoidance in maximized PC windows).
+        let overlapsBars: boolean = !this.pcModeEnabled;
+        if (!overlapsBars) {
+          const displayClass = display.getDefaultDisplaySync();
+          const rect = winObj.getWindowProperties().windowRect;
+          overlapsBars = rect.width >= displayClass.width &&
+            rect.height >= displayClass.height;
+        }
+        if (overlapsBars) {
+          const sysAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+          const navAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+          topPx = sysAvoid.topRect.height;
+          // Gesture indicator on tablets/phones; the system nav bar (three-key
+          // mode) reports through TYPE_SYSTEM instead - take whichever applies.
+          bottomPx = Math.max(navAvoid.bottomRect.height, sysAvoid.bottomRect.height);
+        }
       }
     } catch (exception) {
       LogUtil.warn(TAG, 'read avoid areas failed: ' + JSON.stringify(exception));
@@ -159,6 +223,15 @@ export class WebAbility extends WebBaseAbility {
         try {
           winObj.setWindowDecorVisible(true);
           winObj.setWindowTitleButtonVisible(true, true, true);
+          // Re-enable WMS title-bar dragging: the startup path called
+          // setWindowTitleMoveEnabled(!hideTitleBar) with hideTitleBar=true
+          // (frameless BrowserWindow), which DISABLES the drag capability.
+          // Showing the decor buttons alone does not restore it - dragging
+          // stayed dead ("title bar cannot move the window"). The engine
+          // has no -webkit-app-region implementation either (verified in
+          // libelectron.so: no DraggableRegions interface), so the WMS
+          // caption is the only drag surface and it must always be movable.
+          winObj.setWindowTitleMoveEnabled(true);
         } catch (captionException) {
           LogUtil.warn(TAG, 'show system caption failed: ' + JSON.stringify(captionException));
         }
@@ -167,12 +240,35 @@ export class WebAbility extends WebBaseAbility {
     } catch (exception) {
       decor = 'none';
     }
-    this.writeInsetsToFile(topCss, bottomCss, decor, this.captionCss, this.keyboardCss);
+    this.writeInsetsToFile(topCss, bottomCss, decor, this.captionCss, this.keyboardCss,
+      this.viewportAvoidsBars());
+  }
+
+  // True when the ENGINE viewport bound is already reduced by the avoid
+  // areas (computeViewportBound subtracts them for fullscreen-like PC
+  // windows). The renderer uses this to skip its CSS-side bar padding:
+  // padding on top of the reduced surface would avoid the bars twice and
+  // leave a blank strip between the bar and the content.
+  private viewportAvoidsBars(): boolean {
+    if (!this.pcModeEnabled) {
+      return false;
+    }
+    const winObj = this.mainWindow;
+    if (!winObj) {
+      return false;
+    }
+    try {
+      const displayClass = display.getDefaultDisplaySync();
+      const rect = winObj.getWindowProperties().windowRect;
+      return rect.width >= displayClass.width && rect.height >= displayClass.height;
+    } catch (exception) {
+      return false;
+    }
   }
 
   // Read-modify-write for ohsidian-mode.json, preserving systemMode/override.
   private writeInsetsToFile(topCss: number, bottomCss: number, decor: string,
-    captionCss: number, keyboardCss: number): void {
+    captionCss: number, keyboardCss: number, viewportAvoidsBars: boolean): void {
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
       const filePath: string = filesDir + '/ohsidian-mode.json';
@@ -193,6 +289,7 @@ export class WebAbility extends WebBaseAbility {
       const unchanged: boolean = cfg['windowDecor'] === decor &&
         cfg['caption'] === captionCss &&
         cfg['keyboard'] === keyboardCss &&
+        cfg['viewportAvoidsBars'] === viewportAvoidsBars &&
         cfg['insets'] !== undefined &&
         (cfg['insets'] as Record<string, number>)['top'] === topCss &&
         (cfg['insets'] as Record<string, number>)['bottom'] === bottomCss;
@@ -203,6 +300,7 @@ export class WebAbility extends WebBaseAbility {
       cfg['windowDecor'] = decor;
       cfg['caption'] = captionCss;
       cfg['keyboard'] = keyboardCss;
+      cfg['viewportAvoidsBars'] = viewportAvoidsBars;
       const file = fileIo.openSync(filePath,
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
       try {
@@ -260,11 +358,11 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
-  // The engine can latch the viewport and miss resize events that fire before
-  // its surface is attached (first launch), or keep a stale inset across
-  // tablet/PC-mode switches. Re-push the current bounds so the viewport
-  // converges to the actual window.
-  private repushViewportBounds(): void {    try {
+  // Re-pushes the current window bounds to the engine. Called from real
+  // geometry events (avoidAreaChange, windowStatusChange); there are no
+  // timed re-pushes (docs/window-state-machine.md §3).
+  private repushViewportBounds(): void {
+    try {
       const win = this.mainWindow;
       if (!win) {
         return;
@@ -277,28 +375,16 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
-  // Deferred variant of repushViewportBounds, optionally forcing the window
-  // back to maximized first. Used by the first-launch settle and by the
-  // PC-mode switch handler while the window rect is still settling.
-  private settleViewportLater(delayMs: number, forceFullscreen: boolean): void {
-    setTimeout(() => {
-      if (forceFullscreen) {
-        this.forceFullscreenWindow();
-      }
-      this.repushViewportBounds();
-    }, delayMs);
-  }
-
-  // Forces the window back to fullscreen. The system restores the app window
-  // in its previous state - including a floating free-window from a PC-mode
-  // session - and in tablet mode the touch experience needs a fullscreen
+  // Forces the window back to fullscreen. Used ONLY for the touch-mode
+  // form factor (tablet without PC mode, phone): the system restores the
+  // app window in its previous state - including a floating free-window
+  // from a PC-mode session - and the touch experience needs a fullscreen
   // window. maximize() does not reliably fill the screen for a restored
   // floating window (WMS may time out or leave a clamped rect, observed as
   // 2385x1711 against a 2800x1753 work area), so set the rect explicitly.
   //
   // Official immersive pattern (API 24): the rect is the WHOLE display at
-  // (0,0) - no avoid-area subtraction. With layout fullscreen the window
-  // then extends under the visible status bar / navigation indicator, and
+  // (0,0) - no avoid-area subtraction. With the window covering the display
   // the window-relative avoid areas are exactly the bar heights, which
   // pushSafeAreaInsets publishes to the web content. The previous
   // display.height-minus-inset rect at y=inset left the status-bar strip
@@ -349,6 +435,154 @@ export class WebAbility extends WebBaseAbility {
   onConfigurationUpdate(config: Configuration) {
     if (config.colorMode !== undefined) {
       this.nativeThemeAdapter?.setSystemNativeTheme(config.colorMode);
+    }
+    // System font size change (settings → 显示和字体 → 字体大小). With
+    // fontSizeScale=followSystem the framework recomputes native fp text;
+    // this callback is the app-visible notification. The web content scale
+    // is published through the mode file (see this.fontScale).
+    if (config.fontSizeScale !== undefined && config.fontSizeScale > 0) {
+      const next: number = Math.round(config.fontSizeScale * 100) / 100;
+      if (next !== this.fontScale) {
+        this.fontScale = next;
+        this.writeFontScaleToFile(next);
+      }
+    }
+  }
+
+  // Publishes the system font scale into ohsidian-mode.json (cfg.fontScale).
+  // Same read-modify-write channel as writeInsetsToFile but keyed separately
+  // so the renderer can react to font changes without a geometry event.
+  private writeFontScaleToFile(scale: number): void {
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const filePath: string = filesDir + '/ohsidian-mode.json';
+      let cfg: Record<string, Object> = {};
+      try {
+        if (fileIo.accessSync(filePath)) {
+          cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+          if (!cfg) {
+            cfg = {};
+          }
+        }
+      } catch (e) {
+        cfg = {};
+      }
+      const unchanged: boolean = cfg['fontScale'] === scale;
+      if (unchanged) {
+        return;
+      }
+      cfg['fontScale'] = scale;
+      const file = fileIo.openSync(filePath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      try {
+        fileIo.writeSync(file.fd, JSON.stringify(cfg));
+      } finally {
+        fileIo.closeSync(file);
+      }
+      LogUtil.info(TAG, 'font scale updated: ' + scale);
+    } catch (err) {
+      LogUtil.error(TAG, 'failed to write font scale to mode file: ' + JSON.stringify(err));
+    }
+  }
+
+  // Publishes the user-visible Documents directory (sandbox-mapped real
+  // path from file.environment.getUserDocumentDir, granted by the already
+  // declared READ_WRITE_DOCUMENTS_DIRECTORY permission) into the mode file
+  // as cfg.documentsDir. The renderer's default-vault override puts new
+  // vaults there so they are visible in 文件管理 and SURVIVE UNINSTALL -
+  // the app sandbox (userData) is wiped when the app is removed. A vault
+  // inside Documents and its .trash are user-manageable files.
+  private publishDocumentsDir(): void {
+    let documentsDir: string = '';
+    try {
+      documentsDir = environment.getUserDocumentDir();
+    } catch (exception) {
+      LogUtil.warn(TAG, 'getUserDocumentDir failed: ' + JSON.stringify(exception));
+    }
+    if (!documentsDir) {
+      return;
+    }
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const filePath: string = filesDir + '/ohsidian-mode.json';
+      let cfg: Record<string, Object> = {};
+      try {
+        if (fileIo.accessSync(filePath)) {
+          cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+          if (!cfg) {
+            cfg = {};
+          }
+        }
+      } catch (e) {
+        cfg = {};
+      }
+      if (cfg['documentsDir'] === documentsDir) {
+        return;
+      }
+      cfg['documentsDir'] = documentsDir;
+      const file = fileIo.openSync(filePath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      try {
+        fileIo.writeSync(file.fd, JSON.stringify(cfg));
+      } finally {
+        fileIo.closeSync(file);
+      }
+      LogUtil.info(TAG, 'documents dir published: ' + documentsDir);
+    } catch (err) {
+      LogUtil.error(TAG, 'failed to write documentsDir to mode file: ' + JSON.stringify(err));
+    }
+  }
+
+  // Publishes the installed system font family names (font.getSystemFontList)
+  // into the mode file as cfg.systemFonts. The renderer's font picker
+  // (OHSidian: 界面字体命令) offers these so the user can apply the font
+  // they configured in 系统设置 → 显示与字体 → 字体样式 (or any installed
+  // font) to Obsidian's interface/text. The list can be long; cap it and
+  // only refresh when it actually changes.
+  private publishSystemFonts(): void {
+    let families: Array<string> = [];
+    try {
+      const list = font.getSystemFontList();
+      if (Array.isArray(list)) {
+        families = list;
+      }
+    } catch (exception) {
+      LogUtil.warn(TAG, 'getSystemFontList failed: ' + JSON.stringify(exception));
+      return;
+    }
+    if (families.length === 0) {
+      return;
+    }
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const filePath: string = filesDir + '/ohsidian-mode.json';
+      let cfg: Record<string, Object> = {};
+      try {
+        if (fileIo.accessSync(filePath)) {
+          cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+          if (!cfg) {
+            cfg = {};
+          }
+        }
+      } catch (e) {
+        cfg = {};
+      }
+      const prev = cfg['systemFonts'] as string | undefined;
+      const nextJson: string = JSON.stringify(families);
+      if (prev !== undefined && prev === nextJson) {
+        return;
+      }
+      cfg['systemFonts'] = nextJson;
+      const file = fileIo.openSync(filePath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      try {
+        fileIo.writeSync(file.fd, JSON.stringify(cfg));
+      } finally {
+        fileIo.closeSync(file);
+      }
+      LogUtil.info(TAG, 'system fonts published: ' + families.length + ' families');
+    } catch (err) {
+      LogUtil.error(TAG, 'failed to write systemFonts to mode file: ' + JSON.stringify(err));
     }
   }
 
@@ -423,25 +657,98 @@ export class WebAbility extends WebBaseAbility {
     this.abilityManager?.addProxy(this);
 
     this.mainWindow = windowStage.getMainWindowSync();
+    // Publish the current system font scale once at startup (onConfigur-
+    // ationUpdate only fires on CHANGES); the renderer picks cfg.fontScale
+    // up from the mode file on boot. Two independent sources, first wins:
+    //  1. the ability Configuration.fontSizeScale - the framework injects
+    //     the effective factor here when configuration.json declares
+    //     fontSizeScale=followSystem (authoritative);
+    //  2. settingsdata FONT_SCALE key (may be absent on some builds).
+    try {
+      let scale: number = 0;
+      try {
+        const cfgScale = this.context.config.fontSizeScale;
+        if (typeof cfgScale === 'number' && cfgScale > 0) {
+          scale = cfgScale;
+        }
+      } catch (e) {
+        // config not ready yet - fall through to settingsdata
+      }
+      if (!(scale > 0)) {
+        const raw: string = settings.getValueSync(this.context,
+          settings.display.FONT_SCALE, '1.0');
+        const parsed: number = parseFloat(raw);
+        if (!isNaN(parsed) && parsed > 0) {
+          scale = parsed;
+        }
+      }
+      if (scale > 0) {
+        this.fontScale = Math.round(scale * 100) / 100;
+        this.writeFontScaleToFile(this.fontScale);
+        LogUtil.info(TAG, 'startup font scale: ' + this.fontScale);
+      }
+    } catch (exception) {
+      LogUtil.warn(TAG, 'read system font scale failed: ' + JSON.stringify(exception));
+    }
+    // Publish the user-visible Documents dir (uninstall-safe vault root);
+    // the renderer's default-vault override consumes cfg.documentsDir.
+    // READ_WRITE_DOCUMENTS_DIRECTORY is a user_grant permission: request it
+    // once here (main window only) and republish the dir when granted. The
+    // request is a no-op dialog after the first approval.
+    this.publishDocumentsDir();
+    this.publishSystemFonts();
+    if (this.xcomponentId === ConfigData.DEFAULT_WINDOW_ID) {
+      // Startup-time user_grant permissions (main window only). 0 ==
+      // REQUEST_PERMISSION_SUCCESS (module-private constant there).
+      //  - directory_document: uninstall-safe vault root (Documents);
+      //  - directory_download: downloads writes (engine save-as flows).
+      // Everything else (pasteboard/bluetooth/camera/mic/location/screen
+      // capture) stays on-demand: the engine requests it when the matching
+      // web feature runs, so users are not greeted with a wall of dialogs.
+      const dirRequests: Array<string> = ['directory_document', 'directory_download'];
+      let dirPending: number = dirRequests.length;
+      const republish = (): void => {
+        dirPending--;
+        if (dirPending === 0) {
+          this.publishDocumentsDir();
+        }
+      };
+      dirRequests.forEach((permType: string) => {
+        Inject.get(PermissionManagerAdapter).requestPermissions(permType,
+          (granted: number) => {
+            if (granted === 0) {
+              LogUtil.info(TAG, 'startup permission granted: ' + permType);
+            } else {
+              LogUtil.warn(TAG, 'startup permission NOT granted: ' + permType +
+                ' code=' + granted);
+            }
+            republish();
+          });
+      });
+    }
     // Diagnostic: dump the device shape - the mode branches below gate on it.
     LogUtil.error(TAG, 'diagnostic: deviceType=' + deviceInfo.deviceType +
       ', sdkApiVersion=' + deviceInfo.sdkApiVersion);
-    // Layout fullscreen BEFORE loadContent (official immersive step 1): the
-    // app background then extends under the visible status bar / navigation
-    // indicator, and the real insets are published to the renderer via
-    // pushSafeAreaInsets for the content avoidance. Without this the window
-    // is inset by the system and a dead background strip shows above the
-    // navigation indicator.
-    try {
-      this.mainWindow.setWindowLayoutFullScreen(true)
-        .then(() => {
-          LogUtil.info(TAG, 'Succeeded in setting window layout full screen');
-        })
-        .catch((err: BusinessError) => {
-          LogUtil.warn(TAG, 'Failed to set window layout full screen: ' + JSON.stringify(err));
-        });
-    } catch (exception) {
-      LogUtil.warn(TAG, 'Failed to call window layout full screen API: ' + JSON.stringify(exception));
+    // Layout fullscreen BEFORE loadContent (official immersive step 1), for
+    // the TOUCH form factor only. API 24 tablets reject the call ("device
+    // not support" - logged, harmless; the forced display rect in
+    // forceFullscreenWindow is the real mechanism). It must NOT stay on for
+    // free windows / PC mode: the web surface would extend under the WMS
+    // caption strip and swallow its drag hot zone ("title bar cannot move
+    // the window" - docs/window-state-machine.md §5). updateWindowPcmode-
+    // SwitchStatus resets it to false when PC mode is on.
+    if (deviceInfo.deviceType === 'tablet' || deviceInfo.deviceType === 'phone') {
+      try {
+        this.mainWindow.setWindowLayoutFullScreen(true)
+          .then(() => {
+            LogUtil.info(TAG, 'Succeeded in setting window layout full screen');
+          })
+          .catch((err: BusinessError) => {
+            LogUtil.warn(TAG, 'Failed to set window layout full screen: ' + JSON.stringify(err));
+          });
+      } catch (exception) {
+        LogUtil.warn(TAG, 'Failed to call window layout full screen API: ' + JSON.stringify(exception));
+      }
     }
 
     windowStage.getMainWindow((err, data) => {
@@ -453,6 +760,18 @@ export class WebAbility extends WebBaseAbility {
       try {
         data.on('windowStatusChange', (status) => {
           this.nativeContext.OnWindowStatusChange(this.xcomponentId, status);
+          // MAXIMIZE/RECOVER transitions change the window rect but on free
+          // windows the maximize animation can complete WITHOUT firing a
+          // trailing windowSizeChange (observed on API 24 tablets: after
+          // maximizing a PC-mode window the bottom strip stayed stale -
+          // engine viewport kept the pre-maximize height). Re-push the
+          // viewport and the insets so the content follows the new rect.
+          if (status === window.WindowStatusType.MAXIMIZE ||
+            status === window.WindowStatusType.FULL_SCREEN ||
+            status === window.WindowStatusType.FLOATING) {
+            this.pushSafeAreaInsets();
+            this.repushViewportBounds();
+          }
         })
       } catch (exception) {
         LogUtil.error(TAG,'Failed to listener for window status changes: ' + JSON.stringify(exception));
@@ -473,6 +792,10 @@ export class WebAbility extends WebBaseAbility {
 
       try {
         data.on("windowRectChange", (option) => {
+          // MAXIMIZE/RECOVER land here too (RectChangeReason.MAXIMIZE=1);
+          // the caption/avoid-area state follows the new rect, so refresh
+          // the mode file alongside the viewport push.
+          this.pushSafeAreaInsets();
           this.nativeContext.OnWindowRectChange(this.xcomponentId,
             this.computeViewportBound(data.getWindowProperties()),
             option.reason.valueOf());
@@ -554,35 +877,14 @@ export class WebAbility extends WebBaseAbility {
         // Publish the initial real insets once the window geometry exists;
         // avoidAreaChange keeps them fresh afterwards.
         this.pushSafeAreaInsets();
-        // Diagnostics: dump avoid areas + rects after the hides settle, so a
-        // persisting top gap can be attributed from the hilog.
-        setTimeout(() => {
-          try {
-            const prop = mainWin.getWindowProperties();
-            const sysAvoid = mainWin.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
-            const navAvoid = mainWin.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
-            LogUtil.error(TAG, 'avoid-area diagnostics: windowRect=' + JSON.stringify(prop.windowRect) +
-              ', drawableRect=' + JSON.stringify(prop.drawableRect) +
-              ', systemAvoid=' + JSON.stringify(sysAvoid) +
-              ', navIndicatorAvoid=' + JSON.stringify(navAvoid));
-          } catch (exception) {
-            LogUtil.warn(TAG, 'avoid-area diagnostics failed: ' + JSON.stringify(exception));
-          }
-        }, 2000);
-        // First launch only: the window is created at a smaller size and
-        // maximized right after, and the engine can latch the initial viewport
-        // and miss the resize events that fire before its surface is attached.
-        // Re-push the current bounds a few times so the viewport settles at
-        // the full window size.
-        const startupSettleDelays: Array<number> = [600, 1500, 3000];
-        startupSettleDelays.forEach((delayMs: number) => {
-          // Touch mode needs the FULL display rect; the system may restore a
-          // smaller (PC-mode session) rect on first launch. Force it here -
-          // the engine latches the surface size once, so the window must be
-          // final before the browser starts (SurfaceReady gates on that).
-          const force: boolean = deviceInfo.deviceType === 'tablet' && !this.pcModeEnabled;
-          this.settleViewportLater(delayMs, force);
-        });
+        // Touch form factor: the system may restore a smaller (PC-mode
+        // session) rect - force the FULL display rect once, synchronously.
+        // The engine starts the browser only after the surface is stable
+        // (SurfaceReady), so this lands before the viewport latches. No
+        // timed settle loops (docs/window-state-machine.md §3).
+        if (!this.pcModeEnabled) {
+          this.forceFullscreenWindow();
+        }
       }
       // hide title bar
       try {
@@ -602,7 +904,12 @@ export class WebAbility extends WebBaseAbility {
         }
       }
       try {
-        mainWin.setWindowTitleMoveEnabled(!this.hideTitleBar);
+        // Title-drag lives on the SYSTEM caption (the engine has no
+        // -webkit-app-region support), and pushSafeAreaInsets re-shows the
+        // caption for free windows - so the move capability must follow the
+        // caption, not hideTitleBar. Enabling it unconditionally is safe:
+        // fullscreen windows have no caption strip to drag.
+        mainWin.setWindowTitleMoveEnabled(true);
       } catch (exception) {
         LogUtil.warn(TAG, 'Failed to set window title move enabled: ' + JSON.stringify(exception));
       }
@@ -671,7 +978,8 @@ export class WebAbility extends WebBaseAbility {
         LogUtil.info(TAG, 'register window_pcmode_switch_status,res:' + res + ',xcomponentId:' + this.xcomponentId);
         // Whether or not the observer registered, the current value must be
         // read once: a tablet already in PC mode at launch needs the right
-        // mode, and the first read also triggers the fullscreen settle.
+        // mode, and the first read applies layout-fullscreen + window-rect
+        // corrections for the current form factor.
         this.updateWindowPcmodeSwitchStatus(context);
       } else {
         this.writeTouchModeFile(false);
@@ -818,35 +1126,56 @@ export class WebAbility extends WebBaseAbility {
       this.pcModeEnabled = newStatus;
       this.nativeContext.UpdateWindowPcmodeSwitchStatusCB(newStatus);
       this.writeTouchModeFile(newStatus);
+      // Layout fullscreen belongs to the TOUCH form factor only. Leaving it
+      // on in PC mode lets the web surface extend under the WMS caption and
+      // blocks its drag hot zone (docs/window-state-machine.md §5); leaving
+      // it off in touch mode lets the system inset the window. Reset it on
+      // every mode change so the flag always matches the form factor.
+      this.applyLayoutFullscreenForMode();
       // Floating PC-mode windows never overlap the bars -> publish zero
       // insets; back in tablet mode the real avoid areas apply again.
       this.pushSafeAreaInsets();
-      // Entering window mode: the system may restore a rect taller/wider
-      // than the visible work area (e.g. the full-display rect of the
-      // previous touch-mode session), which hides the window bottom behind
-      // the navigation area. Clamp it into the work area.
       if (newStatus) {
+        // Entering window mode: the system may restore a rect taller/wider
+        // than the display (e.g. the full-display rect of the previous
+        // touch-mode session), which hides the window bottom behind the
+        // navigation area. Clamp it into the display.
         this.clampWindowToWorkArea();
+      } else if (this.mainWindow) {
+        // Back to touch mode: force the FULL display rect once (maximize is
+        // unreliable for restored floating windows on API 24 - round 11).
+        this.forceFullscreenWindow();
       }
-      if (deviceInfo.deviceType !== 'tablet') {
-        return;
-      }
-      if (!this.mainWindow) {
-        return;
-      }
-      // The window rect changes across the mode switch and the engine may
-      // keep a stale viewport; re-sync after the window settles. Tablet mode
-      // (including the first read at launch) additionally forces the window
-      // back to maximized, because the system restores it as a floating
-      // free-window from a previous PC-mode session.
-      const settleDelays: Array<number> = [500, 1500];
-      settleDelays.forEach((delayMs: number) => {
-        this.settleViewportLater(delayMs, !newStatus);
-      });
       LogUtil.info(TAG, 'pc mode handled: enabled=' + newStatus +
         ', changed=' + modeChanged);
     } catch (err) {
       LogUtil.error(TAG, 'update window_pcmode_switch_status fail, err:' + JSON.stringify(err));
+    }
+  }
+
+  // Layout fullscreen is a TOUCH-form-factor property: on for phone/tablet
+  // touch (where the content avoids the visible bars via published insets),
+  // off for free windows / PC mode (where the WMS caption must keep its
+  // drag hot zone). Called on mode switches; startup handles the initial
+  // value in onWindowStageCreate.
+  private applyLayoutFullscreenForMode(): void {
+    if (!this.mainWindow) {
+      return;
+    }
+    if (deviceInfo.deviceType !== 'tablet' && deviceInfo.deviceType !== 'phone') {
+      return;
+    }
+    const want: boolean = !this.pcModeEnabled;
+    try {
+      this.mainWindow.setWindowLayoutFullScreen(want)
+        .then(() => {
+          LogUtil.info(TAG, 'layout fullscreen ' + want + ' applied for pcMode=' + this.pcModeEnabled);
+        })
+        .catch((err: BusinessError) => {
+          LogUtil.warn(TAG, 'layout fullscreen ' + want + ' rejected: ' + JSON.stringify(err));
+        });
+    } catch (exception) {
+      LogUtil.warn(TAG, 'layout fullscreen call threw: ' + JSON.stringify(exception));
     }
   }
 
