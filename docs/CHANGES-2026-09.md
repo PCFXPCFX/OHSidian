@@ -1669,3 +1669,431 @@ override(用户自选字体)永远优先,但未设置时的默认渲染没吃到
 "HarmonyOS Sans"/"HarmonyOS Sans SC"/"HarmonyOS Sans TC" 优先、
 原桌面栈兜底;等宽栈不动(CJK 由逐字回退处理)。用户在
 设置 → 外观里自选的字体仍然优先。
+
+### 第 50 轮(2026-09-27):窗口状态机重构——启动不最大化、定时补丁全删、标题条拖动根修
+
+TODO.md 1-6 项(窗口记忆化/启动不最大化/标题拖动/边框联动/切换 bug/
+状态机重构)作为一个整体施工。新规范文档 **docs/window-state-machine.md**
+(形态 × 事件 → 期望动作,代码必须与表一致)。
+
+**以代码为准的三个关键实证**:
+1. **记忆化本来就有,ArkTS 不用做**:Obsidian 桌面主进程把每窗口 bounds
+   写 `<userData>/<vaultId>.json`(main.js `me()/pe()/ee()`),启动时
+   `pe(u)` 恢复 x/y/w/h(`Dt()` 校验落屏),`isMaximized` 为真才最大化,
+   经 BrowserWindow 构造参数 → 引擎 CreateWindow → StartOptions 生效。
+   系统恢复的悬浮窗在窗口形态正是记忆化本身,只有触摸形态才需要矫正。
+2. **标题条拖不动的根因**:窗口模式(自由窗口)下 layout fullscreen 仍
+   处于开启状态(启动无条件调用),web surface 铺满整个窗口矩形、盖在
+   WMS 标题条的拖动热区之下,点击全部落入 web 内容。
+3. **补推竞态**:启动 600/1500/3000ms 三连与切模式 500/1500ms 双连
+   setTimeout 补推,会在 WMS 落定前把旧矩形推给引擎,正是"偶发窗口
+   不匹配/无响应"的温床(引擎 MoveToAsync 布局超时已有记录)。
+
+**WebAbility.ets 变更**:
+- `setWindowLayoutFullScreen(true)` 只在触摸形态(平板无 PC 模式/手机)
+  的启动路径调用;新增 `applyLayoutFullscreenForMode()` 在每次模式切换
+  时把该标志复位成与形态一致(窗口模式显式 false)——拖动热区归还给
+  WMS 标题条;
+- 删除 `settleViewportLater` 与全部 setTimeout 补推(含 2s avoid-area
+  诊断 dump);启动时触摸形态**同步**调用一次 `forceFullscreenWindow()`
+  (SurfaceReady 稳定门保证引擎在窗口定形后才读 surface,补推冗余);
+- 切回触摸模式同样单次 `forceFullscreenWindow()`;进入窗口模式仍走
+  `clampWindowToWorkArea()`(唯一保留的几何矫正,职责见状态机 §2);
+- AppWindowAdapter 的 `setFullScreen/setSimpleFullScreen`(Electron 显式
+  全屏 API)保留不动——那是用户主动行为,非启动补偿。
+
+**验证要点**:平板窗口模式从系统标题条按住拖动应可移动窗口;触摸/窗口
+模式来回切换各 5 次无窗口失配;触摸模式冷启动铺满;窗口模式启动大小=
+上次关闭时大小(主进程记忆化)。
+
+### 第 51 轮(2026-09-27):键盘高度纯事件驱动(去轮询)
+
+TODO 8。渲染层删除 `isEditing()` 自适应轮询(编辑焦点内 400ms/空闲 5s,
+最坏一个周期延迟+空闲耗电),统一为单一 **200ms 文件内容变化检查**:
+`pollTick` 每周期只做一次小 readFileSync,内容与上次相同则零工作;内容
+变化时才重跑 applyKeyboard(更新 `--keyboard-height`、派发
+keyboardWillShow/Hide 各一次)与 decor/trash/模式同步。ArkTS 侧
+`keyboardHeightChange` 每次变化都写模式文件(unchanged 检测只跳过同值,
+不合并不同值),键盘弹出→工具栏跟随延迟收敛到 ≤200ms;安全键盘等无事件
+场景如确认存在,兜底归 ArkTS 侧补事件源,不在渲染层恢复轮询。
+
+### 第 52 轮(2026-09-27):"恢复系统字体"命令(默认态即系统字体)
+
+TODO 7。机制实证(asar):Obsidian 字体设置写 `interfaceFontFamily /
+textFontFamily / monospaceFontFamily`,经 `updateFontFamily()` 落为
+`--font-*-override`(css 链:override → theme → --font-default);用户
+自选字体永远优先,而**空 override 时默认栈生效——第 49 轮已把
+--font-default 改为 HarmonyOS Sans 优先,故"开箱即系统字体"在默认态已
+成立**。设置里原生没有"系统文字"选项(字体选择器 minified),新增命令
+面板命令 **"OHSidian: 恢复系统字体 (HarmonyOS Sans)"**:清空三个字体
+配置项(vault.setConfig,触发 config-changed → updateFontFamily)+移除
+body 内联 override,渲染立即回到系统字体。优先级保持:用户自选 >
+系统默认。
+
+### 第 53 轮(2026-09-27):窗口边框样式联动核对(结论:实现正确,无需改码)
+
+TODO 4 核对(细节见 docs/window-state-machine.md §8):设置三档经
+main.js `Ae(frame)/Ue(titleBarStyle)` 在窗口创建时生效(hidden/custom
+→ frameless,Obsidian 自绘 .titlebar;native → frame:true 系统装饰),
+与 ArkTS `setWindowDecorVisible(!hideTitleBar)`(默认 true→无系统条)、
+平板自由窗口 pushSafeAreaInsets 强制系统标题条(decor='system')的既有
+决策不冲突;"隐藏→系统边框、Obsidian 风格→自绘边框"的期望映射方向
+经 asar/引擎两侧核实无误。
+
+### 工具链
+
+- `scripts/refresh-app-patch.mjs`:asar 原位补丁刷新(strip 旧标记 →
+  前缀新补丁 → createPackage → 回写),**新进程验证**拆分到
+  `scripts/verify-asar.cjs`(语法 + 全部补丁标记,规避 @electron/asar
+  同进程头缓存——第 43 轮教训的脚本化)。本轮刷新后验证全绿:
+  语法 OK / 键盘事件驱动 / 系统字体 / 恢复字体命令 / trash / IPC
+  guard / updater 关闭 / 默认仓库 / 深链桥全部在位。
+
+### 第 54 轮(2026-09-27):模式切换后"文章变了"——跨布局同步当前文件
+
+**根因(asar 实证)**:Obsidian 桌面/移动布局使用**两份独立的工作区文件**
+——`.obsidian/workspace.json`(桌面)与 `.obsidian/workspace-mobile.json`
+(模拟移动,`rd.isMobile ? e4 : J6`)。EmulateMobile 开关切换后重载,
+`loadLayout` 从**另一份**文件恢复布局/活动叶,打开的自然是那个布局上次
+的文章——这是原版设计(移动抽屉 vs 桌面分栏本就不同布局),不是 bug,
+也无法合并两份布局。
+
+**缓解**(渲染层补丁):applyMobile 在写入开关与重载**之前**执行
+`syncActiveFileToTargetLayout(on)`——把当前活动文件路径写入**目标布局**
+文件的 `lastOpenFiles` 头部(去重、上限 26)。空主布局(该布局此前无
+文章)启动时 Obsidian 会打开 `getLastOpenFiles()[0]`(setLayout 实证,
+case 8 分支),已有布局的用户也可在"最近文件"里一眼看到刚读的文章。
+两份布局文件本身仍各自独立,桌面分栏/移动抽屉结构不受影响。
+
+**工具链**:`scripts/refresh-app-patch.mjs` 支持带旧补丁的 asar 幂等
+刷新;`scripts/verify-asar.cjs` 增加 mode-switch 文件同步标记检查,
+本轮新进程验证全绿。
+
+### 第 55 轮(2026-09-27):系统字体大小(followSystem)透传进 Obsidian
+
+**现状核实**:AppScope 早已配置 `fontSizeScale: followSystem`
+(`AppScope/app.json5` 引用 `configuration.json`,maxScale 1.45)——用户
+提供的官方配置法在本项目**已经生效**,无需重复设置。fp 单位的原生文本
+(arkts UI)会跟随系统字号,但引擎 web 内容不在此列。
+
+**机制实证**:
+- 引擎侧(libadapter/libelectron 字符串核对)有
+  `ScreenAdapter::GetFontSizeScale` 与 `ElectronApp.GetFontSizeScale`
+  绑定,但 **libelectron 从未查询**该绑定,Chromium 亦无字体缩放应用
+  痕迹——web 内容拿不到系统字号缩放;
+- Obsidian 自有字号体系:设置 → 字号写 `baseFontSize`(10-30 钳制),
+  `updateFontSize()` 落为 `--font-text-size` + `html font-size`;
+- SDK 实证(`@ohos.settings.d.ts`、`Configuration.d.ts`):
+  `settings.display.FONT_SCALE` 可同步读当前缩放,
+  `onConfigurationUpdate(config)` 携带 `config.fontSizeScale` 在变化时
+  推送(API 12+,本机 24 满足)。
+
+**"打架"分析与合成策略**:系统缩放与 Obsidian 字号是**两层不同维度**——
+前者是用户对整个系统的无障碍缩放,后者是应用内排版基准。二者不该互斥,
+应可组合:渲染层以 Obsidian 的 `baseFontSize` 为基准、乘系统缩放系数,
+`--font-text-size = baseFontSize × fontScale`;系统缩放=1 时完全移除
+覆盖,Obsidian 自己的设置原样生效(零回归)。应用内改字号立即生效
+(updateFontSize 直改 CSS 变量,先于我们的覆盖),系统改字号 200ms 内
+经模式文件跟随。UI 布局尺寸(px 定宽元素)不随缩放,避免乱版。
+
+**实现**:
+- ArkTS(WebAbility):启动读 `settings.display.FONT_SCALE` 写入
+  `cfg.fontScale`(onConfigurationUpdate 只报变化,初值必须补);
+  `onConfigurationUpdate` 捕获 `config.fontSizeScale` 变化续写模式文件;
+- 渲染层(补丁):新增 `applyFontScale()`,挂在统一的"文件变化"消费者
+  上,把 `--font-text-size`/`html font-size` 设为基准×缩放(边界
+  0.5x-3.2x);scale=1 时恢复 Obsidian 原值,不做任何额外干预。
+
+**验证要点**:系统字体大小调到"大",Obsidian 正文应在 1s 内变大、UI
+不乱版;应用内 字号 改动仍然即时生效;缩放回到"标准"后与原版行为一致。
+
+### 附:TODO.md 与 .gitignore/.zcodeignore 清理(2026-09-27)
+
+- TODO.md(个人备忘)、.zcodeignore(ZCode 工作区配置)加入 .gitignore;
+- `web_engine/BuildProfile.ets` 为 hvigor 生成文件(随 debug/release
+  反复变化),git rm --cached 移出跟踪并加 `**/BuildProfile.ets` 忽略
+  规则(与 make-commits.sh 的硬守卫双保险);
+- .zcodeignore 同步以上规则;
+- 根目录 hs_err_pid*.log(JVM 崩溃转储)已被 `*.log` 覆盖,确认不入库。
+
+### 第 56 轮(2026-09-27):窗口标题条拖不动的真根因(移动能力被禁用)+ 最大化后底部内容被导航条遮住
+
+**问题一:标题条拖不动(用户反馈持续存在)**
+
+**真根因(代码+SDK 实证,推翻此前"layout fullscreen 热区"推断的主导地位)**:
+- 启动链路:`setWindowTitleMoveEnabled(!hideTitleBar)`,而主窗口
+  `hideTitleBar` 默认/来自引擎的值是 **true**(无框 BrowserWindow)→
+  **启动时 WMS 标题拖动能力被显式关闭**;
+- 第 40 轮加的 pushSafeAreaInsets 的 decor='system' 分支把系统标题条
+  **重新显示**,但**从未重新启用拖动能力**——条看得见却拖不动;
+- 用户建议的 parallelGesture/priorityGesture 方向核实结果:ArkTS 侧
+  PanGesture 仅转发滚轮/捏合给引擎(MultiInputAdapter 对 Finger 源
+  直接丢弃),不在标题条热区,不是根因;引擎**没有实现**
+  -webkit-app-region(libelectron.so 无 DraggableRegions 接口),系统
+  标题条是唯一拖动面,`setWindowTitleMoveEnabled` 就是官方开关。
+
+**修复**(三处,方向=让"可移动"与"可见标题条"始终同步):
+1. onWindowStageCreate:`setWindowTitleMoveEnabled(true)` 无条件启用
+   (全屏窗口无标题条,启用无副作用);
+2. pushSafeAreaInsets 的 decor='system' 分支:显示标题条的同时
+   `setWindowTitleMoveEnabled(true)`;
+3. AppWindowAdapter.setUseNativeFrame:改为 `setWindowTitleMoveEnabled(true)`
+   (隐藏系统边框时条本身不绘制,启用不损耗;防止用户切换
+   Obsidian 风格边框后拖动被永久关闭)。
+
+**问题二:平板窗口模式最大化后,底部导航条变高、显示截断一截、内容不更新**
+
+**机制**:自由窗口被最大化后 windowRect 变为整屏(边到边),导航指示条
+浮在窗口之上;但系统上报的 drawableRect **不扣除**该导航条 →
+computeViewportBound(PC 分支)用 drawableRect 合成视口 → 引擎视口比
+可见区域高一条导航条的量 → 底部内容被遮、且该状态只在"最大化"路径
+出现(普通拖拽 resize 的 drawableRect 语义正确,故只有全屏化复现)。
+
+**修复**:
+- computeViewportBound(PC 分支):对"全屏化"的自由窗口(整屏判定)显式
+  扣除真实避让区(TYPE_SYSTEM/TYPE_NAVIGATION_INDICATOR 的 bottom/left/
+  right);非最大化自由窗口维持 drawableRect 语义不变;
+- windowStatusChange:MAXIMIZE/FULL_SCREEN/FLOATING 翻转时补推
+  pushSafeAreaInsets + repushViewportBounds(最大化动画可能不尾随
+  windowSizeChange——用户看到的"内部画面没有更新"即此);
+- windowRectChange:同样补 pushSafeAreaInsets(状态文件里的 caption/
+  decor 须跟随新矩形)。
+
+**验证要点**:窗口模式拖系统标题条应即刻可拖动;双击标题条最大化/
+还原各 3 次后底部内容始终完整可见;最大化状态下上下留白=系统栏高度,
+无截断;触摸模式行为不变。
+
+### 第 57 轮(2026-09-27):跨布局同步修正——上一版只写 lastOpenFiles 是无效方案
+
+**审查发现(上一轮方案失效原因)**:第 54 轮把当前文件写进目标布局的
+`lastOpenFiles` 头部,但 asar 复查证实 `setLayout` **只在主布局为空时**
+才用 `lastOpenFiles[0]` 打开文件(getLayout case 8 分支);目标布局文件
+若已有上次模式的叶子节点,恢复走的是叶子里的视图状态,`lastOpenFiles`
+根本不参与——所以切换后文章依旧变。
+
+**正确的恢复键(asar 实证)**:布局 JSON 里每个叶子节点形如
+`{id, type:"leaf", state:{type:"markdown", state:{file, mode}}}`,
+反序列化经 `setViewState → view.setState`,markdown 视图的 setState 读
+`state.file` 调 `loadFile`——**叶子节点里的 `state.state.file` 才是
+"切过去后打开哪篇文章"的决定字段**(布局 `active` 字段标记活动叶 id)。
+
+**修正**(渲染层补丁,syncActiveFileToTargetLayout 重写):
+1. 读目标布局文件,定位 `active` 指向的叶子,把它的 markdown 视图
+   `state.state.file` 改为当前文件;无 active 标记或该叶非 markdown 时,
+   回退改写**第一个 markdown 叶**;
+2. `lastOpenFiles` 仍然前置写入(兜底"目标布局为空"的首切场景);
+3. 目标布局文件不存在(从未用过该模式)时,写入最小
+   `{lastOpenFiles:[当前文件]}` 种子;
+4. 写入时序安全:此时 Obsidian 自身的防抖保存写的还是**当前模式**的
+   源布局文件(rd.isMobile 未变),不会覆盖我们写的目标文件;800ms 后
+   重载按新 localStorage 进入目标模式,读到的即已改写的布局。
+
+**验证要点**:触摸模式读 A 文章 → 命令/系统切到窗口模式:重载后打开的
+应是 A(布局结构仍是桌面分栏);再切回触摸,仍是 A;两侧布局各自记忆
+折叠/侧栏状态不变。
+
+### 第 58 轮(2026-09-27):默认仓库迁移到用户可见的"文档"目录(卸载不丢数据)
+
+**需求**:用户侧在文件管理器中**完全看不到**仓库和 .trash(仓库默认在
+应用沙箱 userData,卸载即被清除)。期望:仓库放进系统"文档"目录方便
+管理、卸载不丢数据、用户有知情/选择权、与原 OHSidian 数据兼容。
+
+**可行性(SDK/代码实证)**:
+- `READ_WRITE_DOCUMENTS_DIRECTORY` 权限**已声明**在 module.json5(此前
+  为 FormAbility 场景配置);`@ohos.file.environment.getUserDocumentDir()`
+  (API 11+)返回"文档"目录的沙箱映射路径,普通 fs 读写即可访问——
+  写入的文件对系统文件管理器可见,且**不随卸载清除**;
+- 该权限是 user_grant,需 `requestPermissionsFromUser` 运行时请求
+  (PermissionManagerAdapter 已有 'directory_document' 通道,首次弹一次
+  授权框,之后静默);
+- 引擎 `app.getPath("documents")` 指向的位置不可写(第 38 轮实证),
+  故不走该路径,改经 ohsidian-mode.json 通道下发真实目录。
+
+**实现**:
+- **ArkTS(WebAbility)**:启动即 `publishDocumentsDir()` 把
+  `getUserDocumentDir()` 写入 `cfg.documentsDir`;主窗口创建后请求
+  'directory_document' 权限,授权回调里再发布一次(覆盖首装未授权时
+  拿不到路径的情况);权限被拒时 cfg.documentsDir 缺省,渲染层自动
+  回退旧 userData 行为——**不破坏原版兼容**;
+- **主进程补丁**:get-default-vault-path 改为优先返回
+  `<documents>/OHSidian/Obsidian Vault`(懒创建,首次"快速开始"时才建
+  目录,避免授权前残留空目录);documentsDir 不可用时回退
+  `<userData>/Obsidian Vault`(与原版 OHSidian 完全一致);
+- **渲染层补丁**:"迁移仓库到文件管理可见的位置"命令升级——检测当前
+  仓库在沙箱内(卸载会丢)且文档目录可用时,**一键**迁移到
+  `文档/OHSidian/<仓库名>` 并打开(复制式,原仓库不动,失败自动回退
+  文件夹选择器);仓库已在外部则维持原选择器流程。
+
+**用户沟通**:迁移命令执行时有 Notice 明示"当前仓库在应用沙箱内,
+卸载会丢数据";README 后续补充默认仓库位置说明。新装用户从"快速
+开始"创建的默认仓库天然落在文档目录,无需迁移。
+
+**与原版 OHSidian 的兼容**:
+- 旧版数据(<userData>/Obsidian Vault)保留在磁盘上,升级后打开仍指向
+  原仓库,零迁移成本;想搬到可见目录用迁移命令,纯复制、无数据风险;
+- 未授权/老设备自动回退到与原版完全一致的行为。
+
+**验证要点**:首装授权后"快速开始"默认仓库应出现在 文档/OHSidian/
+Obsidian Vault(文件管理器可见,含 .trash);卸载重装后该目录数据仍在;
+旧沙箱仓库升级后可正常打开;拒绝授权则行为与原版一致。
+
+### 第 59 轮(2026-09-27):字体缩放改走引擎 zoom(修复"设置不生效")+ 崩溃日志定性
+
+**故障定性(用户提供的 JSCrash)**:SIGTRAP(TRAP_BRKPT)落在
+`libelectron.so` 的 DisplayManagerAgent 回调栈(libdm OnRemoteRequest →
+引擎 agent 处理内 `d4200000` 即 __builtin_trap),**进程内系统 IPC 线程**,
+与应用 JS/ArkTS 代码无栈上关联——是引擎原生侧在处理系统推送的
+display 配置事件(换字体大小/密度重配会触发)时的内部断言失败,76 秒
+进程寿命恰与用户在系统设置改字号测试字体功能的时机吻合。闭源引擎
+无法打补丁,只能规避触发(如出现,重启即可;与我们的补丁链无关)。
+
+**字体缩放不生效的根因(自查)**:第 55 轮用"内联改写 body
+--font-text-size + html font-size"实现,但 Obsidian 自身的
+`updateFontSize()` 会在每次 css-change(baseFontSize 改动/主题加载/
+插件样式)时**原样重写这两个属性**——我们的缩放值立刻被冲掉。这就
+是"设置了还是没反应"。
+
+**改法(引擎 zoom 通道,clobber-proof)**:
+- `webFrame.setZoomFactor(scale)`(引擎 webContents shim 确认支持
+  setZoomLevel/setZoomFactor)整体缩放页面,等价手机上的系统字号体验;
+  CSS 再怎么重写也影响不到 zoom,只有我们的 applyFontScale 掌握它;
+- `cfg.fontScale` 生效链保留:onConfigurationUpdate(fontSizeScale 变化)
+  + 启动双源读取(context.config.fontSizeScale[followSystem 注入,权威]
+  → settingsdata FONT_SCALE 兜底);
+- **新增用户可选**:命令面板 "OHSidian: 界面文字缩放" 循环
+  跟随系统 → 100% → 110% → 125% → 150% → 175% → 200% → 跟随系统,
+  写入 `cfg.fontScaleOverride`(用户显式选择优先于系统因子;选择
+  "跟随系统"即回到系统联动);
+- zoom 不可用的引擎上保留 CSS 覆写兜底(有被 Obsidian 冲掉的老问题,
+  但聊胜于无)。
+
+**验证要点**:应用运行中在系统设置改字号 → 数百毫秒内 Obsidian 界面
+与正文同步缩放;执行缩放命令手动选 125% 立即生效,选"跟随系统"后
+回到系统联动;重启后保持;设置 → 缩放(Obsidian 自己的 slider)仍
+独立可用(两者相乘)。
+
+### 第 60 轮(2026-09-27):界面字体跟随系统设置 + 系统字体可选(修正第 59 轮需求理解)
+
+**需求澄清**:用户要的不是字号缩放,而是**字体家族**——系统
+"显示与字体 → 字体样式"里选的字体(以及用户安装的字体)能用于
+Obsidian 界面与正文。
+
+**机制实证**:
+- 系统侧:`font.getSystemFontList()`(API 10+,FontAdapter 已封装
+  GetSystemFontList 绑定)枚举全部已装字体家族;`Configuration.fontId`
+  (API 14+)是系统当前样式字体的不透明 id,但**没有公开的 fontId→家族
+  反查 API**;
+- 引擎侧:SkFontMgr_OHOS 按家族名解析字体;我们的默认栈首家族就是
+  "HarmonyOS Sans"——在支持把样式字体重映射到默认家族的系统上,
+  跟随是自动的;不支持时需要显式指定家族名;
+- 渲染层无法直接调 ArkTS 绑定,但 ohsidian-mode.json 通道是现成的
+  桥。
+
+**实现**(双通道:跟随系统为默认,显式自选兜底):
+- **ArkTS**:启动 `publishSystemFonts()` 把
+  `font.getSystemFontList()`(JSON,变化才写)发布为
+  `cfg.systemFonts`;
+- **渲染层**:新增命令 "OHSidian: 界面字体 (跟随系统/系统字体循环)"—
+  - 每执行一次切换到下一个系统字体家族,写
+    interfaceFontFamily/textFontFamily(vault.setConfig,立即生效且
+    持久化,触发 Obsidian 自己的 updateFontFamily,不会被冲掉);
+  - 循环末位回到"跟随系统":清空两个配置并移除 body 内联 override,
+    恢复 HarmonyOS Sans 默认栈;
+  - 列表上限 60 个家族,避免 Notice 刷屏过长;
+- 第 59 轮的"界面文字缩放"命令保留(zoom 通道,与字体家族正交)。
+
+**验证要点**:执行"界面字体"命令,Notice 显示切换到的家族名,界面
+立即换字体;循环回"跟随系统"恢复默认;在系统设置改样式字体后,若
+系统把默认家族重映射,跟随系统选项无需任何操作即跟随。
+
+### 第 61 轮(2026-09-27):触摸设备桌面布局的系统栏避让(两个场景一并修复)
+
+**场景一**:平板触摸模式窗口内手动切到"桌面模式"(EmulateMobile 关)→
+顶部系统状态栏(时间/电量)压住内容。桌面布局的 CSS 完全不消费
+--safe-area-inset-*(那是移动布局的变量),且 Obsidian 桌面初始化还会
+把它们清零;而触摸设备的窗口是整屏+layout-fullscreen,内容天然顶到
+屏幕最上沿。
+
+**方案选择**:备选是"隐藏系统栏"(setWindowSystemBarEnable([]))或
+"内容避让"。选**内容避让**:隐藏系统栏会改变全局系统 UI 行为(且系统
+在手势时可能强制恢复),避让只影响应用自身、所见即所得。实现:
+applySafeArea 在"桌面布局生效 且 窗口整屏(insets.top>0)"时注入
+`.app-container{padding-top/bottom:var(--safe-area-inset-*)}` 样式
+(ohsidian-desktop-safe-pad);移动布局/自由窗口(insets=0)不注入,行为
+不变。
+
+**场景二**:窗口模式(桌面布局)最大化到整屏后底部导航条仍遮内容。
+根因:pushSafeAreaInsets 原来把 insets 发布**门控在 !pcModeEnabled**
+上——PC 模式永远发 0,渲染层拿不到底栏高度;而最大化自由窗口是
+边到边的,导航指示条浮在窗口上,避让区是真实存在的。
+
+**修复**:insets 发布条件从"非 PC 模式"放宽为"窗口与系统栏重叠"
+(整屏判定);最大化自由窗口现在也会发布真实 top/bottom insets。
+三层避让齐备:①引擎视口扣避让区(第 56 轮) ②cfg.insets 真实值
+(本轮) ③渲染层桌面布局 padding(本轮)。
+
+**验证要点**:触摸→桌面模式切换后顶部时间/电量栏下方才是内容;窗口
+模式双击最大化后底部内容完整(导航条上方);非最大化自由窗口与移动
+布局行为不变。
+
+### 第 62 轮(2026-09-27):启动时权限申请 + 平板触摸模式首启仓库管理窗口全屏适配
+
+**权限**:文档目录权限(READ_WRITE_DOCUMENTS_DIRECTORY,user_grant)原来
+只在 onWindowStageCreate 里请求一次;补齐为**启动即请求**,并把
+directory_download 一并纳入(引擎另存/下载流程需要)。其余 user_grant
+权限(剪贴板/蓝牙/相机/麦克风/定位/录屏)维持**按需申请**——引擎在对应
+web 功能触发时才调用 RequestPermissionCode,避免首启弹一串对话框。
+
+**平板触摸模式首启"仓库管理"界面长宽不对**(用户澄清:是平板默认触摸
+模式,不是窗口模式;首启的 starter 仓库管理窗口本身就是错的长宽):
+- 根因:starter/仓库窗口由引擎 CreateWindow 创建,bounds 是桌面尺寸
+  800x650/800x600 DIP → 在平板触摸模式下落成一个小浮窗(比例和位置
+  都不对);
+- 修复:AppWindowAdapter.createWindow 新增触摸模式判定——平板且
+  window_pcmode_switch_status=false(触摸模式)时,StartOptions 强制
+  WINDOW_MODE_FULLSCREEN + 窗口 (0,0)(SDK 确认 windowMode 全屏仅对
+  平板/2in1 生效,正合场景);PC 模式与 2in1 保持桌面窗口语义。
+  isTabletPcMode() 读同一系统设置键,与 WebAbility.pcModeEnabled 同源。
+
+**验证要点**:平板触摸模式冷启动:仓库管理窗口直接全屏;从 starter
+选择/新建仓库跳转后的仓库窗口也全屏;PC 模式下 starter 仍是桌面
+浮窗;首启权限弹窗(文档/下载目录)只各出现一次,拒绝后功能自动回退。
+
+### 第 63 轮(2026-09-27):第 50-62 轮新增改动审计(未审部分全覆盖)
+
+按既有审计惯例,对本批(第 50-62 轮)所有未审计改动做正确性/边界/
+竞态/资源/安全五维复查,发现并修复 3 处,记录 1 处已知交互:
+
+**修复 1(中等,避让双计)**:第 61 轮的桌面布局 `.app-container`
+padding 与第 56 轮的引擎视口扣除,在"PC 模式最大化窗口"场景会**同时
+生效**——surface 已扣除导航条,渲染层再 pad 一次,内容与系统栏之间
+出现空白条(与第 43 轮白条同类)。修复:ArkTS 在模式文件发布
+`cfg.viewportAvoidsBars` 标志(computeViewportBound 对整屏自由窗口
+执行过扣除时为 true);渲染层 desktop-safe-pad 样式仅在
+`!viewportAvoidsBars` 时注入,两条通道互斥。触摸模式该标志恒 false,
+round 61 行为不变。
+
+**修复 2(中等,潜在死循环)**:迁移命令的文件夹选择器路径允许选中
+"当前仓库自身/其子目录",`copyDir(src,target)` 同树递归会自我复制
+直到深路径耗尽。修复:执行前 resolve 归一比较,目标在源内(含相等)
+时拒绝并提示;一键迁移路径(src=沙箱,dest=文档)根不相交,无此风险。
+
+**修复 3(轻微,健壮性)**:字体循环命令在读取 `window.app.vault` 后才
+判空,前面 `curFamily` 计算已经解引用 `window.app.vault`——仓库未就绪
+时会先抛 TypeError(虽被 try 包住,但 Notice 语义错)。调整顺序:先判
+空仓库再计算当前家族。
+
+**修复 4(轻微,文档准确性)**:pushSafeAreaInsets 注释把底部避让修复
+误标为"round 60",实为第 61 轮,已更正。
+
+**记录 1(已知交互,暂不处理)**:系统字体缩放(webFrame.setZoomFactor)
+与 Obsidian 设置→缩放滑杆写的是同一 Chromium zoom 层,后写者胜——
+用户在 Obsidian 里调缩放会暂时覆盖系统跟随系数,直到下一次
+cfg.fontScale 变化(模式文件变更)重新应用。二者相乘的组合需要追踪
+Obsidian 自身 zoom 状态,收益低风险高,暂保持现状(验证要点已提示)。
+
+**其余核查通过**:isTabletPcMode 上下文回退与失败默认(触摸全屏);
+createWindow 全屏门控对 is_panel/模态窗口无副作用;pollTick 单文件
+读+多消费者仅在内容变化时触发;文档目录 IPC 的路径来自自家 ArkTS
+发布,无不可信输入;verify-asar.cjs 补齐 4 个新标记(自拷贝守卫/
+字体循环/viewportAvoidsBars/documents 迁移),当前 21 项全绿。
