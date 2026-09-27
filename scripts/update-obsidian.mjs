@@ -107,13 +107,16 @@ function isVersionLess(a, b) {
  *    documentElement and dispatches keyboardWillShow/keyboardWillHide:
  *    Obsidian's mobile formatting toolbar positions itself with
  *    top: calc(100vh - var(--keyboard-height) - toolbar-height) and the
- *    engine never sets that variable. The mode-file poll runs at 400ms
- *    while an editor/input has focus (toolbar must follow the keyboard
- *    quickly) and 5s otherwise.
+ *    engine never sets that variable. The renderer is purely push-driven:
+ *    the ArkTS layer writes cfg.keyboard on every keyboardHeightChange and
+ *    the changed-file poll (200ms, no-op when the file is unchanged) fans
+ *    the new value out.
  *  - Prefers HarmonyOS system fonts (HarmonyOS Sans) in the default font
  *    stacks - the engine's SkFontMgr_OHOS exposes /system/fonts, so they
- *    resolve; user-chosen fonts still override this.
- *  - Registers a command-palette command that cycles the override.
+ *    resolve; user-chosen fonts still override this. A command-palette
+ *    command restores the system-font default by clearing the overrides.
+ *  - Registers command-palette commands (touch-mode cycle, vault
+ *    migration, system fonts).
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
 if(window.__ohsidianTouchPatch==="7")return;window.__ohsidianTouchPatch="7";
@@ -183,7 +186,35 @@ function applySafeArea(){
        viewport already follows drawableRect, which excludes the system
        caption (that is the whole point of setWindowDecorVisible(true)).
        Padding here would avoid the strip twice and leave a blank body
-       strip between the caption and the content. */
+       strip between the caption and the content.
+       DESKTOP LAYOUT IN A FULLSCREEN WINDOW (touch device, user switched
+       to desktop mode in-app): the desktop layout consumes NO safe-area
+       var, so the web content draws under the visible status bar / nav
+       indicator. Padding-top/bottom on body is the avoidance (option 2) -
+       keeping the system bars visible; hiding them (option 1) would fight
+       the system UI. Only apply when the window is fullscreen-like
+       (insets > 0) AND desktop layout is active; mobile layout consumes
+       the vars itself, and free windows get insets 0 so this is inert. */
+    var cfg=readMode();
+    var desktopLayout=!(function(){
+      try{return !!(cfg&&resolveWant(cfg))}catch(e){return false}
+    })();
+    /* viewportAvoidsBars: the ArkTS viewport push already subtracted the
+       bars from the surface (fullscreen-like PC window) - CSS padding
+       would avoid them twice (blank strip between bar and content). */
+    var alreadyAvoids=!!(cfg&&cfg.viewportAvoidsBars);
+    var pad=ins.top>0&&desktopLayout&&!alreadyAvoids;
+    var SID="ohsidian-desktop-safe-pad";
+    var el=document.getElementById(SID);
+    if(pad&&!el&&document.head){
+      el=document.createElement("style");
+      el.id=SID;
+      el.textContent=".app-container{padding-top:var(--safe-area-inset-top)!important;"+
+        "padding-bottom:var(--safe-area-inset-bottom)!important;box-sizing:border-box}";
+      document.head.appendChild(el);
+    }else if(!pad&&el&&el.parentNode){
+      el.parentNode.removeChild(el);
+    }
   }catch(e){}
 }
 function watchBodyStyles(){
@@ -221,7 +252,9 @@ function applyWindowDecor(){
    Chromium reads /system/fonts via SkFontMgr_OHOS (verified in
    libelectron.so), so "HarmonyOS Sans" resolves - but Obsidian's stock
    --font-default is a desktop stack (Segoe UI/Roboto) that mostly misses
-   it. User-chosen fonts (--font-*-override) still win over this. */
+   it. User-chosen fonts (--font-*-override) still win over this. The
+   "restore system fonts" command below clears those overrides so this
+   default applies again. */
 var FONT_STYLE_ID="ohsidian-system-fonts";
 function applySystemFonts(){
   try{
@@ -234,13 +267,13 @@ function applySystemFonts(){
     }
   }catch(e){}
 }
-/* IME height -> web content. The ArkTS layer publishes the keyboard height
-   (css px) as cfg.keyboard; Obsidian's mobile formatting toolbar positions
-   itself with top: calc(100vh - var(--keyboard-height) - toolbar-height)
-   and reacts to keyboardWillShow/keyboardWillHide DOM events - on real
-   mobile those come from the Capacitor keyboard plugin, which the engine
-   never emulates. Set the variable on documentElement and dispatch the
-   events whenever the published height changes. */
+/* Pure event-driven keyboard handling (docs/window-state-machine.md §7).
+   The ArkTS layer publishes the keyboard height (css px) as cfg.keyboard on
+   EVERY keyboardHeightChange - each change writes the mode file. The
+   renderer consumes pushes only: when the changed-file poll observes a new
+   height it updates --keyboard-height and dispatches the corresponding
+   event once. No keyboard-specific polling ladder exists. (Fallback for
+   event-less IMEs, e.g. secure keyboards, belongs in the ArkTS layer.) */
 var lastKeyboard=-1;
 function applyKeyboard(){
   try{
@@ -253,21 +286,75 @@ function applyKeyboard(){
     try{window.dispatchEvent(new Event(kb>0?"keyboardWillShow":"keyboardWillHide"))}catch(e){}
   }catch(e){}
 }
-/* Adaptive mode-file poll: fast while an editor/input has focus (the
-   keyboard can appear/disappear there and the toolbar must follow within
-   a fraction of a second), slow otherwise to stay easy on the battery. */
-function isEditing(){
+/* System font-size scale (HarmonyOS 设置 → 显示与字体 → 字体大小). The
+   framework scales native fp text but the web content never sees the
+   factor, so the ArkTS layer publishes cfg.fontScale and we apply it.
+   Round 59 redesign: the previous approach rewrote --font-text-size /
+   html font-size inline, but Obsidian's own updateFontSize() rewrites
+   BOTH on every css-change (baseFontSize setting, theme load, plugin
+   css) - the scaled value got clobbered immediately, which is why "字体
+   还是不生效". Now we drive the ENGINE zoom instead:
+   webFrame.setZoomFactor(scale) multiplies the whole page (UI + text),
+   cannot be clobbered from CSS, and mirrors how system font scale feels
+   on phones. User zoom (设置→缩放 slider, window:zoom-in commands) still
+   composes: Obsidian stores its own zoom level; we multiply only while
+   fontScale != 1 and restore 1 when neutral. */
+var lastFontScale=-1;
+function applyFontScale(){
   try{
-    var ae=document.activeElement;
-    return !!ae&&(ae.tagName==="INPUT"||ae.tagName==="TEXTAREA"||ae.isContentEditable===!0);
-  }catch(e){return false}
+    var cfg=readMode();
+    /* effective scale: explicit user override (command) wins, else the
+       system-published factor, else neutral 1 */
+    var sc=cfg&&cfg.fontScaleOverride!==undefined?(+cfg.fontScaleOverride||1):(cfg&&+cfg.fontScale)||1;
+    if(!(sc>0))sc=1;
+    sc=Math.min(3.2,Math.max(0.5,sc));
+    if(sc===lastFontScale)return;
+    lastFontScale=sc;
+    var applied=false;
+    try{
+      var wf=window.electron&&window.electron.webFrame;
+      if(wf&&typeof wf.setZoomFactor==="function"){wf.setZoomFactor(sc);applied=true}
+      else if(window.electronWindow&&typeof window.electronWindow.setFrameZoomLevel==="function"){
+        window.electronWindow.setFrameZoomLevel(Math.log(sc)/Math.log(1.2));applied=true;
+      }
+    }catch(e){}
+    if(!applied){
+      /* fallback: CSS override (can be clobbered by Obsidian's own font
+         updates, better than nothing on engines without webFrame) */
+      var v=window.app&&window.app.vault;
+      var base=16;
+      try{base=v.getConfig("baseFontSize")||16}catch(e){}
+      if(typeof base!=="number"||!(base>0))base=16;
+      var scaled=Math.min(base*3.2,Math.max(base*0.5,Math.round(base*sc*100)/100));
+      var de=document.documentElement;
+      if(de){de.style.setProperty("font-size",scaled+"px")}
+      if(document.body){document.body.style.setProperty("--font-text-size",scaled+"px")}
+    }
+  }catch(e){}
 }
+/* Single mode-file consumer: re-reads the file every 200ms and re-applies
+   every publisher (mode switch / decor / trash / keyboard / font scale)
+   ONLY when the file content changed - one small readFileSync per tick, no
+   work and no event spam when nothing moved. The ArkTS side writes on every
+   keyboardHeightChange / fontScale change, so consumers follow within one
+   tick without dedicated polling ladders. */
+var modePollMs=200,lastModeRaw=null;
 function pollTick(){
-  try{lastWant=syncFromSystem(lastWant)}catch(e){}
-  try{applyWindowDecor()}catch(e){}
-  try{hookTrash()}catch(e){}
-  try{applyKeyboard()}catch(e){}
-  setTimeout(pollTick,isEditing()?400:5000);
+  try{
+    var dir=dataDir();
+    if(dir){
+      var txt=require("fs").readFileSync(dir+MODE_FILE,"utf8");
+      if(txt!==lastModeRaw){
+        lastModeRaw=txt;
+        try{lastWant=syncFromSystem(lastWant)}catch(e){}
+        try{applyWindowDecor()}catch(e){}
+        try{hookTrash()}catch(e){}
+        try{applyKeyboard()}catch(e){}
+        try{applyFontScale()}catch(e){}
+      }
+    }
+  }catch(e){}
+  setTimeout(pollTick,modePollMs);
 }
 /* Deletion safety net. vault.trash(file, system) dispatches to
    adapter.trashSystem (engine bridge; HarmonyOS has no recycle-bin API for
@@ -295,10 +382,119 @@ function hookTrash(){
     }
   }catch(e){}
 }
+/* Stock Obsidian keeps TWO separate workspace layouts:
+   .obsidian/workspace.json (desktop) and .obsidian/workspace-mobile.json
+   (emulated mobile). Toggling EmulateMobile reloads into the OTHER file:
+   loadLayout -> setLayout restores THAT file's leaf nodes, each markdown
+   leaf carrying {state:{type:"markdown",state:{file}}} and re-opening the
+   file stored there (view.setState reads state.file -> loadFile). So after
+   a touch<->window switch the reopened article is whatever the other
+   layout last had - the reported "the article changes when switching".
+   lastOpenFiles alone is useless here: it is consulted only when the
+   layout has NO main split. The fix walks the TARGET layout's leaf nodes
+   and rewrites the markdown view of the leaf that is marked active (falls
+   back to the first markdown leaf) to the file currently being read, so
+   both modes reopen the same article while keeping their own layout
+   structure. Leaves that reference the same file keep working; a missing
+   target layout file leaves nothing to rewrite (first switch, layout will
+   be built fresh and empty-main fallback opens lastOpenFiles[0], which we
+   also set). */
+function syncActiveFileToTargetLayout(on){
+  try{
+    var v=window.app&&window.app.vault;
+    if(!v||!v.adapter||!v.configDir)return;
+    var active=null;
+    try{active=window.app.workspace.getActiveFile()}catch(e){}
+    if(!active||!active.path)return;
+    var target=on?"workspace-mobile.json":"workspace.json";
+    var p=v.configDir+"/"+target;
+    var rewriteLeaves=function(node){
+      /* returns number of markdown leaves rewritten */
+      var changed=0;
+      if(!node||typeof node!=="object")return 0;
+      if(node.type==="leaf"){
+        var st=node.state;
+        if(st&&st.type==="markdown"&&st.state&&typeof st.state==="object"){
+          st.state.file=active.path;
+          changed++;
+        }
+        return changed;
+      }
+      var kids=node.children;
+      if(Array.isArray(kids)){
+        for(var i=0;i<kids.length;i++){changed+=rewriteLeaves(kids[i])}
+      }
+      return changed;
+    };
+    var finish=function(layout){
+      try{
+        if(!layout||typeof layout!=="object")return;
+        /* 1) point the active markdown leaf (or the first one) at the file */
+        var touched=0;
+        var mark=function(node){
+          if(touched||!node||typeof node!=="object")return;
+          if(node.type==="leaf"){
+            var st=node.state;
+            if(st&&st.type==="markdown"&&st.state&&typeof st.state==="object"){
+              st.state.file=active.path;
+              touched++;
+            }
+            return;
+          }
+          var kids=node.children;
+          if(Array.isArray(kids)){for(var i=0;i<kids.length;i++)mark(kids[i])}
+        };
+        if(layout.active!=null){
+          /* walk the whole tree, but only rewrite the node whose id matches
+             the active leaf; fall back to first markdown leaf below */
+          var visit=function(node){
+            if(!node||typeof node!=="object")return;
+            if(node.type==="leaf"&&node.id===layout.active){
+              var st=node.state;
+              if(st&&st.type==="markdown"&&st.state&&typeof st.state==="object"){
+                st.state.file=active.path;
+                touched++;
+              }
+              return;
+            }
+            var kids=node.children;
+            if(Array.isArray(kids)){for(var i=0;i<kids.length;i++)visit(kids[i])}
+          };
+          ["main","left","right","floating"].forEach(function(k){
+            if(layout[k])visit(layout[k]);
+          });
+        }
+        if(!touched){
+          ["main","left","right","floating"].forEach(function(k){
+            if(layout[k]&&!touched)touched+=rewriteLeaves(layout[k]);
+          });
+        }
+        /* 2) also head the recent list for the empty-layout first-switch case */
+        var list=(layout.lastOpenFiles&&layout.lastOpenFiles.length)?layout.lastOpenFiles:[];
+        list=list.filter(function(x){return x!==active.path});
+        list.unshift(active.path);
+        layout.lastOpenFiles=list.slice(0,26);
+        return v.adapter.write(p,JSON.stringify(layout,null,2));
+      }catch(e){}
+    };
+    v.adapter.read(p).then(function(txt){
+      var layout=null;
+      try{layout=txt?JSON.parse(txt):null}catch(e){}
+      finish(layout);
+    },function(){/* target file missing: first switch. Seed a minimal
+      layout marker so the empty-main fallback opens the right file. */
+      try{
+        var seed={lastOpenFiles:[active.path]};
+        return v.adapter.write(p,JSON.stringify(seed,null,2));
+      }catch(e){}
+    });
+  }catch(e){}
+}
 function applyMobile(on,reason){
   try{
     var cur=!!localStorage.getItem(KEY);
     if(cur===on){applySafeArea();return false}
+    syncActiveFileToTargetLayout(on);
     if(on)localStorage.setItem(KEY,"1");else localStorage.removeItem(KEY);
     try{new Notice("OHSidian: "+(on?"进入触屏模式(移动布局)":"返回桌面模式")+(reason?(" ["+reason+"]"):"")+",即将重载…")}catch(e){}
     setTimeout(function(){window.location.reload()},800);
@@ -365,9 +561,13 @@ function migrateVaultToVisibleFolder(){
   try{
     var v=window.app&&window.app.vault;
     if(!v){try{new Notice("OHSidian: 仓库未就绪")}catch(e){}return}
+    /* If the current vault lives in the app sandbox (userData, wiped on
+       uninstall) and the Documents root is available, offer the ONE-TAP
+       default migration: copy to <documents>/OHSidian/<当前仓库名> and
+       reopen. Otherwise fall back to the directory picker. */
     var remote=require("@electron/remote");
     if(!remote||!remote.dialog){try{new Notice("OHSidian: 无法调起文件夹选择器")}catch(e){}return}
-    remote.dialog.showOpenDialog({
+    var pickMigration=function(){remote.dialog.showOpenDialog({
       properties:["openDirectory","createDirectory"],
       buttonLabel:"迁移仓库到这里"
     }).then(function(res){
@@ -378,6 +578,12 @@ function migrateVaultToVisibleFolder(){
         var srcDir;
         try{srcDir=v.adapter.getFullPath("/")}catch(e){}
         if(!srcDir){try{new Notice("OHSidian: 无法定位仓库根目录")}catch(e){}return}
+        /* copyDir(s,d) with s inside d (or equal) would recurse into the
+           partially-copied tree and never terminate */
+        var norm=function(p){try{return pathMod.resolve(p)}catch(e){return p}};
+        if(norm(target)===norm(srcDir)||norm(target).indexOf(norm(srcDir)+pathMod.sep)===0){
+          try{new Notice("OHSidian: 目标目录在当前仓库内,请选择仓库以外的位置")}catch(e){}return;
+        }
         try{new Notice("OHSidian: 开始迁移仓库到 "+target)}catch(e){}
         var copied=0;
         var copyDir=function(s,d,cb){
@@ -407,7 +613,77 @@ function migrateVaultToVisibleFolder(){
           }catch(e){try{new Notice("OHSidian: 打开新仓库失败 "+e.message)}catch(e2){}}
         });
       }catch(e){try{new Notice("OHSidian: 迁移失败 "+e.message)}catch(e2){}}
-    },function(){/* canceled by user */});
+    },function(){/* canceled by user */});};
+    var docsDir=null;
+    try{docsDir=(readMode()||{}).documentsDir||null}catch(e){}
+    var inSandbox=false;
+    try{
+      var cur=v.adapter.getFullPath("/");
+      var ud=require("@electron/remote").app.getPath("userData");
+      inSandbox=!!(cur&&ud&&cur.indexOf(ud)===0);
+    }catch(e){}
+    if(docsDir&&inSandbox){
+      /* one-tap default migration into the visible Documents root */
+      var name="Obsidian Vault";
+      try{name=require("path").basename(v.adapter.getFullPath("/"))||name}catch(e){}
+      var dest=require("path").join(docsDir,"OHSidian",name);
+      try{new Notice("OHSidian: 当前仓库在应用沙箱内,卸载会丢数据。开始迁移到 文档/OHSidian/"+name+" …")}catch(e){}
+      var fsMod=require("fs"),pathMod=require("path");
+      var srcDir;
+      try{srcDir=v.adapter.getFullPath("/")}catch(e){}
+      if(!srcDir){try{new Notice("OHSidian: 无法定位仓库根目录")}catch(e){}return}
+      var copied=0;
+      var copyDir2=function(s,d,cb){
+        fsMod.mkdir(d,{recursive:!0},function(){
+          fsMod.readdir(s,function(err,items){
+            if(err)return cb(err);
+            var pending=items.length,fail=null;
+            if(!pending)return cb(null);
+            var done=function(e2){fail=fail||e2;if(--pending===0)cb(fail)};
+            items.forEach(function(nm){
+              var sp=pathMod.join(s,nm),dp=pathMod.join(d,nm);
+              fsMod.stat(sp,function(err2,st){
+                if(err2)return done(err2);
+                if(st.isDirectory()){copyDir2(sp,dp,done)}
+                else{fsMod.copyFile(sp,dp,function(e3){if(!e3)copied++;done(e3)})}
+              });
+            });
+          });
+        });
+      };
+      copyDir2(srcDir,dest,function(err){
+        if(err){try{new Notice("OHSidian: 迁移失败 "+err.message+",可改用文件夹选择器")}catch(e){}pickMigration();return}
+        try{new Notice("OHSidian: 已复制 "+copied+" 个文件到 文档/OHSidian/"+name+",正在打开新仓库…")}catch(e){}
+        try{
+          var r=remote.ipcRenderer.sendSync("vault-open",dest,!1);
+          if(r!==!0){try{new Notice("OHSidian: 打开新仓库返回 "+r)}catch(e){}}
+        }catch(e){try{new Notice("OHSidian: 打开新仓库失败 "+e.message)}catch(e2){}}
+      });
+    }else{
+      pickMigration();
+    }
+  }catch(e){}
+}
+/* TODO 7: "system fonts" as a first-class choice. Obsidian's font settings
+   write interfaceFontFamily/textFontFamily/monospaceFontFamily, which land
+   as --font-*-override and beat our HarmonyOS Sans default. The command
+   below clears all three overrides so the UI falls back to the (patched)
+   system-font default. The out-of-the-box state already IS system fonts
+   (empty overrides), so the default needs no extra plumbing. */
+function restoreSystemFonts(){
+  try{
+    var v=window.app&&window.app.vault;
+    if(!v||typeof v.setConfig!=="function"){try{new Notice("OHSidian: 仓库未就绪")}catch(e){}return}
+    v.setConfig("interfaceFontFamily","");
+    v.setConfig("textFontFamily","");
+    v.setConfig("monospaceFontFamily","");
+    try{
+      var b=document.body;
+      ["--font-interface-override","--font-text-override","--font-monospace-override","--font-print-override"]
+        .forEach(function(k){b.style.removeProperty(k)});
+    }catch(e){}
+    try{window.app.workspace.trigger("css-change")}catch(e){}
+    try{new Notice("OHSidian: 已恢复系统字体 (HarmonyOS Sans)")}catch(e){}
   }catch(e){}
 }
 var install=function(app){
@@ -428,6 +704,74 @@ var install=function(app){
       }});
     app.commands.addCommand({id:"ohsidian-vault-visible",name:"OHSidian: 迁移仓库到文件管理可见的位置",
       callback:function(){migrateVaultToVisibleFolder()}});
+    app.commands.addCommand({id:"ohsidian-system-fonts",name:"OHSidian: 恢复系统字体 (HarmonyOS Sans)",
+      callback:function(){restoreSystemFonts()}});
+    /* Zoom-style font scale chooser: cycles 跟随系统 → 100% → 110% → 125% →
+       150% → 100%... Written into the mode file as cfg.fontScaleOverride;
+       the effective scale = override || cfg.fontScale (system). This gives
+       the user an in-app choice without waiting for the system setting. */
+    var FONT_STEPS=[0,"auto",1,1.1,1.25,1.5,1.75,2];
+    app.commands.addCommand({id:"ohsidian-font-scale",name:"OHSidian: 界面文字缩放 (跟随系统/100%–200%)",
+      callback:function(){
+        var cfg=readMode()||{};
+        var cur=cfg.fontScaleOverride!==undefined?cfg.fontScaleOverride:"auto";
+        var idx=FONT_STEPS.indexOf(cur);
+        if(idx<0)idx=0;
+        idx=(idx+1)%FONT_STEPS.length;
+        var next=FONT_STEPS[idx];
+        if(next==="auto")delete cfg.fontScaleOverride;else cfg.fontScaleOverride=next;
+        try{require("fs").writeFileSync(dataDir()+MODE_FILE,JSON.stringify(cfg,null,2),"utf8")}catch(e){}
+        var eff=next==="auto"?(cfg.fontScale||1):next;
+        lastFontScale=-1;
+        applyFontScale();
+        try{new Notice("OHSidian 界面文字 → "+(next==="auto"?("跟随系统 ("+Math.round((cfg.fontScale||1)*100)+"%)"):(Math.round(next*100)+"%")))}catch(e){}
+      }});
+    /* Font FAMILY picker: cycle through the system font families published
+       by ArkTS (cfg.systemFonts, from font.getSystemFontList). "跟随系统"
+       keeps the HarmonyOS Sans default (the system resolves it to the user
+       chosen style font where supported); any other pick writes that
+       family into Obsidian's interfaceFontFamily + textFontFamily (via
+       vault.setConfig, which triggers updateFontFamily immediately and
+       persists). Run the command repeatedly to cycle; current selection
+       is announced each time. */
+    var ohsidianFontCycle=function(){
+      try{
+        var v=window.app&&window.app.vault;
+        if(!v||typeof v.setConfig!=="function"){try{new Notice("OHSidian: 仓库未就绪")}catch(e){}return}
+        var cfg=readMode()||{};
+        var fams=["@system"];
+        try{
+          var list=cfg.systemFonts?JSON.parse(cfg.systemFonts):[];
+          for(var i=0;i<list.length&&fams.length<60;i++){
+            if(typeof list[i]==="string"&&list[i]&&fams.indexOf(list[i])<0)fams.push(list[i]);
+          }
+        }catch(e){}
+        var curFamily=(function(){
+          try{
+            var val=v.getConfig("interfaceFontFamily");
+            if(val)return val.split(",")[0].replace(/["]/g,"").trim();
+          }catch(e){}
+          return "";
+        })();
+        var idx=fams.indexOf(curFamily);
+        var next=fams[(idx+1+fams.length)%fams.length]||"@system";
+        if(next==="@system"){
+          v.setConfig("interfaceFontFamily","");
+          v.setConfig("textFontFamily","");
+          try{
+            var b=document.body;
+            ["--font-interface-override","--font-text-override"].forEach(function(k){b.style.removeProperty(k)});
+          }catch(e){}
+          try{new Notice("OHSidian 界面字体 → 跟随系统")}catch(e){}
+        }else{
+          v.setConfig("interfaceFontFamily",next);
+          v.setConfig("textFontFamily",next);
+          try{new Notice("OHSidian 界面字体 → "+next+" (再次执行可切换下一个)")}catch(e){}
+        }
+      }catch(e){}
+    };
+    app.commands.addCommand({id:"ohsidian-font-family",name:"OHSidian: 界面字体 (跟随系统/系统字体循环)",
+      callback:function(){ohsidianFontCycle()}});
     return true;
   }catch(e){return false}
 };
@@ -531,24 +875,52 @@ setInterval(function(){
   }catch(e){}
 },1500);
 }catch(e){}})();
-/* Quick Start fix: the starter's "get-default-vault-path" returns
-   <documents>/Obsidian Vault, but on HarmonyOS the engine's documents path
-   is not app-writable - vault-open's mkdir fails, the starter retries
-   without the create flag and pops "Failed to open vault ... folder not
-   found". Re-point the default vault into userData (same writable root as
-   the ohsidian-mode.json channel) and pre-create it. Registered on ready so
-   this listener runs AFTER Obsidian's own and its returnValue wins. */
+/* Default vault in the USER-VISIBLE Documents directory (uninstall-safe).
+   The ArkTS layer publishes the sandbox-mapped Documents path (granted by
+   READ_WRITE_DOCUMENTS_DIRECTORY, see WebAbility.publishDocumentsDir) into
+   <userData>/ohsidian-mode.json as cfg.documentsDir. The default vault is
+   <documents>/OHSidian/Obsidian Vault: visible in 文件管理 (vault AND its
+   .trash), and it SURVIVES app uninstall - the old userData default was
+   wiped together with the app. Falls back to userData when the Documents
+   dir is unavailable (permission denied / older device), keeping the
+   previous OHSidian behaviour. The legacy <userData>/Obsidian Vault is
+   left untouched on disk so existing vaults keep working and can be
+   migrated with the renderer-side command (no silent data moves).
+   Registered on ready so this listener runs AFTER Obsidian's own and its
+   returnValue wins. */
 ;(function(){try{
 if(globalThis.__ohsidianDefaultVault)return;globalThis.__ohsidianDefaultVault=true;
 var __ohDvApp=require("electron").app;
 var __ohDvRegister=function(){
   try{
-    var __ohDvPath=require("path").join(__ohDvApp.getPath("userData"),"Obsidian Vault");
-    try{require("fs").mkdirSync(__ohDvPath,{recursive:true})}catch(e){}
+    var __ohDvFs=require("fs"),__ohDvPathMod=require("path");
+    var __ohDvUserData=__ohDvApp.getPath("userData");
+    var __ohDvResolve=function(){
+      try{
+        var cfg=JSON.parse(__ohDvFs.readFileSync(__ohDvPathMod.join(__ohDvUserData,"ohsidian-mode.json"),"utf8"));
+        var docs=cfg&&cfg.documentsDir;
+        if(typeof docs==="string"&&docs.length>0){
+          try{__ohDvFs.accessSync(docs)}catch(e){return null}
+          return __ohDvPathMod.join(docs,"OHSidian","Obsidian Vault");
+        }
+      }catch(e){}
+      return null;
+    };
+    var __ohDvEnsure=function(p){
+      try{__ohDvFs.mkdirSync(p,{recursive:true})}catch(e){}
+      return p;
+    };
     require("electron").ipcMain.on("get-default-vault-path",function(evt){
-      try{evt.returnValue=__ohDvPath}catch(e){}
+      try{
+        var docsVault=__ohDvResolve();
+        if(docsVault){evt.returnValue=__ohDvEnsure(docsVault);return}
+        /* fallback: previous OHSidian behaviour (sandbox userData) */
+        evt.returnValue=__ohDvEnsure(__ohDvPathMod.join(__ohDvUserData,"Obsidian Vault"));
+      }catch(e){
+        try{evt.returnValue=__ohDvPathMod.join(__ohDvUserData,"Obsidian Vault")}catch(e2){}
+      }
     });
-    try{console.log("[OHSidian] default vault path -> "+__ohDvPath)}catch(e){}
+    try{console.log("[OHSidian] default vault root -> documents (fallback userData)")}catch(e){}
   }catch(e){}
 };
 if(__ohDvApp.isReady()){__ohDvRegister()}else{__ohDvApp.on("ready",__ohDvRegister)}
