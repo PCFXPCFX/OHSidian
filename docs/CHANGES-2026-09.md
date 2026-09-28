@@ -2097,3 +2097,26 @@ createWindow 全屏门控对 is_panel/模态窗口无副作用;pollTick 单文�
 读+多消费者仅在内容变化时触发;文档目录 IPC 的路径来自自家 ArkTS
 发布,无不可信输入;verify-asar.cjs 补齐 4 个新标记(自拷贝守卫/
 字体循环/viewportAvoidsBars/documents 迁移),当前 21 项全绿。
+
+### 第 64 轮(2026-09-27):Release 版本号以 tag 为准 + 注入步骤的 env 继承 bug
+
+**问题**:连续数个 tag 发版的产物/Release 都显示 1.2.1——版本号写死在
+`AppScope/app.json5`,CI 只读文件、tag 不参与,而"先手动改文件再打
+tag"的流程容易被遗忘。
+
+**修复 1(版本来源反转)**:build job 新增 "Resolve release version"
+步骤——tag 构建( refs/tags/v* )剥出 tag 版本号作为唯一权威,workflow_
+dispatch 构建回退文件值;解析出的版本在构建前由 node 注入 app.json5
+(versionName + versionCode),HAP 内部版本与 tag/Release 三方一致。
+versionCode 按仓库既有约定 主*1e6+次*1e4+修订 自动计算
+(1.2.1→1020001,与历史手动 bump 吻合)。release job 同样改为优先 tag。
+
+**修复 2(CI 实跑暴露)**:首次实跑 hvigor 报
+`JSON5: invalid character 'u' at app.json5:5:20`——注入脚本在
+node -e 的单引号脚本里读 `process.env.VERSION_CODE/VERSION`,但这两个
+shell 变量**从未 export**,node 继承不到,把字面量 `"undefined"` 写进了
+versionCode。改为把两个值作为展开后的命令行参数(argv)传入 node
+脚本,不再依赖环境变量继承。本地 dry-run(1.2.3→1020003)验证通过。
+
+**使用**:发版只需 `git tag v1.2.x && git push origin v1.2.x`,不再
+需要手动改 app.json5(它只在无 tag 的手动构建时作为回退)。
