@@ -223,6 +223,46 @@ jobs:
         run: |
           ohpm install --all
 
+      - name: Resolve release version (tag wins, app.json5 fallback)
+        run: |
+          set -euxo pipefail
+          # The TAG is authoritative for a release build: v1.2.3 produces
+          # v1.2.3 artifacts even if app.json5 was forgotten. workflow_
+          # dispatch builds (no tag) fall back to the app.json5 value.
+          # versionCode follows the repo convention major*1e6+minor*1e4+patch
+          # (1.2.1 -> 1020001) so upgrades keep ordering.
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${GITHUB_REF_TYPE:-branch}" != "tag" ] || [ "$TAG_VERSION" = "$GITHUB_REF_NAME" ]; then
+            TAG_VERSION=""
+          fi
+          FILE_VERSION="$(sed -nE 's/.*"versionName"\s*:\s*"([^"]+)".*/\1/p' AppScope/app.json5 | head -1)"
+          if [ -n "$TAG_VERSION" ]; then
+            VERSION="$TAG_VERSION"
+          elif [ -n "$FILE_VERSION" ]; then
+            VERSION="$FILE_VERSION"
+          else
+            echo "::error::No tag version and no versionName in AppScope/app.json5"
+            exit 1
+          fi
+          # Inject the release version into app.json5 so the HAP's own
+          # versionName/versionCode match the tag.
+          MAJOR="$(echo "$VERSION" | cut -d. -f1)"
+          MINOR="$(echo "$VERSION" | cut -d. -f2)"
+          PATCH="$(echo "$VERSION" | cut -d. -f3)"
+          MAJOR="${MAJOR:-0}"; MINOR="${MINOR:-0}"; PATCH="${PATCH:-0}"
+          VERSION_CODE=$((MAJOR * 1000000 + MINOR * 10000 + PATCH))
+          node -e '
+            const fs = require("fs");
+            const p = "AppScope/app.json5";
+            const s = fs.readFileSync(p, "utf8");
+            const out = s
+              .replace(/"versionCode"\s*:\s*\d+/, "\"versionCode\": " + process.env.VERSION_CODE)
+              .replace(/"versionName"\s*:\s*"[^"]+"/, "\"versionName\": \"" + process.env.VERSION + "\"");
+            fs.writeFileSync(p, out);
+          '
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "release version: $VERSION (code $VERSION_CODE; tag='${GITHUB_REF_NAME:-none}', file='$FILE_VERSION')"
+
       - name: Build HAP
         run: |
           hvigorw --mode module -p product=default -p buildMode=${{ inputs.build_mode || 'release' }} assembleHap --no-daemon
@@ -300,7 +340,11 @@ jobs:
           rm -f SHA256SUMS.txt MD5SUMS.txt
           sha256sum *.hap > SHA256SUMS.txt
           md5sum *.hap > MD5SUMS.txt
-          VERSION="$(sed -nE 's/.*"versionName"\s*:\s*"([^"]+)".*/\1/p' ../AppScope/app.json5 | head -1)"
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Fallback: tag without a parseable semver body -> app.json5.
+          case "$VERSION" in
+            *[!0-9.]*|"") VERSION="$(sed -nE 's/.*"versionName"\s*:\s*"([^"]+)".*/\1/p' ../AppScope/app.json5 | head -1)" ;;
+          esac
           # Release body: rendered from scripts/ci/release-notes-template.md
           # (edit THAT file to change the wording). The script has cd'd into
           # dist/, so repo-root paths anchor on GITHUB_WORKSPACE.

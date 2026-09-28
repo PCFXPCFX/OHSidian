@@ -97,8 +97,10 @@ Get-FileHash .\OHSidian-v1.2.0-*-icon-unsigned.hap -Algorithm MD5
    (可用 `bash scripts/make-commits.sh` 分批执行);
 2. `git push origin main`(或当前分支);
 3. 确认 GitHub Actions 里的 `build-release`(workflow_dispatch)能跑通;
-4. 把 `AppScope/app.json5` 的 `versionName`/`versionCode` 提到目标版本,
-   然后 `git tag v1.2.0 && git push origin v1.2.0`(tag 名与 versionName 对齐);
+4. `git tag v1.2.0 && git push origin v1.2.0` —— **tag 就是版本号**:
+   CI 以 tag 为准(自动把 versionName/versionCode 写入 app.json5 再
+   构建,versionCode = 主*1e6+次*1e4+修订,如 1.2.1→1020001),
+   app.json5 里的值只是 workflow_dispatch 无 tag 构建时的回退;
 5. Actions 自动构建并创建 Release,检查附件(hap + 两个哈希文件);
 6. Release 正文由 `scripts/ci/release-notes-template.md` 渲染生成
    (想改文案直接编辑该模板,`{{HAP_TABLE}}`/`{{SHA256}}`/`{{MD5}}`/
