@@ -245,7 +245,11 @@ jobs:
             exit 1
           fi
           # Inject the release version into app.json5 so the HAP's own
-          # versionName/versionCode match the tag.
+          # versionName/versionCode match the tag. Values are passed as
+          # EXPANDED shell arguments (single-quoted heredoc-style script
+          # cannot see unexported shell vars - the earlier attempt wrote
+          # the literal string "undefined" into versionCode and hvigor
+          # failed with "JSON5: invalid character 'u'").
           MAJOR="$(echo "$VERSION" | cut -d. -f1)"
           MINOR="$(echo "$VERSION" | cut -d. -f2)"
           PATCH="$(echo "$VERSION" | cut -d. -f3)"
@@ -253,13 +257,14 @@ jobs:
           VERSION_CODE=$((MAJOR * 1000000 + MINOR * 10000 + PATCH))
           node -e '
             const fs = require("fs");
+            const [code, version] = process.argv.slice(1);
             const p = "AppScope/app.json5";
             const s = fs.readFileSync(p, "utf8");
             const out = s
-              .replace(/"versionCode"\s*:\s*\d+/, "\"versionCode\": " + process.env.VERSION_CODE)
-              .replace(/"versionName"\s*:\s*"[^"]+"/, "\"versionName\": \"" + process.env.VERSION + "\"");
+              .replace(/"versionCode"\s*:\s*\d+/, "\"versionCode\": " + code)
+              .replace(/"versionName"\s*:\s*"[^"]+"/, "\"versionName\": \"" + version + "\"");
             fs.writeFileSync(p, out);
-          '
+          ' "$VERSION_CODE" "$VERSION"
           echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "release version: $VERSION (code $VERSION_CODE; tag='${GITHUB_REF_NAME:-none}', file='$FILE_VERSION')"
 
