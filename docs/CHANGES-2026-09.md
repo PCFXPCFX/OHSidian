@@ -2358,3 +2358,23 @@ Inter / Source Code Pro 两项。
 `theme font path published: /data/...`);②设置 → 外观 → 字体列表应
 出现 HarmonyOS Sans 等系统家族;③点选任一系统字体立即生效并持久化;
 ④未设样式字体的设备回退 HarmonyOS Sans。
+
+### 第 70 轮(2026-09-29):主题字体路径改走 STYLISH 文件 API(第 69 轮日志复盘)
+
+**新日志证据**:`font.getFontByName('OhosThemeFont')` 在真机上
+**查不到运行时注册的主题字体**——TexGine 报
+`ParseFontDescriptor: Failed to find font name OhosThemeFont`
+(该别名只在 ArkUI 文本引擎内,不在 @ohos.font 的静态查询范围),
+cfg.themeFontPath 被发布为空,渲染层 FontFace 桥无文件可载。
+
+**修复**:publishThemeFontPath 改用字体引擎文件 API
+`text.getFontPathsByType(text.SystemFontType.STYLISH)`(API 23+,返回
+样式字体文件路径数组)——优先取 .ttf/.otf,命中即经
+writeThemeFontPath 发布;链路其余部分(onFontIdUpdated 触发、渲染层
+FontFace 加载、设置字体列表注入)第 69 轮已就绪,本轮只换路径来源。
+日志新增 `STYLISH font paths: [...]` 便于核对。
+
+**验证要点**:装新包切样式字体后,hilog 应出现
+`STYLISH font paths: [...含主题字体 ttf...]` +
+`theme font path published: <路径>` → 界面 1s 内跟随;若 STYLISH 也
+为空(设备无样式字体),回退 HarmonyOS Sans 属预期。

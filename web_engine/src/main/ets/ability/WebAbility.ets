@@ -595,14 +595,33 @@ export class WebAbility extends WebBaseAbility {
   // loaded it, so Node fs can read it too).
   private publishThemeFontPath(): void {
     let fontPath: string = '';
+    // getFontByName('OhosThemeFont') does NOT resolve runtime-registered
+    // theme fonts (device log: ParseFontDescriptor "Failed to find font
+    // name OhosThemeFont") - the alias lives only in ArkUI's TexGine.
+    // Use the font engine's file API instead: STYLISH = style fonts.
     try {
-      const info = font.getFontByName('OhosThemeFont');
-      if (info && info.path && info.path.length > 0) {
-        fontPath = info.path;
+      const paths = text.getFontPathsByType(text.SystemFontType.STYLISH);
+      if (Array.isArray(paths)) {
+        for (const p of paths) {
+          if (p && (p.endsWith('.ttf') || p.endsWith('.otf'))) {
+            fontPath = p;
+            break;
+          }
+        }
+        if (!fontPath && paths.length > 0) {
+          fontPath = paths[0];
+        }
       }
+      LogUtil.info(TAG, 'STYLISH font paths: ' + JSON.stringify(paths));
     } catch (exception) {
-      LogUtil.warn(TAG, 'getFontByName(OhosThemeFont) failed: ' + JSON.stringify(exception));
+      LogUtil.warn(TAG, 'getFontPathsByType(STYLISH) failed: ' + JSON.stringify(exception));
     }
+    if (fontPath) {
+      this.writeThemeFontPath(fontPath);
+    }
+  }
+
+  private writeThemeFontPath(fontPath: string): void {
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
       const filePath: string = filesDir + '/ohsidian-mode.json';
@@ -628,7 +647,7 @@ export class WebAbility extends WebBaseAbility {
       } finally {
         fileIo.closeSync(file);
       }
-      LogUtil.info(TAG, 'theme font path published: ' + (fontPath.length > 0 ? fontPath : '(none)'));
+      LogUtil.info(TAG, 'theme font path published: ' + fontPath);
     } catch (err) {
       LogUtil.error(TAG, 'failed to write themeFontPath: ' + JSON.stringify(err));
     }
