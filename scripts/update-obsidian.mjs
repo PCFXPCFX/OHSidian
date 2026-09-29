@@ -277,9 +277,33 @@ function styleFontFamilyFromCfg(cfg){
   }catch(e){}
   return null;
 }
+/* The theme font is registered by ArkUI's text engine (TexGine) at runtime
+   and is NOT visible to the web engine's Skia font manager (which reads the
+   static system font config) - CSS "OhosThemeFont" alone never resolved.
+   Bridge it: ArkTS publishes the theme font's FILE PATH (font.getFontByName
+   -> FontInfo.path) as cfg.themeFontPath; here we read the bytes with Node
+   (same uid that loaded it) and register a real FontFace named
+   OhosThemeFont, which the CSS stack then resolves. Cached per path. */
+var themeFontLoadedPath=null;
+function applyThemeFontFace(cfg){
+  try{
+    var p=cfg&&cfg.themeFontPath;
+    if(!p||p===themeFontLoadedPath)return;
+    var fsMod=require("fs");
+    if(!fsMod.existsSync(p))return;
+    var buf=fsMod.readFileSync(p);
+    if(!buf||!buf.length||typeof FontFace!=="function")return;
+    var ff=new FontFace("OhosThemeFont",buf.buffer.slice(buf.byteOffset,buf.byteOffset+buf.byteLength));
+    var done=function(f){try{document.fonts.add(f||ff)}catch(e){}lastAppliedStack=null;applySystemFonts()};
+    var pr=ff.load();
+    if(pr&&pr.then){pr.then(done,function(){done()})}else{done()}
+    themeFontLoadedPath=p;
+  }catch(e){}
+}
 function applySystemFonts(){
   try{
     var cfg=readMode();
+    applyThemeFontFace(cfg);
     var mapped=styleFontFamilyFromCfg(cfg); /* diagnostic only */
     /* OhosThemeFont first: resolves to the user's style font when one is
        active; silently falls through when it is not. */
@@ -388,6 +412,8 @@ function pollTick(){
           try{hookTrash()}catch(e){}
           try{applyKeyboard()}catch(e){}
           try{applyFontScale()}catch(e){}
+          try{refreshSystemFontGlobals()}catch(e){}
+          try{applyThemeFontFace(readMode())}catch(e){}
           try{applySystemFonts()}catch(e){}
         }
       }
@@ -562,6 +588,10 @@ function syncFromSystem(lastWant){
 }
 var lastWant=null;
 try{lastWant=syncFromSystem(lastWant)}catch(e){}
+/* Full system family list for Obsidian's settings font picker (injected
+   into its candidate array by a body patch). */
+function refreshSystemFontGlobals(){try{var c=readMode();if(c&&c.systemFonts)window.__ohsidianSystemFonts=JSON.parse(c.systemFonts)}catch(e){}}
+refreshSystemFontGlobals();
 applySafeArea();
 applyWindowDecor();
 applySystemFonts();
@@ -1071,12 +1101,31 @@ async function main() {
   // desktop/createWindow path.
   const drawerSwitchSrc = 'window.localStorage.setItem("mobile-selected-vault",n),location.reload()';
   const drawerSwitchDst = 'i.app.openVaultChooser()';
-  if (appSrc.includes(drawerSwitchSrc)) {
-    appSrc = appSrc.replace(drawerSwitchSrc, drawerSwitchDst);
-    log('vault drawer switch routed to openVaultChooser');
-  } else {
-    log('WARNING: vault drawer switch site not found (app.js layout changed?); ' +
-      'drawer vault switching will silently no-op in touch mode');
+  // Obsidian's font picker candidates (Zne): a hardcoded seed list plus a
+  // desktop-font probe table that mostly misses on HarmonyOS, and the
+  // engine does not implement the get-fonts module - so settings show
+  // only Inter / Source Code Pro. Inject the full system family list
+  // (published by ArkTS as cfg.systemFonts, surfaced at boot as
+  // window.__ohsidianSystemFonts).
+  const fontListSrc = 'var t=["Inter","Source Code Pro"];Xne=t;';
+  const fontListDst = 'var t=["Inter","Source Code Pro"].concat(window.__ohsidianSystemFonts||[]);Xne=t;';
+  const APP_BODY_PATCHES = [
+    [drawerSwitchSrc, drawerSwitchDst, 'vault drawer switch routed to openVaultChooser',
+      'vault drawer switch site not found (app.js layout changed?); ' +
+      'drawer vault switching will silently no-op in touch mode'],
+    [fontListSrc, fontListDst, 'system font list injected into the settings font picker',
+      'font picker seed site not found (app.js layout changed?); ' +
+      'settings will show only Inter / Source Code Pro'],
+  ];
+  for (const [src, dst, okMsg, warnMsg] of APP_BODY_PATCHES) {
+    if (appSrc.includes(dst)) {
+      log('body patch already applied: ' + okMsg);
+    } else if (appSrc.includes(src)) {
+      appSrc = appSrc.replace(src, dst);
+      log(okMsg);
+    } else {
+      log('WARNING: ' + warnMsg);
+    }
   }
 
   fs.writeFileSync(appJs, TOUCH_MODE_PATCH + appSrc);

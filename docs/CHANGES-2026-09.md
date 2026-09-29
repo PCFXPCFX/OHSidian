@@ -2317,3 +2317,44 @@ SUCCESSFUL;`node --check` 松散 main.js 通过;asar 已重打且
 ④打印多页任务输出为单份完整 PDF;⑤切 TTS 语言后 speak 正常;
 ⑥证书签名连续失败后服务仍可用;⑦另存为对话框显示全部格式组;
 ⑧电池/时区/深链回归(本轮动了相关适配器)。
+
+### 第 69 轮(2026-09-29):主题字体进 web 的正确姿势(FontFace 文件桥)+ 设置字体列表补全
+
+**用户反馈两个事实**:①界面仍不跟随系统样式字体;②设置字体页只有
+Inter / Source Code Pro 两项。
+
+**根因(代码+日志实证)**:
+- ① TexGine 隔离:`OhosThemeFont` 是 ArkUI 文本引擎运行时注册的
+  (RSInterfaces 共享内存),而 web 引擎 Skia 的字体管理器只读静态
+  系统字体配置(OH_Drawing_GetSystemFontConfigInfo)——两条通道不通,
+  CSS 写 OhosThemeFont 永远解析不到。字体文件本体可达:同 uid 的
+  框架进程刚加载过它(font.getFontByName 可查路径)。
+- ② Obsidian 字体枚举(Zne):硬编码种子 ["Inter","Source Code Pro"]
+  + 桌面字体探测表(鸿蒙上几乎全落空);补全依赖引擎 get-fonts 模块,
+  而引擎未实现(libelectron 探针 0 命中)。
+
+**修复**:
+- **主题字体桥**:ArkTS `publishThemeFontPath()` 用
+  font.getFontByName('OhosThemeFont') 取 FontInfo.path 发布为
+  cfg.themeFontPath(启动+fontId 变化时);渲染层 `applyThemeFontFace`
+  用 Node fs 读字体字节 → `new FontFace("OhosThemeFont", buffer)` →
+  document.fonts.add —— CSS 栈里原本就首位的 OhosThemeFont 从此真实
+  解析(路径变化才重载;引擎无 FontFace 时静默跳过);
+- **字体列表补全**:新增 app.js 文本补丁(fontListSrc→Dst),把
+  `cfg.systemFonts`(启动时以 window.__ohsidianSystemFonts 暴露,文件
+  变化时刷新)concat 进 Zne 种子数组 —— 设置 → 字体现在列出全部系统
+  字体家族,点选即写 --font-*-override(Skia 可解析 /system/fonts 里
+  的真实文件,直接生效);
+- `refresh-app-patch.mjs` 升级:支持幂等重放 body patches(抽屉切换 +
+  字体列表),与 update-obsidian.mjs 的 APP_BODY_PATCHES 保持同步;
+- verify-asar.cjs 新增 3 个标记(font picker 注入/FontFace 桥/原有),
+  当前全绿。
+
+**与第 67 轮的关系**:67 轮把栈首换成 OhosThemeFont 方向正确但解析
+不了;本轮补上"文件桥"让它真正解析。用户自选字体(设置点选/循环
+命令)依然最优先。
+
+**验证要点**:①系统切样式字体 → 应用约 1s 内界面变化(hilog 应见
+`theme font path published: /data/...`);②设置 → 外观 → 字体列表应
+出现 HarmonyOS Sans 等系统家族;③点选任一系统字体立即生效并持久化;
+④未设样式字体的设备回退 HarmonyOS Sans。

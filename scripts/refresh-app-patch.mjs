@@ -80,6 +80,27 @@ for (const [file, patch, marker] of [
     console.error('[refresh] Run `node scripts/update-obsidian.mjs` (full patcher) instead of refresh-app-patch.mjs.');
     process.exit(1);
   }
+  // Body patches the refresh can (re)apply idempotently. Kept in sync with
+  // scripts/update-obsidian.mjs APP_BODY_PATCHES.
+  if (file === 'app.js') {
+    const bodyPatches = [
+      ['window.localStorage.setItem("mobile-selected-vault",n),location.reload()',
+       'i.app.openVaultChooser()', 'vault drawer switch'],
+      ['var t=["Inter","Source Code Pro"];Xne=t;',
+       'var t=["Inter","Source Code Pro"].concat(window.__ohsidianSystemFonts||[]);Xne=t;',
+       'settings font list injection'],
+    ];
+    for (const [bsrc, bdst, name] of bodyPatches) {
+      if (src.includes(bdst)) {
+        console.log('[refresh] body patch already applied: ' + name);
+      } else if (src.includes(bsrc)) {
+        src = src.replace(bsrc, bdst);
+        console.log('[refresh] body patch applied: ' + name);
+      } else {
+        console.log('[refresh] WARNING: body patch site missing: ' + name);
+      }
+    }
+  }
   fs.writeFileSync(full, patch + src);
   console.log('[refresh] ' + file + ': new patch prepended (len ' + patch.length + ')');
 }

@@ -587,6 +587,53 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
+  // Publishes the theme font's FILE PATH (cfg.themeFontPath). The style
+  // font selected in 系统设置 is registered by ArkUI's TexGine under the
+  // family name "OhosThemeFont" at runtime and is invisible to the web
+  // engine's Skia font manager - but font.getFontByName can hand us the
+  // underlying file, which the renderer loads as a FontFace (same uid
+  // loaded it, so Node fs can read it too).
+  private publishThemeFontPath(): void {
+    let fontPath: string = '';
+    try {
+      const info = font.getFontByName('OhosThemeFont');
+      if (info && info.path && info.path.length > 0) {
+        fontPath = info.path;
+      }
+    } catch (exception) {
+      LogUtil.warn(TAG, 'getFontByName(OhosThemeFont) failed: ' + JSON.stringify(exception));
+    }
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const filePath: string = filesDir + '/ohsidian-mode.json';
+      let cfg: Record<string, Object> = {};
+      try {
+        if (fileIo.accessSync(filePath)) {
+          cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+          if (!cfg) {
+            cfg = {};
+          }
+        }
+      } catch (e) {
+        cfg = {};
+      }
+      if (cfg['themeFontPath'] === fontPath) {
+        return;
+      }
+      cfg['themeFontPath'] = fontPath;
+      const file = fileIo.openSync(filePath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      try {
+        fileIo.writeSync(file.fd, JSON.stringify(cfg));
+      } finally {
+        fileIo.closeSync(file);
+      }
+      LogUtil.info(TAG, 'theme font path published: ' + (fontPath.length > 0 ? fontPath : '(none)'));
+    } catch (err) {
+      LogUtil.error(TAG, 'failed to write themeFontPath: ' + JSON.stringify(err));
+    }
+  }
+
   // Publishes the SYSTEM STYLE font (设置 → 显示与字体 → 字体样式) so the
   // web content can follow it — the piece round 60 was missing. Two parts:
   //  1. cfg.fontId: the opaque id of the currently selected style font
@@ -710,6 +757,7 @@ export class WebAbility extends WebBaseAbility {
           LogUtil.info(TAG, 'onFontIdUpdated: ' + fontId);
           this.publishFontId(fontId);
           this.publishStyleFonts();
+          this.publishThemeFontPath();
         },
         onFontSizeScaleUpdated: (fontSizeScale: number) => {
           if (fontSizeScale > 0) {
@@ -829,6 +877,7 @@ export class WebAbility extends WebBaseAbility {
       LogUtil.warn(TAG, 'read initial fontId failed: ' + JSON.stringify(exception));
     }
     this.publishStyleFonts();
+    this.publishThemeFontPath();
     this.registerSystemConfigListener();
     if (this.xcomponentId === ConfigData.DEFAULT_WINDOW_ID) {
       // Startup-time user_grant permissions (main window only). 0 ==

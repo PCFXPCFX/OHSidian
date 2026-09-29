@@ -39,6 +39,8 @@ try {
     'app font family cycle command': app.includes('ohsidian-font-family'),
     'app desktop safe-pad (viewportAware)': app.includes('viewportAvoidsBars'),
     'main documents vault default': main.includes('__ohDvResolve'),
+    'app font picker list injection': app.includes('window.__ohsidianSystemFonts||[]'),
+    'app theme font face bridge': app.includes('applyThemeFontFace'),
     'app no adaptive keyboard poll': !app.includes('isEditing()?'),
     'main IPC guard': main.includes('__ohsidianIpcGuard'),
     'main updater disabled': main.includes('(at||(D.updateDisabled=!0))'),
