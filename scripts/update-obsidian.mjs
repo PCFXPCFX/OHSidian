@@ -248,21 +248,21 @@ function applyWindowDecor(){
     }
   }catch(e){}
 }
-/* System font STYLE following (设置 → 显示与字体 → 字体样式). Round 66
-   redesign of the static round-49 style: the ArkTS layer publishes
-   cfg.fontId (the opaque id of the user-selected style font, fresh via
-   ApplicationContext.onSystemConfigurationUpdated/onFontIdUpdated) and
-   cfg.styleFonts ([{id,family}] built from
-   text.getSystemFontFullNamesByType(STYLISH) + getFontDescriptorByFullName).
-   The dynamic stack becomes: [style family] + "HarmonyOS Sans" + desktop
-   fallbacks. If the fontId has no mapping (or no STYLISH list), a probe
-   pass measures canvas text width for each candidate family against the
-   current default and picks a differing one (style fonts usually ship a
-   distinct glyph set); the probe result is cached per fontId.
-   User-chosen fonts (--font-*-override via Obsidian settings or the cycle
-   command) still win over this. */
+/* System font STYLE following (设置 → 显示与字体 → 字体样式). The
+   decisive fact from device logs (round 67): when the user picks a style
+   font, the system loads its ttf and registers it into the process text
+   engine under the FIXED family name "OhosThemeFont" (RegisterTypeface
+   family name: OhosThemeFont, shared memory) - NOT the font's original
+   family name. So following the system style in CSS simply means putting
+   "OhosThemeFont" first in the default stack; when no theme font is set
+   it does not resolve and the stack falls through to HarmonyOS Sans.
+   cfg.fontId (via ApplicationContext.onSystemConfigurationUpdated/
+   onFontIdUpdated) still marks WHEN the style changed, and the STYLISH
+   mapping/probe remain only as a diagnostic label for the cycle command.
+   User-chosen fonts (--font-*-override via Obsidian settings or the
+   cycle command) still win over this. */
 var FONT_STYLE_ID="ohsidian-system-fonts";
-var lastAppliedFamily=null;
+var lastAppliedStack=null;
 function styleFontFamilyFromCfg(cfg){
   try{
     if(!cfg||typeof cfg.fontId!=="string"||!cfg.fontId)return null;
@@ -274,46 +274,18 @@ function styleFontFamilyFromCfg(cfg){
         }
       }
     }
-    return undefined; /* fontId present but unmapped - probe */
-  }catch(e){return null}
-}
-var probeCache={};
-function probeStyleFamily(fontId,cfg){
-  try{
-    if(probeCache[fontId])return probeCache[fontId];
-    if(!cfg||!cfg.systemFonts)return null;
-    var list=JSON.parse(cfg.systemFonts);
-    if(!Array.isArray(list))return null;
-    var canvas=document.createElement("canvas");
-    var ctx=canvas.getContext("2d");
-    if(!ctx)return null;
-    var sample="OHSidian字段读写测宽Ag7";
-    ctx.font="48px serif";
-    var baseW=ctx.measureText(sample).width;
-    var best=null;
-    for(var i=0;i<list.length&&i<60;i++){
-      var fam=list[i];
-      if(!fam||fam.indexOf("HarmonyOS")===0)continue;
-      try{ctx.font="48px \""+fam+"\", serif"}catch(e){continue}
-      var w=ctx.measureText(sample).width;
-      if(Math.abs(w-baseW)>0.5){best=fam;break}
-    }
-    probeCache[fontId]=best;
-    return best;
-  }catch(e){return null}
+  }catch(e){}
+  return null;
 }
 function applySystemFonts(){
   try{
     var cfg=readMode();
-    var family=null;
-    var mapped=styleFontFamilyFromCfg(cfg);
-    if(mapped===undefined){family=probeStyleFamily(cfg.fontId,cfg)}
-    else if(typeof mapped==="string"){family=mapped}
-    if(family===lastAppliedFamily&&document.getElementById(FONT_STYLE_ID))return;
-    lastAppliedFamily=family;
-    var stack=family
-      ? "\""+family+"\",\"HarmonyOS Sans\",\"HarmonyOS Sans SC\",\"HarmonyOS Sans TC\",ui-sans-serif,-apple-system,BlinkMacSystemFont,system-ui,\"Segoe UI\",Roboto,sans-serif;"
-      : "\"HarmonyOS Sans\",\"HarmonyOS Sans SC\",\"HarmonyOS Sans TC\",ui-sans-serif,-apple-system,BlinkMacSystemFont,system-ui,\"Segoe UI\",Roboto,sans-serif;";
+    var mapped=styleFontFamilyFromCfg(cfg); /* diagnostic only */
+    /* OhosThemeFont first: resolves to the user's style font when one is
+       active; silently falls through when it is not. */
+    var stack='"OhosThemeFont","HarmonyOS Sans","HarmonyOS Sans SC","HarmonyOS Sans TC",ui-sans-serif,-apple-system,BlinkMacSystemFont,system-ui,"Segoe UI",Roboto,sans-serif;';
+    if(stack===lastAppliedStack&&document.getElementById(FONT_STYLE_ID))return;
+    lastAppliedStack=stack;
     var el=document.getElementById(FONT_STYLE_ID);
     if(!el&&document.head){
       el=document.createElement("style");

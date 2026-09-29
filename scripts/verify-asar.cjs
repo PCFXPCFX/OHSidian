@@ -33,7 +33,7 @@ try {
     'app trash hook': app.includes('__ohsidianTrashHook'),
     'app mode-switch file sync': app.includes('syncActiveFileToTargetLayout'),
     'app font scale follower': app.includes('applyFontScale'),
-    'app style-font follower': app.includes('styleFontFamilyFromCfg') && app.includes('probeStyleFamily'),
+    'app style-font follower (OhosThemeFont)': app.includes('"OhosThemeFont","HarmonyOS Sans"'),
     'app documents-dir migration': app.includes('pickMigration') && app.includes('当前仓库在应用沙箱内'),
     'app migration self-copy guard': app.includes('目标目录在当前仓库内'),
     'app font family cycle command': app.includes('ohsidian-font-family'),

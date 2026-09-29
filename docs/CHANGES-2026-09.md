@@ -2195,3 +2195,29 @@ onForeground/onBackground 仅 RunningLock 生效;原上游用户升级后仓库
 Obsidian 界面字体变化(Notice/hilog 可见 fontId 更新);切回原样式同样
 生效;重启后初始 fontId 正确;Obsidian 设置里自选字体仍优先;探针仅在
 fontId 无映射时运行且按 id 缓存。
+
+### 第 67 轮(2026-09-29):字体样式跟随的真根因——OhosThemeFont(日志实证)
+
+**用户日志关键三行**:
+```
+LoadThemeFont: shaonianzhangyangsiyiailian.ttf
+RegisterTypeface: Succeed in registering typeface, family name: OhosThemeFont
+tag: WebAbility --> onFontIdUpdated: hf2183168533 / font id published: ...
+```
+
+**结论**:第 66 轮的 ArkTS 链路本身是通的(监听器触发、fontId 发布
+成功),但系统把用户选的样式字体加载后**统一注册为固定家族名
+`OhosThemeFont`**(共享内存注入进程内文本引擎),而不是字体的原始
+家族名——所以第 66 轮"fontId→原始家族名映射"的产物在 Skia 里根本
+解析不到,CSS 栈等于没换。同时日志确认 fontSizeScale=1.0,缩放链路
+与本次问题无关。
+
+**修复**(渲染层):`--font-default` 栈改为 `"OhosThemeFont",
+"HarmonyOS Sans", ...` ——设置了样式字体时 OhosThemeFont 解析为该
+字体;未设置时该名字不解析,自然落到 HarmonyOS Sans。不再依赖
+fontId→原始名映射与探针(相关代码移除;styleFonts/fontId 发布保留,
+fontId 仍作为"样式已变化"的信号源,循环命令的诊断提示继续用)。
+
+**验证要点**:安装新包后,系统设置切换字体样式 → 回到应用约 1s 内
+界面字体跟随(日志 fontId 发布 + OhosThemeFont 注册先行);恢复默认
+样式后应用回到 HarmonyOS Sans;Obsidian 设置自选字体仍优先。
