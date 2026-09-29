@@ -554,6 +554,21 @@ export class WebAbility extends WebBaseAbility {
     if (families.length === 0) {
       return;
     }
+    // Family-name -> file-path map so the renderer can FontFace-load the
+    // families the web engine's Skia manager cannot resolve (the names come
+    // from the ArkTS/TexGine side; /sys_prod and custom fonts are invisible
+    // to Skia's static config).
+    const fontFiles: Array<Record<string, string>> = [];
+    for (const family of families) {
+      try {
+        const info = font.getFontByName(family);
+        if (info && info.path && info.path.length > 0) {
+          fontFiles.push({ 'f': family, 'p': info.path });
+        }
+      } catch (e) {
+        // family without a resolvable file - skip
+      }
+    }
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
       const filePath: string = filesDir + '/ohsidian-mode.json';
@@ -574,6 +589,7 @@ export class WebAbility extends WebBaseAbility {
         return;
       }
       cfg['systemFonts'] = nextJson;
+      cfg['fontFiles'] = JSON.stringify(fontFiles);
       const file = fileIo.openSync(filePath,
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
       try {
@@ -595,10 +611,32 @@ export class WebAbility extends WebBaseAbility {
   // loaded it, so Node fs can read it too).
   private publishThemeFontPath(): void {
     let fontPath: string = '';
+    // The user's theme font (downloaded from the theme store) is a
+    // CUSTOMIZED font - the device log shows STYLISH returns only the six
+    // built-in /sys_prod/fonts style fonts, not the active theme font.
+    // Try CUSTOMIZED first, fall back to STYLISH.
+    try {
+      const custom = text.getFontPathsByType(text.SystemFontType.CUSTOMIZED);
+      LogUtil.info(TAG, 'CUSTOMIZED font paths: ' + JSON.stringify(custom));
+      if (Array.isArray(custom)) {
+        for (const p of custom) {
+          if (p && (p.endsWith('.ttf') || p.endsWith('.otf'))) {
+            fontPath = p;
+            break;
+          }
+        }
+        if (!fontPath && custom.length > 0) {
+          fontPath = custom[0];
+        }
+      }
+    } catch (exception) {
+      LogUtil.warn(TAG, 'getFontPathsByType(CUSTOMIZED) failed: ' + JSON.stringify(exception));
+    }
     // getFontByName('OhosThemeFont') does NOT resolve runtime-registered
     // theme fonts (device log: ParseFontDescriptor "Failed to find font
     // name OhosThemeFont") - the alias lives only in ArkUI's TexGine.
     // Use the font engine's file API instead: STYLISH = style fonts.
+    if (!fontPath) {
     try {
       const paths = text.getFontPathsByType(text.SystemFontType.STYLISH);
       if (Array.isArray(paths)) {
@@ -615,6 +653,7 @@ export class WebAbility extends WebBaseAbility {
       LogUtil.info(TAG, 'STYLISH font paths: ' + JSON.stringify(paths));
     } catch (exception) {
       LogUtil.warn(TAG, 'getFontPathsByType(STYLISH) failed: ' + JSON.stringify(exception));
+    }
     }
     if (fontPath) {
       this.writeThemeFontPath(fontPath);

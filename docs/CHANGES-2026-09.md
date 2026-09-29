@@ -2378,3 +2378,30 @@ FontFace 加载、设置字体列表注入)第 69 轮已就绪,本轮只换路�
 `STYLISH font paths: [...含主题字体 ttf...]` +
 `theme font path published: <路径>` → 界面 1s 内跟随;若 STYLISH 也
 为空(设备无样式字体),回退 HarmonyOS Sans 属预期。
+
+### 第 71 轮(2026-09-29):字体文件桥收尾——CUSTOMIZED 优先 + fontFiles 按需 FontFace
+
+**新日志两个事实**:①STYLISH 枚举返回的是六个内置样式字体
+(/sys_prod/fonts/ShuS-SC.ttf 等),**不含用户下载的主题字体**
+(shaonianzhangyangsiyiailian.ttf)——它属于 CUSTOMIZED(自定义)类型;
+②设置里点选注入的系统字体提示"系统中不存在此字体"——列表名来自
+ArkTS/TexGine 侧,但其中 /sys_prod 与自定义字体对 web 引擎 Skia 的
+静态字体配置不可见,canvas 探测解析失败。
+
+**修复**:
+- `publishThemeFontPath` 改为 **CUSTOMIZED 优先**
+  (`text.getFontPathsByType(CUSTOMIZED)`,日志打
+  `CUSTOMIZED font paths`),空则回退 STYLISH——主题字体 ttf 应从此
+  枚举拿到;
+- `publishSystemFonts` 同时发布 **cfg.fontFiles**(family→file 路径
+  映射,font.getFontByName 逐个查询);
+- 渲染层 `refreshSystemFontGlobals` 扩展:对 fontFiles 里 Skia 解析
+  不到的家族(canvas 测宽判等),按需 `readFileSync + FontFace` 注册
+  (上限 40、一次性、已解析者跳过)——设置里点选任何系统字体都能真实
+  生效,主题字体家族亦同;全部解析到则零开销;
+- 设置字体列表补丁(第 69 轮)不动,两机制叠加。
+
+**验证要点**:①切主题字体后 hilog 依次出现 `CUSTOMIZED font paths`
+(应含 shaonianzhangyangsiyiailian.ttf)→ `theme font path published`
+→ 界面跟随;②设置字体列表点选宋体/楷体等不再报"不存在",立即生效;
+③恢复默认样式回 HarmonyOS Sans;④全部字体可解析时无 FontFace 开销。

@@ -590,7 +590,44 @@ var lastWant=null;
 try{lastWant=syncFromSystem(lastWant)}catch(e){}
 /* Full system family list for Obsidian's settings font picker (injected
    into its candidate array by a body patch). */
-function refreshSystemFontGlobals(){try{var c=readMode();if(c&&c.systemFonts)window.__ohsidianSystemFonts=JSON.parse(c.systemFonts)}catch(e){}}
+function refreshSystemFontGlobals(){
+  try{
+    var c=readMode();
+    if(c&&c.systemFonts)window.__ohsidianSystemFonts=JSON.parse(c.systemFonts);
+    /* Bridge families the web engine cannot resolve: the picker list comes
+       from the ArkTS font manager, but Skia only sees the static system
+       font config - /sys_prod and custom fonts are invisible to it, and
+       picking them warned 系统中不存在此字体. cfg.fontFiles maps each
+       family to its file; probe with canvas and FontFace-load ONLY the
+       unresolved ones (bounded, one-time, cached). */
+    if(c&&c.fontFiles&&!window.__ohsidianFontBridge){
+      var map;try{map=JSON.parse(c.fontFiles)}catch(e){map=null}
+      if(Array.isArray(map)&&map.length){
+        window.__ohsidianFontBridge={};
+        var cv=document.createElement("canvas"),cx=cv.getContext("2d");
+        var sample="OHSidian字体测宽Ag7";
+        var base=0;if(cx){cx.font="48px serif";base=cx.measureText(sample).width}
+        var done=0,pending=0;
+        for(var i=0;i<map.length&&done<40;i++){
+          var fam=map[i]&&map[i].f,fp=map[i]&&map[i].p;
+          if(!fam||!fp||window.__ohsidianFontBridge[fam]!==undefined)continue;
+          window.__ohsidianFontBridge[fam]=null;
+          var resolves=false;
+          if(cx){try{cx.font='48px "'+fam+'", serif';resolves=Math.abs(cx.measureText(sample).width-base)>0.5}catch(e){}}
+          if(resolves){done++;continue}
+          try{
+            var buf=require("fs").readFileSync(fp);
+            if(!buf||!buf.length||typeof FontFace!=="function"){done++;continue}
+            var ff=new FontFace(fam,buf.buffer.slice(buf.byteOffset,buf.byteOffset+buf.byteLength));
+            pending++;
+            ff.load().then(function(f){try{document.fonts.add(f)}catch(e){}},function(){}).then(function(){pending--;if(pending<=0)lastAppliedStack=null;});
+            done++;
+          }catch(e){done++}
+        }
+      }
+    }
+  }catch(e){}
+}
 refreshSystemFontGlobals();
 applySafeArea();
 applyWindowDecor();
