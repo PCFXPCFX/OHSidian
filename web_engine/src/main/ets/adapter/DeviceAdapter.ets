@@ -185,6 +185,10 @@ export class DeviceAdapter extends BaseAdapter {
       callback(rawDescriptor, rawDescriptor.length);
     } catch(err) {
       LogUtil.error(DeviceAdapter.TAG, `getRawDescriptor failed, code is ${err.code}, message is ${err.message}`);
+      // The engine-side caller waits on this callback; a silent return hangs
+      // the whole descriptor flow. Report an empty descriptor instead
+      // (openDevice reports its own failure through its boolean return).
+      callback(new Uint8Array(0), 0);
     }
   }
 

@@ -187,8 +187,15 @@ async SetImage(
       LogUtil.error(TAG, 'RemoveFromStatusBar Error: ' + err);
       onCompleted && onCompleted(false);
     } finally {
-      statusBarManager.off('statusBarIconClick');
-      statusBarManager.off('rightMenuClick');
+      // The off() calls must never throw past this point: the renderer has
+      // already received onCompleted above, and a throw here produced a
+      // second, contradicting callback(false).
+      try {
+        statusBarManager.off('statusBarIconClick');
+        statusBarManager.off('rightMenuClick');
+      } catch (offErr) {
+        LogUtil.warn(TAG, 'statusBar off failed: ' + JSON.stringify(offErr));
+      }
     }
   }
 

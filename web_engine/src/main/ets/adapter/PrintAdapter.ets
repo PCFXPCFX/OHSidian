@@ -120,14 +120,24 @@ export class PrintAdapter extends BaseAdapter {
 
   @LogMethod
   PrintPdfFiles(pdfData: ArrayBuffer) {
+    // onStartLayoutWrite can fire more than once for one job (attribute
+    // changes re-request the file). Writing the fixed pdfData unconditionally
+    // into a reused fd would APPEND and corrupt the output; skip duplicates
+    // per (jobId, fd) - a fresh fd gets a fresh write, a repeated call sees
+    // the file already complete.
+    let writtenKey: string = '';
     let printAdapter: print.PrintDocumentAdapter = {
       onStartLayoutWrite(jobId: string,
                          oldAttrs: print.PrintAttributes,
                          newAttrs: print.PrintAttributes,
                          fd: number,
                          writeResultCallback: (jobId: string, writeResult: print.PrintFileCreationState) => void): void {
-        const contentBuf: Uint8Array = new Uint8Array(pdfData);
-        fs.writeSync(fd, contentBuf.buffer);
+        const writeKey: string = jobId + ':' + fd;
+        if (writeKey !== writtenKey) {
+          const contentBuf: Uint8Array = new Uint8Array(pdfData);
+          fs.writeSync(fd, contentBuf.buffer);
+          writtenKey = writeKey;
+        }
         writeResultCallback(jobId, print.PrintFileCreationState.PRINT_FILE_CREATED_UNRENDERED);
       },
       onJobStateChanged(jobId: string, state: print.PrintDocumentAdapterState): void {}

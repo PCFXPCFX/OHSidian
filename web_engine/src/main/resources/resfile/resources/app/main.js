@@ -194,21 +194,16 @@ function installHarmonyTrashCompat() {
 installHarmonyTrashCompat();
 
 async function runHarmonyTrashSelfTest() {
-	let obsidianConfigPath = path.join(dataPath, 'obsidian.json');
-	let originalConfig = null;
 	try {
 		await app.whenReady();
 		let testRoot = path.join(dataPath, 'harmony-trash-self-test');
 		let testVault = path.join(testRoot, 'vault');
 		fs.mkdirSync(testVault, {recursive: true});
 		fs.mkdirSync(path.join(testVault, '.obsidian'), {recursive: true});
-		if (fs.existsSync(obsidianConfigPath)) {
-			originalConfig = fs.readFileSync(obsidianConfigPath, 'utf8');
-		}
-		let config = originalConfig ? JSON.parse(originalConfig) : {};
-		config.vaults = config.vaults || {};
-		config.vaults['hmos-trash-self-test'] = {path: testVault, ts: Date.now()};
-		fs.writeFileSync(obsidianConfigPath, JSON.stringify(config, null, 2), 'utf8');
+		// shell.trashItem works on any path - the user's obsidian.json must
+		// NOT be touched: registering the test vault there used to leave a
+		// dead "hmos-trash-self-test" entry behind whenever the process was
+		// killed before cleanup ran.
 		let testFile = path.join(testVault, 'delete-me-' + Date.now() + '.md');
 		fs.writeFileSync(testFile, 'HarmonyOS trash self test', 'utf8');
 		await electron.shell.trashItem(testFile);
@@ -218,11 +213,6 @@ async function runHarmonyTrashSelfTest() {
 		console.error('[HMOS-TRASH-TEST] fail', e);
 	} finally {
 		try {
-			if (originalConfig === null) {
-				fs.rmSync(obsidianConfigPath, {force: true});
-			} else {
-				fs.writeFileSync(obsidianConfigPath, originalConfig, 'utf8');
-			}
 			fs.rmSync(path.join(dataPath, 'harmony-trash-self-test'), {recursive: true, force: true});
 		} catch (e) {
 			console.error('[HMOS-TRASH-TEST] cleanup failed', e);
@@ -238,7 +228,7 @@ function pad(number) {
 	if (number < 10) {
 		return '0' + number;
 	}
-	return number;
+	return String(number);
 }
 
 function stamp() {

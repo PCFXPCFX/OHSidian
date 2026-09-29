@@ -77,6 +77,14 @@ export interface CommandResult {
   last_widget_Id: number;
 }
 
+// Native power-monitor bridge used by PowerMonitorAdapter (system force
+// sleep / charger events).
+export interface PowerMonitorContext {
+  OnSuspend: () => void;
+  OnResume: () => void;
+  OnPowerStateChanged: () => void;
+}
+
 export interface NativeContext {
   runBrowser: (vec_args: string[]) => void;
   BrowserDestroyed: () => boolean;
@@ -117,6 +125,7 @@ export interface NativeContext {
   ClearWindowEventFilter: (origin_window_id: number) => void;
   OnCaptionButtonRectChange: (id: string, event: CaptionButtonRect) => void;
   UpdateWindowPcmodeSwitchStatusCB: (value: boolean) => void;
+  PowerMonitor: PowerMonitorContext;
 }
 
 // Mutable flag shared between the sub-window adapter and the page holding
@@ -180,6 +189,25 @@ export interface IMFAdapterTextConfig {
 }
 
 export interface NotificationAdapterImage {
+  width: number;
+  height: number;
+  buff: ArrayBuffer;
+}
+
+// Battery snapshot handed to the engine. estimatedRemainingChargeTime and
+// remainingEnergy have no source on this platform (not in the batteryInfo
+// module, not in COMMON_EVENT_BATTERY_CHANGED parameters) - they stay at -1.
+export interface BatteryInfo {
+  batterySOC: number;
+  chargingStatus: number;
+  isBatteryPresent: boolean;
+  estimatedRemainingChargeTime: number;
+  nowCurrent: number;
+  remainingEnergy: number;
+}
+
+// OCR request image: raw pixel buffer plus dimensions (0x0 = no image).
+export interface OcrAdapterImage {
   width: number;
   height: number;
   buff: ArrayBuffer;

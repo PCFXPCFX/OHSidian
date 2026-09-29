@@ -34,6 +34,10 @@ import { DependencyProvider } from '../interface/Dependency';
 
 const TAG = 'GlobalThisHelper';
 const INIT_ABILITY: string = 'init_ability';
+// Set when the LAST window's ability started terminating: the engine browser
+// is about to exit. onAcceptWant consults this to avoid a synchronous
+// kGetLastActiveWidget round-trip against an engine that is mid-teardown.
+const TERMINATING: string = 'app_terminating';
 
 export class GlobalThisHelper {
   private static global: GlobalContext = GlobalContext.getInstance();
@@ -71,5 +75,26 @@ export class GlobalThisHelper {
       return false;
     }
     return GlobalThisHelper.global.getObject(INIT_ABILITY) as boolean;
+  }
+
+  // Marks the browser as going away (called from the last window's
+  // prepare-terminate). Cleared whenever a new window ability registers -
+  // the flag is then stale because the engine is alive again.
+  public static markTerminating(): void {
+    GlobalThisHelper.global.setObject(TERMINATING, true);
+    LogUtil.info(TAG, 'app marked terminating');
+  }
+
+  public static markAlive(): void {
+    if (GlobalThisHelper.global.hasObject(TERMINATING)) {
+      GlobalThisHelper.global.setObject(TERMINATING, false);
+    }
+  }
+
+  public static isTerminating(): boolean {
+    if (GlobalThisHelper.global.hasObject(TERMINATING)) {
+      return GlobalThisHelper.global.getObject(TERMINATING) as boolean;
+    }
+    return false;
   }
 }

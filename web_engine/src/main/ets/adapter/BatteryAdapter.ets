@@ -76,6 +76,14 @@ export class BatteryAdapter extends BaseAdapter {
       this.batteryStatus.batterySOC = params["soc"] as number;
       this.batteryStatus.chargingStatus = params["chargeState"] as number;
       this.batteryStatus.isBatteryPresent = params["present"] as boolean;
+      // nowCurrent is a live batteryInfo module value (since API 12); refresh
+      // it alongside the event fields. estimatedRemainingChargeTime /
+      // remainingEnergy have no platform source and stay at -1.
+      try {
+        this.batteryStatus.nowCurrent = batteryInfo.nowCurrent;
+      } catch (e) {
+        // older builds: keep the previous value
+      }
       callback(this.batteryStatus);
     }
   }

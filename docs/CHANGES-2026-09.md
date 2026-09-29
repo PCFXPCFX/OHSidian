@@ -2221,3 +2221,99 @@ fontId 仍作为"样式已变化"的信号源,循环命令的诊断提示继续�
 **验证要点**:安装新包后,系统设置切换字体样式 → 回到应用约 1s 内
 界面字体跟随(日志 fontId 发布 + OhosThemeFont 注册先行);恢复默认
 样式后应用回到 HarmonyOS Sans;Obsidian 设置自选字体仍优先。
+
+### 第 68 轮(2026-09-29):外部审计修复收尾(批次4)+ 11 处潜伏编译错误清零 + 真机崩溃(SIGTRAP)分析与缓解
+
+**背景**:外部 agent 的《功能性 Bug 深度审计报告》(约 70 条)逐条
+**以代码为准**复核,批次 1-3(窗口生命周期/输入 IME/补丁脚本/文件
+系统权限,共 20 项修复 + 16 项误报判定)已随 f06ee10 落地;逐条
+核实证据、修复说明与误报理由全部登记在 `docs/AUDIT-FIXES-2026-09-29.md`。
+本轮是该工作的收尾批次 + 两项构建/真机硬问题的修复。
+
+**批次 4 修复(杂项适配器,均先核实再修)**:
+- BLE:`disconnectGatt` 补 off 通知监听 + 清 per-device 标记与残留
+  回调(重连后通知失效的根因);`startDiscoveryMonitor` 重复注册先
+  off 旧闭包(stop 永远只能移除最后一个的泄漏);
+- ShapeDetection:OCR `recognizeText` 先查 error(失败时 data 为
+  undefined 直接崩);OCR/人脸 pixelMap finally 释放(每次调用泄漏
+  一个);人脸 `detect()` 包 try/catch(原先 promise 拒绝吞回调);
+- Print:`onStartLayoutWrite` 按 jobId:fd 去重(属性变更重触发的
+  重复写入会把多份 PDF 拼接成坏文件);
+- Media:`getImageReceiver` 单次注册守卫(重复叠加监听每帧 N 倍处理);
+- StatusBar:`RemoveFromStatusBar` finally 中 off 包 try/catch
+  (onCompleted 已发后 off 抛错导致第二个矛盾的回调);
+- Speech:重建 TTS 引擎前先 shutdown 旧引擎(切语言时双引擎抢
+  speak、旧 listener 仍触发);
+- I18n:`registerTimeZoneListener` 重复注册前先 unsubscribe(旧
+  subscriber 泄漏,每次时区变化连旧回调一起触发);
+- CertManager:签名 update/finish 失败路径补 `certManager.abort`
+  (弃置会话耗尽句柄槽);
+- Device:`getRawDescriptor` 失败补回调空描述符(原先静默返回,
+  引擎挂等;openDevice 的布尔返回本就透传,无需改);
+- OCR:错误/空图路径回调补长度参数 `callback(words, 0)`(与成功
+  路径签名一致,引擎侧 length 不再是 undefined);
+- 引擎侧松散 `main.js`(非 asar 内):trash 自检不再读写用户
+  obsidian.json(`shell.trashItem` 本就不需要注册 vault,kill -9
+  残留脏条目的整类风险消失);`pad()` 补 String() 转换;
+- WebPage:`onLoadIntercept` 从恒 false 改 https/file/about 白名单
+  (唯一调用方传硬编码协议 URL,无可达攻击路径,纯纵深防御);
+- 文档:DEV-ENV-SETUP 的 API 版本从 6.0.2(22) 更正为 6.1.1(24)
+  (与 build-profile 实际一致,新开发者装错 SDK 会直接构建失败)。
+
+**误报判定(不修,证据在审计文档)**:NativeTheme 构造器重置主题
+(单例构造一次,destroy 无调用方)、activateFileAccessPersist 命名
+(两段式 persist+activate 本就正确)、WebAbility 窗口监听器不 off
+(实例级窗口随实例销毁,无幽灵事件路径)、startUri replace(字符串
+replace 只换首处)、手机分支、EngineFlags 缓存(消费模型只读一次)、
+RunningLock 后台清 keep(幂等无害)、电池快照(batteryInfo 是系统
+实时单例)、预览 320×240(绑定无分辨率参数)、SetContextMenu 赋值
+时序(同步块内完成)、LOCALE_CHANGED(引擎无此回调,能力缺口)、
+"两个第 27 轮"(文档 1107 行已有编号说明)。BatteryAdapter 顺手修
+事件里刷新 `nowCurrent`(API 12 起可实时读)。
+
+**11 处潜伏编译错误清零(审计未发现,构建时暴露——此前 full build
+应为失败状态)**:
+- `CommonInterface` 从未导出却被导入的符号:补 `BatteryInfo`/
+  `OcrAdapterImage`/`PowerMonitorContext`(挂到 NativeContext 上)
+  三个接口定义;`TextWord` 改用 SDK 自带 `textRecognition.TextWord`;
+- PasteBoard:API 24 中 `PasteDataRecord.uri` 已是 string,`filterFileDocs`
+  签名改为接 string 内部自行解析(唯一调用方);
+- WebAbility 字体链路:`Promise.all` 回调显式过滤 null(ArkTS 无
+  filter 谓词收窄),entries 才写入 mode 文件;
+- BLE:HashMap.forEach 的 key 按 possibly-undefined 防御。
+附带:`LogDecorator` 重构——async 适配器方法的 "out =>" 日志从恒
+`{}` 改为经旁链记录 settle 值/拒绝原因(`out(promise) =>`/
+`rejected =>`),不触碰返回的 promise 本体(LogMethod/LogAll 共用
+同一 wrapLogged)。
+
+**真机崩溃分析与缓解(附录 A,完整证据链在审计文档)**:
+MatePad Air faultlog(SIGTRAP@libelectron.so,LastFatalMessage:
+`OHOS.IDisplayManagerAgent`)+ 尾部 hilog 时间线实锤为**关闭最后
+窗口 → 立即重启**的竞态:
+- 12:36:35.951 窗口分离 → 36.471 prepare terminate(返回 true)
+  → 36.625 重启 want 进入,`onAcceptWant` 对正在退出的引擎发起
+  **同步** `kGetLastActiveWidget` → 39.627 引擎 3s 超时
+  (XCollie:`MainThread:AcceptWant 3007ms`)→ 39.641 浏览器退出、
+  `~Display` 析构 → 39.663 引擎 DisplayManagerAgent 派发在显示
+  对象销毁瞬间命中内部 CHECK;主线程与 CrBrowserMain 堵在同一把
+  引擎锁上(锁 convoy)。
+- 归属:陷阱在闭源引擎内部,同步查询是上游代码;但主线程 3s 阻塞
+  是 ArkTS 侧可控的 aggravator。
+- 修复:`GlobalThisHelper` 增加进程级 terminating 标记
+  (`markTerminating/isTerminating/markAlive`);最后窗口的
+  `onPrepareToTerminate`(代理数 ≤1)与 App 级 `onPrepareTermination`
+  均标记;`onAcceptWant` 在 terminating 时跳过同步 native 查询
+  直接快速路径返回 browser1(与冷启动一致),其余路径的查询包
+  try/catch;`onWindowStageCreate`(addProxy 后)清除陈旧标记,
+  "恢复上次活跃窗口"不受影响。
+
+**验证**:web_engine HAR 与 electron 模块 ArkTS 双双 BUILD
+SUCCESSFUL;`node --check` 松散 main.js 通过;asar 已重打且
+`verify-asar.cjs` 全部 marker(含新增 3 项)通过。
+
+**真机回归要点**:①关闭应用 → 立即重启,不崩溃,日志无
+`MainThread:AcceptWant` 3s 阻塞(XCollie);②OCR/人脸多次调用
+无持续内存增长;③BLE 连接 A/B 两设备、断开 A 重连后通知仍可达;
+④打印多页任务输出为单份完整 PDF;⑤切 TTS 语言后 speak 正常;
+⑥证书签名连续失败后服务仍可用;⑦另存为对话框显示全部格式组;
+⑧电池/时区/深链回归(本轮动了相关适配器)。

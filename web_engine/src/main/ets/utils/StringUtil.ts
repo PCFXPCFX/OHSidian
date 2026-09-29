@@ -47,9 +47,14 @@ export default class StringUtil {
 
   // Converts a pasteboard record URI into a local file path. Returns an empty
   // string for non-file URIs (clipboard text/html/image records etc.).
-  static filterFileDocs(recordUri: uri.URI): string {
+  // PasteDataRecord.uri is a plain string on API 24, so parse it here.
+  static filterFileDocs(recordUriString: string): string {
     try {
-      if (!recordUri || (recordUri.scheme !== 'file' && recordUri.scheme !== 'docs')) {
+      if (!recordUriString) {
+        return '';
+      }
+      const recordUri = new uri.URI(recordUriString);
+      if (recordUri.scheme !== 'file' && recordUri.scheme !== 'docs') {
         return '';
       }
       return new fileUri.FileUri(recordUri.toString()).path;

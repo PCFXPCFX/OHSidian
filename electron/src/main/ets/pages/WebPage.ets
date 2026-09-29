@@ -59,8 +59,18 @@ export struct WebPage {
         .darkMode(WebDarkMode.Auto)
         .forceDarkAccess(true)
         .onLoadIntercept((event) => {
-          hilog.info(this.domainId, this.logTag, 'onLoadIntercept');
-          return false;
+          // This page shows the fixed user-authentication protocol document.
+          // The only legitimate schemes are https (the protocol URL) and
+          // file/inline anchors; blocking everything else (javascript:,
+          // data:, custom schemes) keeps a polluted router parameter from
+          // turning this webview into an arbitrary-content loader.
+          const url: string = event?.data?.getRequestUrl() ?? '';
+          const allowed: boolean = url.startsWith('https://') ||
+            url.startsWith('file://') || url.startsWith('about:blank');
+          if (!allowed) {
+            hilog.error(this.domainId, this.logTag, `onLoadIntercept blocked: ${url}`);
+          }
+          return !allowed;
         })
         .onErrorReceive((event) => {
           if (event) {

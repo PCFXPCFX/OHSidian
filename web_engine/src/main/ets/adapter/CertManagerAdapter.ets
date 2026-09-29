@@ -168,9 +168,23 @@ export class CertManagerAdapter extends BaseAdapter {
         return;
       }
       const SignHandle_const = SignHandle.handle;
+      // Aborts the session on any post-init failure: an abandoned session
+      // holds the key handle until the service reaps it, and repeated
+      // failures would exhaust the cert manager's session slots.
+      const abortSilently = (): void => {
+        try {
+          certManager.abort(SignHandle_const)
+            .catch((abortErr: BusinessError) => {
+              LogUtil.warn(TAG, `abort sign session failed, code: ${abortErr.code}`);
+            });
+        } catch (abortErr) {
+          LogUtil.warn(TAG, 'abort sign session threw: ' + JSON.stringify(abortErr));
+        }
+      };
       certManager.update(SignHandle_const, input, (err: BusinessError) => {
         if (err) {
           LogUtil.error(TAG, `update sign failed, code: ${err.code}`);
+          abortSilently();
           callback(buffer_return);
           return;
         }
@@ -178,6 +192,7 @@ export class CertManagerAdapter extends BaseAdapter {
           callback(cmResult.outData || buffer_return);
         }).catch((err: BusinessError) => {
           LogUtil.error(TAG, `finish sign failed, code: ${err.code}`);
+          abortSilently();
           callback(buffer_return);
         });
       });

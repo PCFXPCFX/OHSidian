@@ -14,13 +14,13 @@
 DevEco Studio 是华为官方 IDE(基于 IntelliJ 平台,和 Android Studio 类似)。
 
 1. 下载地址:https://developer.huawei.com/consumer/cn/deveco-studio/
-   (选 Windows 64 位,建议最新版本,需支持 **HarmonyOS 6.0.2 (API 22)** 的 SDK)
+   (选 Windows 64 位,建议最新版本,需支持 **HarmonyOS 6.1.1 (API 24)** 的 SDK)
 2. 双击安装包一路 Next,勾选"添加到 PATH"和"创建桌面快捷方式"。
 3. 首次启动按向导完成:
    - 导入/新建设置(选 Do not import settings 即可)
    - **登录华为开发者账号**(右上角头像图标,后面自动签名要用)
    - 在 **Settings > HarmonyOS SDK** 里确认勾选了 HarmonyOS SDK,
-     API 版本选 **6.0.2(22)**(项目 targetSdkVersion 就是它),点 Apply 等待下载完成。
+     API 版本选 **6.1.1(24)**(项目 targetSdkVersion 就是它),点 Apply 等待下载完成。
 
 > 项目要求 Node.js 18+,DevEco Studio 自带 Node,无需单独安装。
 
@@ -84,5 +84,6 @@ hvigorw assembleHap --mode module -p product=default
   在 Signing Configs 里重新自动生成。
 - **安装到一半失败**:卸载旧的 OHsidian(com.mikannqaq.obsidian)再装,
   因为签名不一致时系统会拒绝覆盖安装(旧版数据先备份 Vault)。
-- **DevEco 版本太新没有 API 22 的 SDK**:在 SDK 管理器勾选"显示历史版本"安装
-  6.0.2(22),或把 build-profile 里的 targetSdkVersion 一并升级(需回归测试)。
+- **DevEco 版本太旧没有 API 24 的 SDK**:升级 DevEco Studio(6.1.1 起提供
+  API 24),或临时把 build-profile 里的 targetSdkVersion 降回已支持的版本
+  (闭源中间层按 API 22 验证过,降级后需真机回归)。

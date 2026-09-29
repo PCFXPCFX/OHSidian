@@ -29,12 +29,16 @@
 
 import { injectable } from 'inversify';
 import { BaseAdapter } from '../common/BaseAdapter';
-import { OcrAdapterImage, TextWord } from '../interface/CommonInterface';
+import { OcrAdapterImage } from '../interface/CommonInterface';
 import LogUtil from '../utils/LogUtil';
 import LogMethod from '../common/LogDecorator';
 import image from '@ohos.multimedia.image';
 import { textRecognition } from '@kit.CoreVisionKit';
 import { BusinessError } from '@ohos.base';
+
+// The word type IS the SDK's TextWord; the old local re-export from
+// CommonInterface referenced a symbol that file never declared.
+type TextWord = textRecognition.TextWord;
 
 const TAG: string = 'Ocr';
 const OCR_IMAGE_PIXEL_FORMAT: number = 3
@@ -48,7 +52,8 @@ export class OcrAdapter extends BaseAdapter {
     let wordsArray :Array<TextWord> = new Array();
     let imagePixel: image.PixelMap = await this.convertImagePixelMap(requestImage) as image.PixelMap;
     if (!imagePixel) {
-      callback(wordsArray);
+      // Same signature as the success path: (words, length).
+      callback(wordsArray, 0);
       LogUtil.error(TAG, `covert image piexel failed`);
       return;
     }
@@ -59,7 +64,9 @@ export class OcrAdapter extends BaseAdapter {
       try {
         if (error.code !== 0) {
           LogUtil.error(TAG, `textRecognition.recognizeText :${JSON.stringify(error.message)}`);
-          callback(wordsArray);
+          // Keep the callback signature consistent with the success path
+          // (words, length): the engine-side reader expects a defined length.
+          callback(wordsArray, 0);
           return;
         }
         for (const block of data.blocks) {

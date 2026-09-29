@@ -121,6 +121,10 @@ export class SpeechAdapter extends BaseAdapter {
     endEventCallback: Function,
     params: EngineCreationParams = defaultCreateEngineParams): void {
     try {
+      // Re-creating with different params (e.g. a language switch) must shut
+      // the previous engine down first: two live engines would race for
+      // speak requests and the old listener would keep firing.
+      this.textToSpeechEngineShutdown();
       textToSpeech.createEngine(params as textToSpeech.CreateEngineParams)
         .then((res: textToSpeech.TextToSpeechEngine) => {
           this.ttsEngine = res;

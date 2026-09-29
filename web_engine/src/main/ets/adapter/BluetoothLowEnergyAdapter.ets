@@ -109,6 +109,13 @@ export class BluetoothLowEnergyAdapter extends BaseAdapter {
   @LogMethod
   startDiscoveryMonitor(onReceiveEvent: (data: ArrayBuffer, scanResult: ble.ScanResult) => void): void {
     try {
+      // Re-registering without dropping the previous listener would stack
+      // system callbacks; stopDiscoveryMonitor only knows the LAST one, so
+      // the stale closure would keep delivering scans forever.
+      const previous = BluetoothLowEnergyAdapter.ON_GATT_CHANGE_CALLBACK;
+      if (previous) {
+        ble.off('BLEDeviceFind', previous);
+      }
       const onTransformReceiveEvent = (scanResults: Array<ble.ScanResult>) => {
         for (let scanResultsElement of scanResults) {
           const buffer: ArrayBuffer = scanResultsElement.data;
@@ -176,7 +183,8 @@ export class BluetoothLowEnergyAdapter extends BaseAdapter {
       let staleIds: Array<string> = [];
       let prefix: string = deviceId + '_';
       BluetoothLowEnergyAdapter.CHARACTERISTIC_CHANGE_MAP.forEach((value, key) => {
-        if (key.startsWith(prefix)) {
+        // HashMap.forEach types key as possibly undefined; guard before use.
+        if (key !== undefined && key.startsWith(prefix)) {
           staleIds.push(key);
         }
       });

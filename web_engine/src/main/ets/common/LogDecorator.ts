@@ -55,6 +55,36 @@ const safeStringify = (value: object): string => {
   }
 };
 
+const isPromiseLike = (value: Object | undefined): boolean => {
+  return !!value && typeof (value as Record<string, Object>)['then'] === 'function';
+};
+
+// Shared wrapper behind LogMethod and LogAll. Async adapter methods used to
+// log "out => {}" because a Promise serializes to an empty object; the
+// wrapper now logs the settled value (or the rejection) from a side-chain,
+// leaving the original promise untouched for the caller.
+const wrapLogged = (className: string, methodName: string,
+  method: (...args: object[]) => object,
+  propertyDescriptor: PropertyDescriptor): void => {
+  propertyDescriptor.value = function (...args: object[]) {
+    const params = args.map((a: object) => safeStringify(a)).join();
+    LogUtil.info(TAG, `${className}#${methodName}(${params}) in `);
+
+    const result = method.apply(this, args);
+    if (isPromiseLike(result)) {
+      const promise = result as Promise<Object>;
+      promise.then((settled: Object) => {
+        LogUtil.info(TAG, `${className}#${methodName}(${params}) out(promise) => ${safeStringify(settled)}`);
+      }).catch((err: Object) => {
+        LogUtil.error(TAG, `${className}#${methodName}(${params}) rejected => ${safeStringify(err)}`);
+      });
+      return result;
+    }
+    LogUtil.info(TAG, `${className}#${methodName}(${params}) out => ${safeStringify(result)}`);
+    return result;
+  };
+};
+
 /**
  * Method log decorator
  */
@@ -62,19 +92,7 @@ const LogMethod = (
   target: Object,
   methodName: string,
   propertyDescriptor: PropertyDescriptor): PropertyDescriptor => {
-  const method = propertyDescriptor.value;
-
-  propertyDescriptor.value = function (...args: object[]) {
-    const params = args.map(a => safeStringify(a)).join();
-    LogUtil.info(TAG, `${target.constructor.name}#${methodName}(${params}) in `);
-
-    const result = method.apply(this, args);
-    const r = safeStringify(result);
-
-    LogUtil.info(TAG, `${target.constructor.name}#${methodName}(${params}) out => ${r}`);
-    return result;
-  };
-
+  wrapLogged(target.constructor.name, methodName, propertyDescriptor.value, propertyDescriptor);
   return propertyDescriptor;
 };
 
@@ -84,20 +102,8 @@ const LogMethod = (
 export const LogAll = (target: ObjectConstructor) => {
   Reflect.ownKeys(target.prototype).forEach(propertyKey => {
     let propertyDescriptor: PropertyDescriptor = Object.getOwnPropertyDescriptor(target.prototype, propertyKey);
-    const method = propertyDescriptor.value;
-
-    if (method) {
-      propertyDescriptor.value = function (...args: object[]) {
-        const params = args.map(a => safeStringify(a)).join();
-        LogUtil.info(TAG, `${target.name}#${propertyKey.toString()}(${params}) in `);
-
-        const result = method.apply(this, args);
-        const r = safeStringify(result);
-
-        LogUtil.info(TAG, `${target.name}#${propertyKey.toString()}(${params}) out => ${r}`);
-        return result;
-      };
-
+    if (propertyDescriptor && propertyDescriptor.value) {
+      wrapLogged(target.name, propertyKey.toString(), propertyDescriptor.value, propertyDescriptor);
       Object.defineProperty(target.prototype, propertyKey, propertyDescriptor);
     }
   });

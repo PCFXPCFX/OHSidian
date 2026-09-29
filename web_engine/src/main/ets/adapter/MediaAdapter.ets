@@ -65,8 +65,17 @@ export class MediaAdapter extends BaseAdapter {
     });
   }
 
+  private imageArrivalRegistered: boolean = false;
+
   @LogMethod
   getImageReceiver() {
+    // One receiver, one listener: a second on('imageArrival') would stack
+    // listeners and handle every frame N times (and the second release()
+    // would throw). Re-registration is a no-op.
+    if (this.imageArrivalRegistered) {
+      return;
+    }
+    this.imageArrivalRegistered = true;
     this.previewReceiver.on('imageArrival', () => {
       let img: image.Image = this.nativeContext.readImageFromReceiver(this.previewReceiver);
       if (img) {

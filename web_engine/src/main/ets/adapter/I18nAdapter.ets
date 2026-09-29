@@ -57,6 +57,12 @@ export class I18nAdapter extends BaseAdapter {
 
   @LogMethod
   registerTimeZoneListener(callback: Function) {
+    // Re-registration must drop the previous subscriber first, otherwise the
+    // old one leaks and every timezone change fires the stale callback too.
+    if (this.subscriber) {
+      this.unsubscribeTimeZoneListener();
+      this.subscriber = undefined;
+    }
     CommonEventManager.createSubscriber(this.subscribeInfo,
       (err: Base.BusinessError, commonEventSubscriber: CommonEventManager.CommonEventSubscriber) => {
         if (err) {

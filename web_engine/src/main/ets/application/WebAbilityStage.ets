@@ -41,6 +41,8 @@ import { NativeThemeAdapter } from '../adapter/NativeThemeAdapter'
 import Inject from '../common/InjectModule';
 
 const DELAYED_TIME = 0;
+const TAG = 'WebAbilityStage';
+
 export class WebAbilityStage extends AbilityStage {
 
   private nativeContext: NativeContext | undefined = undefined;
@@ -55,12 +57,28 @@ export class WebAbilityStage extends AbilityStage {
     if (instanceKey) {
       return instanceKey.toString();
     }
+    // Termination fast path: a relaunch racing the shutdown of the last
+    // window must NOT round-trip kGetLastActiveWidget synchronously - with
+    // the browser mid-exit the engine answers nothing and the native call
+    // blocks the main thread for its full 3s wait (observed: XCollie
+    // "MainThread:AcceptWant 3007ms"), which wedges teardown and ends in an
+    // engine-side DisplayManagerAgent CHECK crash (SIGTRAP). Route to
+    // browser1 instead - the same answer a cold start would produce.
+    if (GlobalThisHelper.isTerminating()) {
+      LogUtil.warn(TAG, 'onAcceptWant during termination, fast-path to default window');
+      return ConfigData.DEFAULT_WINDOW_ID;
+    }
     if (GlobalThisHelper.isLaunched()) {
-      let result = this.nativeContext?.ExecuteCommand(
-        CommandType.kGetLastActiveWidget, { is_sync: true });
-      let widgetId = result?.last_widget_Id;
-      if (widgetId) {
-        return ConfigData.WINDOW_PREFIX + widgetId;
+      try {
+        let result = this.nativeContext?.ExecuteCommand(
+          CommandType.kGetLastActiveWidget, { is_sync: true });
+        let widgetId = result?.last_widget_Id;
+        if (widgetId) {
+          return ConfigData.WINDOW_PREFIX + widgetId;
+        }
+      } catch (exception) {
+        // A native query failing here must not crash the launcher path.
+        LogUtil.error(TAG, 'onAcceptWant last-active query failed: ' + JSON.stringify(exception));
       }
     }
     this.context.getApplicationContext().tempDir;
@@ -74,6 +92,8 @@ export class WebAbilityStage extends AbilityStage {
     // socket cleanup) would be skipped and recent edits lost. Dispatch the
     // command synchronously via JsBindingUtils so it works even if the
     // delayed init in runTaskAsync has not cached this.nativeContext yet.
+    // App-level termination always means the browser is going away.
+    GlobalThisHelper.markTerminating();
     const nativeContext = this.nativeContext ??
       JsBindingUtils.getNativeContext(ContextType.kMainProcess);
     nativeContext?.ExecuteCommand(CommandType.kAppQuit, { is_sync: true });

@@ -44,6 +44,7 @@ import Inject from '../common/InjectModule';
 import { CaptionButtonRect, WindowBound } from '../interface/CommonInterface';
 import CheckEmptyUtils from '../utils/CheckEmptyUtils';
 import { WebBaseAbility } from './WebBaseAbility';
+import lazy { GlobalThisHelper } from '../utils/GlobalThisHelper';
 import { WindowStyle, IStyleData, IUpdateStyle } from '../common/WindowStyle';
 import { CommandType, ConfigData } from '../common/Constants';
 import { PermissionManagerAdapter } from '../adapter/PermissionManagerAdapter';
@@ -649,7 +650,16 @@ export class WebAbility extends WebBaseAbility {
           });
         };
         Promise.all(names.slice(0, 40).map(resolveOne))
-          .then((mapping: Array<Record<string, string>>) => {
+          .then((mapping: Array<Record<string, string> | null>) => {
+            // resolveOne never resolves null today, but the declared type
+            // allows it - collect the non-null entries explicitly (ArkTS
+            // has no type-guard narrowing on filter predicates).
+            const entries: Array<Record<string, string>> = [];
+            mapping.forEach((m: Record<string, string> | null) => {
+              if (m !== null) {
+                entries.push(m);
+              }
+            });
             try {
               const filesDir: string = this.context.getApplicationContext().filesDir;
               const filePath: string = filesDir + '/ohsidian-mode.json';
@@ -664,7 +674,7 @@ export class WebAbility extends WebBaseAbility {
               } catch (e) {
                 cfg = {};
               }
-              const nextJson: string = JSON.stringify(mapping);
+              const nextJson: string = JSON.stringify(entries);
               if (cfg['styleFonts'] === nextJson) {
                 return;
               }
@@ -676,7 +686,7 @@ export class WebAbility extends WebBaseAbility {
               } finally {
                 fileIo.closeSync(file);
               }
-              LogUtil.info(TAG, 'style fonts published: ' + mapping.length + ' entries');
+              LogUtil.info(TAG, 'style fonts published: ' + entries.length + ' entries');
             } catch (err) {
               LogUtil.error(TAG, 'failed to write styleFonts: ' + JSON.stringify(err));
             }
@@ -761,6 +771,10 @@ export class WebAbility extends WebBaseAbility {
     // that onCreate always allocates first, so it could never fire - removed.
 
     this.abilityManager?.addProxy(this);
+    // A window registering means the engine is serving windows again - clear
+    // a stale terminating flag (set by the previous last-window shutdown) so
+    // future onAcceptWant calls resume the last-active lookup.
+    GlobalThisHelper.markAlive();
 
     this.mainWindow = windowStage.getMainWindowSync();
     // Publish the current system font scale once at startup (onConfigur-
@@ -1163,6 +1177,15 @@ export class WebAbility extends WebBaseAbility {
   }
 
   onPrepareToTerminate(): boolean {
+    // This window's ability is about to terminate. When it is the LAST
+    // window, the engine browser exits right after - mark it so a relaunch
+    // racing this teardown takes onAcceptWant's fast path instead of
+    // blocking the main thread 3s on a dead engine (observed as an XCollie
+    // "MainThread:AcceptWant 3007ms" block followed by an engine-side
+    // DisplayManagerAgent CHECK crash while ~Display ran).
+    if ((this.abilityManager?.getProxyCount() ?? 0) <= 1) {
+      GlobalThisHelper.markTerminating();
+    }
     this.nativeContext.OnWindowEvent(this.xcomponentId, WebAbility.WINDOW_CLOSE);
     return true;
   }
