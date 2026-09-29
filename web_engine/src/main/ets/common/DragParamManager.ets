@@ -264,23 +264,23 @@ export class DragParamManager {
       }
       return dropData;
     }
-    let records: Array<string>;
+    // summary.summary maps UTD type -> data size (Record<string, number>).
+    // The old code parsed it as Array<string> and indexed records[i][0], so
+    // the switch below never matched and external drags got no placeholder
+    // data on dragEnter. Iterate the keys (the types) instead.
+    let summaryTypes: Array<string>;
     try {
-      records = JSON.parse(JSON.stringify(summary.summary)) as Array<string>;
+      summaryTypes = Object.keys(summary.summary);
     } catch (err) {
       LogUtil.warn(TAG, `On handleDropDataForEnter summary parse failed: ${JSON.stringify(err)}`);
       return dropData;
     }
-    if (!records || records.length === 0) {
+    if (!summaryTypes || summaryTypes.length === 0) {
       LogUtil.warn(TAG, `On handleDropDataForEnter summary records is null`);
       return dropData;
     }
-    for(let i = 0; i < records.length; i++) {
-      if (records[i].length > 0 && !records[i][0]) {
-        LogUtil.error(TAG, `On handleDropDataForEnter dragData summary is empty`);
-        continue;
-      }
-      let summaryType = records[i][0];
+    for(let i = 0; i < summaryTypes.length; i++) {
+      let summaryType = summaryTypes[i];
       LogUtil.info(TAG, `On handleDropDataForEnter dragData summary type:${summaryType}`);
       switch (summaryType) {
         case UTD.UniformDataType.PLAIN_TEXT:
@@ -456,9 +456,20 @@ export class DragParamManager {
           case UTD.UniformDataType.VIDEO:
           case UTD.UniformDataType.AUDIO:
           case UTD.UniformDataType.FOLDER:
-            let file = record as unifiedDataChannel.File;
-            LogUtil.info(TAG, `handleDropDataFromRecordsForEntries, ${recordType} data length: ${file.uri.length}`);
-            dropData.fileUris.push(file.uri);
+            // Multi-entry records carry payloads in the entry map, not on
+            // the record itself: `record as unifiedDataChannel.File` has no
+            // uri on SDK >= 15 and pushed undefined. File-shaped payloads
+            // are FileUri structs (oriUri), keyed by the record's own type.
+            let fileEntry = entryMap[recordType] as uniformDataStruct.FileUri;
+            if (!fileEntry || !fileEntry.oriUri) {
+              fileEntry = entryMap[UTD_FILE_URI] as uniformDataStruct.FileUri;
+            }
+            if (fileEntry && fileEntry.oriUri) {
+              LogUtil.info(TAG, `handleDropDataFromRecordsForEntries, ${recordType} data length: ${fileEntry.oriUri.length}`);
+              dropData.fileUris.push(fileEntry.oriUri);
+            } else {
+              LogUtil.warn(TAG, `handleDropDataFromRecordsForEntries, ${recordType} has no file uri entry`);
+            }
             break;
           default:
             LogUtil.warn(TAG, `On handleDropDataFromRecordsForEntries dragData, type: ${recordType} not support`);

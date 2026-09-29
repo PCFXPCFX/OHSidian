@@ -60,6 +60,26 @@ for (const [file, patch, marker] of [
   } else {
     console.log('[refresh] ' + file + ': no previous patch marker (fresh file)');
   }
+  // This script only re-prepends the patch blocks. The textual replacements
+  // (version gate, drawer vault switch, updater latch) are applied once by
+  // update-obsidian.mjs and are NOT redone here - on a never-processed asar
+  // they would be missing and the app would die at startup ("manual update
+  // required") behind a seemingly-successful refresh. Abort loudly instead.
+  const requiredMarks = {
+    'app.js': [['drawer vault switch (openVaultChooser)', 'i.app.openVaultChooser()']],
+    'main.js': [
+      ['version-floor gate (bo=Math.max)', 'bo=Math.max(parseInt(fo.split(".")[0]),28)'],
+      ['updater disable latch', '(at||(D.updateDisabled=!0))&&(e.emit("disable",!0)'],
+    ],
+  };
+  const missing = (requiredMarks[file] || [])
+    .filter(([, needle]) => !src.includes(needle))
+    .map(([name]) => name);
+  if (missing.length > 0) {
+    console.error('[refresh] ABORT: ' + file + ' is missing textual patches: ' + missing.join(', '));
+    console.error('[refresh] Run `node scripts/update-obsidian.mjs` (full patcher) instead of refresh-app-patch.mjs.');
+    process.exit(1);
+  }
   fs.writeFileSync(full, patch + src);
   console.log('[refresh] ' + file + ': new patch prepended (len ' + patch.length + ')');
 }

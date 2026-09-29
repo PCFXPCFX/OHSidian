@@ -30,6 +30,7 @@
 import AbilityStage from '@ohos.app.ability.AbilityStage';
 import { CommandType, ConfigData, ContextType } from '../common/Constants';
 import JsBindingUtils from '../utils/JsBindingUtils';
+import LogUtil from '../utils/LogUtil';
 import Want from '@ohos.app.ability.Want';
 import lazy { GlobalThisHelper } from '../utils/GlobalThisHelper';
 import lazy { NativeContext } from '../interface/CommonInterface';
@@ -67,7 +68,15 @@ export class WebAbilityStage extends AbilityStage {
   }
 
   onPrepareTermination(): AbilityConstant.PrepareTermination {
-    this.nativeContext?.ExecuteCommand(CommandType.kAppQuit, { is_sync: false });
+    // is_sync is required here: the system kills the process right after
+    // this callback returns TERMINATE_IMMEDIATELY, so an async kAppQuit
+    // would never run - the engine's will-quit flush (unsaved-note save,
+    // socket cleanup) would be skipped and recent edits lost. Dispatch the
+    // command synchronously via JsBindingUtils so it works even if the
+    // delayed init in runTaskAsync has not cached this.nativeContext yet.
+    const nativeContext = this.nativeContext ??
+      JsBindingUtils.getNativeContext(ContextType.kMainProcess);
+    nativeContext?.ExecuteCommand(CommandType.kAppQuit, { is_sync: true });
     return AbilityConstant.PrepareTermination.TERMINATE_IMMEDIATELY;
   }
 
@@ -88,8 +97,11 @@ export class WebAbilityStage extends AbilityStage {
       import('../jsbindings/JsBindingMethod').then((ns:ESObject) => {
         ns.JsBindingMethod.bind();
         this.nativeThemeAdapter = Inject.get(NativeThemeAdapter);
-      }).catch(()=>{
-        console.log('import failed');
+      }).catch((err: ESObject)=>{
+        // A silent failure here leaves every JS binding unregistered and the
+        // UI unresponsive with nothing but a swallowed console.log. Surface
+        // it through hilog so release builds can diagnose it.
+        LogUtil.error('WebAbilityStage', 'JsBindingMethod import/bind failed: ' + JSON.stringify(err));
       });
     }, DELAYED_TIME)
   }

@@ -46,7 +46,6 @@ const TAG: string = 'IMFAdapter';
 @injectable()
 export class IMFAdapter extends BaseAdapter {
   private inputMethodController = inputMethod.getController();
-  private count = 0;
   private IMEonListen = false;
 
   @LogMethod
@@ -91,6 +90,13 @@ export class IMFAdapter extends BaseAdapter {
 
   @LogMethod
   showTextInput(requestKeyboardReason: number) {
+    // Re-register the IME listeners if a previous offListenIME() detached
+    // them: without this the soft keyboard comes up but typing is dead.
+    // (showTextInputHelper does the same for the attach-driven path.)
+    if (!this.IMEonListen) {
+      this.onListenIME();
+      this.IMEonListen = true;
+    }
     if (deviceInfo.sdkApiVersion >= 15) {
       this.inputMethodController.showTextInput(requestKeyboardReason).then(() => {
       }).catch((err: BusinessError) => {
@@ -170,7 +176,10 @@ export class IMFAdapter extends BaseAdapter {
   private onListenIME() {
     this.inputMethodController.on('insertText', (text: string) => {
       this.nativeContext.InsertTextCallback(text);
-      this.inputMethodController.changeSelection("" + this.count++, 0, 0);
+      // Deliberately NOT calling changeSelection here: the text buffer lives
+      // in the web renderer, the adapter has no real text to report, and the
+      // previous "0"/"1"/"2"... counter poisoned the IME's selection state
+      // (jumpy candidates and bogus composition highlights while typing).
     });
     this.inputMethodController.on('deleteLeft', (length: number) => {
       this.nativeContext.DeleteBackCallback(length);

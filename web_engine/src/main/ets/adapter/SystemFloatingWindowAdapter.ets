@@ -64,6 +64,10 @@ export class SystemFloatingWindowAdapter extends BaseWindowAdapter {
       LogUtil.warn(TAG, 'Failed to get active context');
       return;
     }
+    // Capture the owning context for getWindowContext(): answering with the
+    // live active-context lookup would recurse when this adapter is itself
+    // the active window.
+    this.windowContext = activeContext;
 
     let bounds: WindowBound = {
       left: param.bounds.left,
@@ -154,6 +158,16 @@ export class SystemFloatingWindowAdapter extends BaseWindowAdapter {
         let errCode: number = err.code;
         if (errCode) {
           LogUtil.error(TAG, 'Failed to load the content. Cause:' + JSON.stringify(err));
+          // The window is unusable without content; tear it down fully so
+          // nothing is left on screen and the id can be recreated later
+          // (window + manager cache + proxy registration). Destroy the
+          // outer windowClass, not the (void) loadContent data param.
+          windowClass.destroyWindow((destroyErr: BusinessError) => {
+            LogUtil.warn(TAG, 'destroy failed floating window: ' + JSON.stringify(destroyErr));
+          });
+          this.systemFloatingWindowManager.removeSystemFloatingWindow(
+            param.parent_id, param.window_id);
+          this.abilityManager.removeProxy(param.window_id);
           return;
         }
       })
@@ -164,7 +178,16 @@ export class SystemFloatingWindowAdapter extends BaseWindowAdapter {
   closeWindow(id: number) {
     let mainWindowId = this.systemFloatingWindowManager.getMainWindowId(id);
     if (mainWindowId) {
-      this.systemFloatingWindowManager.getWindow(id)?.destroyWindow();
+      this.systemFloatingWindowManager.getWindow(id)?.destroyWindow()
+        .then(() => {
+          // Drop the proxy registration on success: a stale entry blocks
+          // re-creating a floating window with the same id (addProxy dedup)
+          // and routes engine calls to the destroyed window.
+          this.abilityManager.removeProxy(id);
+        })
+        .catch((err: BusinessError) => {
+          LogUtil.error(TAG, 'Failed to destroy the floating window. Cause: ' + JSON.stringify(err));
+        });
       this.systemFloatingWindowManager.removeSystemFloatingWindow(mainWindowId, id);
     }
   }
@@ -207,8 +230,10 @@ export class SystemFloatingWindowAdapter extends BaseWindowAdapter {
     let xComTop: number = windowProp?.drawableRect.top || 0;
     bounds.left -= xComBorder;
     bounds.top -= xComTop;
+    // Symmetric borders (see AppWindowAdapter.setBounds): width += 2x left,
+    // height += 2x top.
     bounds.width = bounds.width + xComBorder + xComBorder;
-    bounds.height = bounds.height + xComBorder + xComTop;
+    bounds.height = bounds.height + xComTop + xComTop;
 
     try {
       windowClass.moveWindowTo(bounds.left, bounds.top)
@@ -242,11 +267,13 @@ export class SystemFloatingWindowAdapter extends BaseWindowAdapter {
     let xComTop: number = windowProp?.drawableRect.top || 0;
 
     try {
+      // Symmetric borders (see AppWindowAdapter.setBounds): height grows by
+      // 2x the top border, not top+left.
       let windowLimits: window.WindowLimits = {
         minWidth: minWidth === 0 ? minWidth : minWidth + xComBorder + xComBorder,
-        minHeight: minHeight === 0 ? minHeight : minHeight + xComTop + xComBorder,
+        minHeight: minHeight === 0 ? minHeight : minHeight + xComTop + xComTop,
         maxWidth: maxWidth === 0 ? maxWidth : maxWidth + xComBorder + xComBorder,
-        maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComBorder,
+        maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComTop,
       };
       windowClass?.setWindowLimits(windowLimits)
         .catch((err: BusinessError) => {
@@ -277,8 +304,10 @@ export class SystemFloatingWindowAdapter extends BaseWindowAdapter {
     let xComTop: number = windowProp?.drawableRect.top || 0;
     out_bounds.left -= xComBorder;
     out_bounds.top -= xComTop;
+    // Symmetric borders (see AppWindowAdapter.setBounds): height grows by
+    // 2x the top border, not top+left.
     out_bounds.width += xComBorder + xComBorder;
-    out_bounds.height += xComBorder + xComTop;
+    out_bounds.height += xComTop + xComTop;
     return out_bounds;
   }
 

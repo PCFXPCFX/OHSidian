@@ -32,6 +32,7 @@ import window from '@ohos.window';
 import { IParams,
          ISubWindowInfo,
          NewWindowParam,
+         SubWindowCancelToken,
          WindowBound } from '../interface/CommonInterface';
 import { AbilityManager } from '../common/AbilityManager';
 import { BaseAdapter } from '../common/BaseAdapter';
@@ -99,16 +100,21 @@ export class SubWindowAdapter extends BaseAdapter {
     // takes the fresh-create path - the lifecycle that provably works (first
     // popup of a session): the engine allocates the id, the window is created
     // with it, and the browser attaches only after onLoad.
+    // Shared between this adapter and the page's XComponent (via the params
+    // record): flipped on every failure path so a running SurfaceReady poll
+    // stops instead of reporting readiness for a dead window.
+    const cancelToken: SubWindowCancelToken = { cancelled: false };
     const para: Record<string, IParams> = {
       'subWindowParams': {
         id: param.window_id,
         callback: callback,
         size: [fixedBounds.width, fixedBounds.height],
         initColorRgb: param.init_color_argb,
+        cancelToken: cancelToken,
       }
     };
     let subStorage: LocalStorage = new LocalStorage(para);
-    this.createNewWindow(parentId, param.window_id, fixedBounds, subStorage, callback);
+    this.createNewWindow(parentId, param.window_id, fixedBounds, subStorage, callback, cancelToken);
   }
 
   private getParentWindow(parentId: string): window.Window | undefined {
@@ -159,7 +165,8 @@ export class SubWindowAdapter extends BaseAdapter {
                           id: string,
                           bounds: WindowBound,
                           subStorage: LocalStorage,
-                          callback: (ready: boolean, id: string) => void) {
+                          callback: (ready: boolean, id: string) => void,
+                          cancelToken: SubWindowCancelToken) {
     let proxy = this.abilityManager.getProxy(parentId);
     if (!proxy) {
       let mainWindowId = this.systemFloatingWindowManager.getMainWindowId(parentId);
@@ -169,14 +176,16 @@ export class SubWindowAdapter extends BaseAdapter {
       // Without a parent proxy the window can never be created; report the
       // failure instead of leaving the engine waiting for a callback.
       LogUtil.error(TAG, 'Failed to resolve the parent proxy: ' + parentId);
+      cancelToken.cancelled = true;
       callback(false, id);
       return;
     }
     proxy.createSubWindow(id)
       .then((data: window.Window) => {
-        this.initSubWindow(data, parentId, id, bounds, subStorage, callback);
+        this.initSubWindow(data, parentId, id, bounds, subStorage, callback, cancelToken);
       }).catch((error: BusinessError) => {
       LogUtil.error(TAG, 'Failed to create the subWindow. Cause: ' + JSON.stringify(error));
+      cancelToken.cancelled = true;
       callback(false, id);
     });
   }
@@ -186,7 +195,8 @@ export class SubWindowAdapter extends BaseAdapter {
                         id: string,
                         bounds: WindowBound,
                         subStorage: LocalStorage,
-                        callback: (ready: boolean, id: string) => void) {
+                        callback: (ready: boolean, id: string) => void,
+                        cancelToken: SubWindowCancelToken) {
     try {
       let windowClass = data;
       windowClass.keepKeyboardOnFocus(true);
@@ -194,7 +204,8 @@ export class SubWindowAdapter extends BaseAdapter {
         id: id,
         parentId: parentId,
         subWindow: windowClass,
-        localStorage: subStorage
+        localStorage: subStorage,
+        cancelToken: cancelToken
       });
 
       windowClass.on('windowSizeChange', (size) => {
@@ -217,10 +228,9 @@ export class SubWindowAdapter extends BaseAdapter {
           LogUtil.error(TAG, 'Failed to load the content. Cause:' + JSON.stringify(err));
           // Report the failure so the renderer does not wait forever, and
           // destroy the dead window instead of leaking it.
+          cancelToken.cancelled = true;
           callback(false, id);
-          windowClass.destroyWindow((destroyErr: BusinessError) => {
-            LogUtil.warn(TAG, 'destroy failed subWindow: ' + JSON.stringify(destroyErr));
-          });
+          this.discardFailedSubWindow(id, windowClass);
           return;
         }
         windowClass.setWindowFocusable(false)
@@ -241,16 +251,22 @@ export class SubWindowAdapter extends BaseAdapter {
       LogUtil.error(TAG,'Failed to create sub window. Cause: ' + JSON.stringify(exception));
       // A synchronous failure here happens before any async callback fired,
       // so the engine is still waiting - report the failure.
+      cancelToken.cancelled = true;
       callback(false, id);
     }
   }
 
   // Removes a half-initialized sub window from the live list and destroys it,
-  // so a failed popup does not leak a hidden, unusable window.
+  // so a failed popup does not leak a hidden, unusable window. Flips the
+  // cancel token first so a SurfaceReady poll that already started on this
+  // window's XComponent stops instead of later firing callback(true).
   private discardFailedSubWindow(id: string, windowClass: window.Window): void {
     for (let i = 0; i < this.subWindowList.length; i++) {
       const item = this.subWindowList[i];
       if (item && item.id === id) {
+        if (item.cancelToken) {
+          item.cancelToken.cancelled = true;
+        }
         this.subWindowList.splice(i, 1);
         break;
       }
@@ -302,6 +318,11 @@ export class SubWindowAdapter extends BaseAdapter {
       const item = this.subWindowList[i];
       if (item && item.id === id) {
         this.subWindowList.splice(i, 1);
+        // Stop a pending SurfaceReady poll: the window is going away, so it
+        // must never report readiness to the engine afterwards.
+        if (item.cancelToken) {
+          item.cancelToken.cancelled = true;
+        }
         // Destroy instead of caching for reuse: a kept window still carries
         // the previous session's XComponent/web surface, and reusing it
         // leaves the engine's fresh content invisible (popups stuck on a

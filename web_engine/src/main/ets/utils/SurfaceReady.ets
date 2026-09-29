@@ -49,12 +49,22 @@ export class SurfaceReady {
   // renders into a zero/default-size viewport - the window never fills the
   // screen on cold start. Poll the surface rect until it reports a real,
   // stable size, then run the start callback.
-  static whenReady(getRect: () => SurfaceRect, start: () => void): void {
+  //
+  // isCancelled: checked on every poll tick and before start(). The sub-
+  // window adapter flips the token when the window fails/destroys, so a
+  // still-running poll never fires start() for a dead window (which would
+  // contradict an earlier callback(false) and desync the engine's state).
+  static whenReady(getRect: () => SurfaceRect, start: () => void,
+    isCancelled?: () => boolean): void {
     let attempts: number = 0;
     let lastWidth: number = -1;
     let lastHeight: number = -1;
     let stablePolls: number = 0;
     const poll = () => {
+      if (isCancelled && isCancelled()) {
+        LogUtil.info(TAG, 'surface readiness poll cancelled, not starting');
+        return;
+      }
       let ready: boolean = false;
       let size: string = 'unknown';
       try {
@@ -74,6 +84,11 @@ export class SurfaceReady {
         }
       } catch (exception) {
         ready = false;
+        // A failed query breaks the consecutive-stability count; keep the
+        // old rect only as the next comparison baseline. Without the reset
+        // a size that re-appears after the error would be treated as
+        // already stable and start on a transitional viewport.
+        stablePolls = 0;
       }
       attempts++;
       if (!ready && attempts < SurfaceReady.MAX_ATTEMPTS) {
@@ -87,6 +102,10 @@ export class SurfaceReady {
         // Never block the browser indefinitely on a layout hiccup.
         LogUtil.warn(TAG, 'surface size unknown/unstable after ' + attempts +
           ' poll(s), starting anyway');
+      }
+      if (isCancelled && isCancelled()) {
+        LogUtil.info(TAG, 'surface readiness poll cancelled at start time');
+        return;
       }
       start();
     };

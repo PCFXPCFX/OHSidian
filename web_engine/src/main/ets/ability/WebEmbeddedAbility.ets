@@ -103,6 +103,11 @@ export class WebEmbeddedAbility extends WebBaseExtensionAbility {
   onSessionDestroy(session: UIExtensionContentSession) {
     LogUtil.info(TAG, `onSessionDestroy, id: ${this.xcomponentId}`);
     this.nativeContext.OnWindowEvent(this.xcomponentId, WebEmbeddedAbility.WINDOW_CLOSE);
+    // System-initiated teardown (e.g. the user swipes the session away in
+    // recents) does not go through closeWindow, so the proxy registration
+    // must be dropped here too - a stale entry blocks re-creating a session
+    // with the same id (addProxy dedup) and leaks the dead proxy.
+    this.abilityManager?.removeProxy(this.xcomponentId);
   }
 
   onForeground() {

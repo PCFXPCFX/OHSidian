@@ -755,10 +755,10 @@ export class WebAbility extends WebBaseAbility {
   onWindowStageCreate(windowStage: window.WindowStage) {
     super.onWindowStageCreate(windowStage);
 
-    if (this.checkSingleInstance()) {
-      LogUtil.warn(TAG, 'repeat launch from desktop, need terminate');
-      return;
-    }
+    // Repeat-launch protection lives in the specified launch mode: a second
+    // launch routes to the existing instance's onNewWant (keyed by
+    // onAcceptWant). The old checkSingleInstance compared an xcomponentId
+    // that onCreate always allocates first, so it could never fire - removed.
 
     this.abilityManager?.addProxy(this);
 
@@ -1116,6 +1116,18 @@ export class WebAbility extends WebBaseAbility {
   }
 
   onWindowStageDestroy() {
+    // Unregister the PC-mode settings observer regardless of how far setup
+    // got: it was registered on this ability's context in onWindowStage-
+    // Create and keeps a `this` closure alive. Without unregistering, every
+    // system setting change after destruction still ran
+    // updateWindowPcmodeSwitchStatus against a dead window (log flooding,
+    // memory leak, occasional NPE).
+    try {
+      settings.unregisterKeyObserver(this.context, 'window_pcmode_switch_status',
+        settings.domainName.USER_PROPERTY);
+    } catch (exception) {
+      LogUtil.warn(TAG, 'unregister pcmode observer failed: ' + JSON.stringify(exception));
+    }
     if (CheckEmptyUtils.isEmpty(this.xcomponentId)) {
       LogUtil.warn(TAG, 'onWindowStageDestroy component is not instantiated');
       return;
@@ -1152,15 +1164,6 @@ export class WebAbility extends WebBaseAbility {
 
   onPrepareToTerminate(): boolean {
     this.nativeContext.OnWindowEvent(this.xcomponentId, WebAbility.WINDOW_CLOSE);
-    return true;
-  }
-
-  private checkSingleInstance(): boolean {
-    if (!CheckEmptyUtils.isEmpty(this.xcomponentId)) {
-      return false;
-    }
-    this.openNewWindow(this.startUri);
-    this.closeWindow();
     return true;
   }
 

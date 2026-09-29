@@ -165,7 +165,24 @@ export class BluetoothLowEnergyAdapter extends BaseAdapter {
     try {
       device.disconnect();
       device.off('BLEConnectionStateChange');
+      device.off('BLECharacteristicChange');
       BluetoothLowEnergyAdapter.GATT_MAP.remove(deviceId);
+      // The notify listener is bound to THIS GattClientDevice object; on
+      // reconnect a fresh device object is created, so the per-device flag
+      // and this device's pending callbacks must be dropped too - otherwise
+      // subscribeToNotifications would skip registering on the new object
+      // and notifications would stay dead until app restart.
+      BluetoothLowEnergyAdapter.NOTIFY_LISTENING_DEVICES.remove(deviceId);
+      let staleIds: Array<string> = [];
+      let prefix: string = deviceId + '_';
+      BluetoothLowEnergyAdapter.CHARACTERISTIC_CHANGE_MAP.forEach((value, key) => {
+        if (key.startsWith(prefix)) {
+          staleIds.push(key);
+        }
+      });
+      staleIds.forEach((key) => {
+        BluetoothLowEnergyAdapter.CHARACTERISTIC_CHANGE_MAP.remove(key);
+      });
     } catch (err) {
       LogUtil.error(BluetoothLowEnergyAdapter.TAG, `createGattClientDevice failed, code is ${err.code}, message is ${err.message}`);
     }

@@ -119,11 +119,20 @@ export interface NativeContext {
   UpdateWindowPcmodeSwitchStatusCB: (value: boolean) => void;
 }
 
+// Mutable flag shared between the sub-window adapter and the page holding
+// the XComponent: the adapter flips it when the window fails/destroys, so a
+// running SurfaceReady poll can stop instead of reporting readiness for a
+// dead window.
+export interface SubWindowCancelToken {
+  cancelled: boolean,
+}
+
 export interface IParams {
   callback: (ready: boolean, id: string) => void,
   id: string,
   size: number[], // [width, height]
   initColorRgb: string,
+  cancelToken?: SubWindowCancelToken,
 }
 
 export interface OhosDragParamToJs {
@@ -290,6 +299,7 @@ export interface ISubWindowInfo {
   parentId: string,
   subWindow: window.Window,
   localStorage: LocalStorage,
+  cancelToken?: SubWindowCancelToken,
 }
 
 export interface SelectFileDialogParams {

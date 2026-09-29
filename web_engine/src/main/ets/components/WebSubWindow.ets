@@ -122,9 +122,14 @@ export struct WebSubWindow {
         // and reads the XComponent surface size once - if the first layout
         // pass has not run yet it latches 0x0 and the popup renders blank
         // (the exact race that broke the main window before SurfaceReady).
-        // Report readiness only once the surface has a real size.
+        // Report readiness only once the surface has a real size, and stop
+        // reporting entirely if the adapter fails/destroys this window
+        // (cancelToken flips - otherwise the engine would receive a
+        // contradicting callback(true) after its callback(false)).
         SurfaceReady.whenReady(() => this.xComponentController.getXComponentSurfaceRect(), () => {
           this.callback(true, this.xComponentId);
+        }, (): boolean => {
+          return this.params.cancelToken !== undefined && this.params.cancelToken.cancelled;
         });
       })
       .id(this.XCOMPONENT_NAME)

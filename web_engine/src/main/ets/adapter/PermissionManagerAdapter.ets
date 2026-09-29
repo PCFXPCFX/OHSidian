@@ -311,7 +311,11 @@ export class PermissionManagerAdapter extends BaseAdapter {
         break;
     }
     if (!confirmParams.title||!confirmParams.content) {
-      LogUtil.error(TAG, 'openPermissionConfirm, Failed to get title & content');
+      // Only pasteboard has a confirm dialog today. Every other type MUST
+      // still callback - the renderer blocks waiting for the result, and a
+      // silent return here hung the whole permission flow (camera, mic...).
+      LogUtil.error(TAG, 'openPermissionConfirm, no dialog for type ' + type);
+      callback(ERROR);
       return;
     }
     this.openPermissionConfirmDialog(activeContext, confirmParams, callback);

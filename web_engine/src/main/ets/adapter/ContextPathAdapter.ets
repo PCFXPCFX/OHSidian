@@ -36,7 +36,7 @@ import LogMethod from '../common/LogDecorator';
 import LogUtil from '../utils/LogUtil';
 import { ContextAdapter } from './ContextAdapter';
 
-import { picker } from '@kit.CoreFileKit';
+import environment from '@ohos.file.environment';
 import { BusinessError } from '@kit.BasicServicesKit';
 
 const TAG: string = 'ContextPath';
@@ -72,22 +72,18 @@ export class ContextPathAdapter extends BaseAdapter {
 
   @LogMethod
   getPrivacyDownloadDir(callback: (uri_path: string) => void): void {
-    let uri: string = '';
-    let context = this.ctxAdapter.getActiveContext();
-    if (context === undefined) {
+    // Legacy download-dir query. It used to pop a DocumentViewPicker save
+    // dialog on every call - the default-vault flow moved to
+    // environment.getUserDocumentDir() (round 8), so answer with the real
+    // user Download directory (granted by READ_WRITE_DOWNLOAD_DIRECTORY)
+    // without any UI.
+    try {
+      const downloadDir: string = environment.getUserDownloadDir();
+      callback(downloadDir || "");
+    } catch (err) {
+      const businessError = err as BusinessError;
+      LogUtil.error(TAG, `getUserDownloadDir failed, code is ${businessError?.code}, message is ${businessError?.message}`);
       callback("");
-      return;
     }
-    const documentViewPicker = new picker.DocumentViewPicker(context);
-    const documentSaveOptions = new picker.DocumentSaveOptions();
-    documentSaveOptions.pickerMode = picker.DocumentPickerMode.DOWNLOAD;
-    documentViewPicker.save(documentSaveOptions).then((documentSaveResult: Array<string>) => {
-      uri = documentSaveResult.length > 0 ? documentSaveResult[0] : '';
-      LogUtil.info (TAG, `Invoke documentViewPicker.save successfully, uri is ${uri}`);
-      callback(uri.length > 0 ? uri.replace("file://docs", "") : "");
-    }).catch((err: BusinessError) => {
-      LogUtil.error(TAG, `Invoke documentViewPicker.save failed, code is ${err.code}, message is ${err.message}`);
-      callback("");
-    })
   }
 }

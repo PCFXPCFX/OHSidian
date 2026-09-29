@@ -44,6 +44,10 @@ const TAG: string = 'Cursor';
 export class CursorAdapter extends BaseAdapter {
   private abilityManager: AbilityManager;
   private systemFloatingWindowManager : SystemFloatingWindowManager;
+  // Last custom-cursor pixelMap per window: a new cursor must release the
+  // previous one or every hover over a cursor-styled element leaks a
+  // pixel map for the whole session.
+  private cursorPixelMaps: Map<number, image.PixelMap> = new Map();
 
   constructor(
     @inject(AbilityManager) abilityManager: AbilityManager,
@@ -100,21 +104,31 @@ export class CursorAdapter extends BaseAdapter {
     image.createPixelMap(buff, opts)
       .then((cursorImage: image.PixelMap) => {
         let window = this.getWindow(id);
-        if (window) {
-          let windowId = window.getWindowProperties().id;
-          if (deviceInfo.sdkApiVersion >= 15) {
-            let cuisor: pointer.CustomCursor = {
-              pixelMap: cursorImage,
-              focusX: hotspotX,
-              focusY: hotspotY
-            }
-            pointer.setCustomCursor(windowId, cuisor, { followSystem: false })
-              .catch((error: BusinessError) => {
-                LogUtil.error(TAG, "Failed to set setCustomCursor. Cause: " + JSON.stringify(error));
-              });
-          } else {
-            pointer.setCustomCursorSync(windowId, cursorImage, hotspotX, hotspotY);
+        if (!window) {
+          // Nothing will consume the map - release it now instead of leaking.
+          cursorImage.release();
+          return;
+        }
+        let windowId = window.getWindowProperties().id;
+        let previous = this.cursorPixelMaps.get(windowId);
+        this.cursorPixelMaps.set(windowId, cursorImage);
+        if (previous && previous !== cursorImage) {
+          // The system switched this window to the new cursor; the old map
+          // is no longer referenced by us and the cursor already moved on.
+          previous.release();
+        }
+        if (deviceInfo.sdkApiVersion >= 15) {
+          let cuisor: pointer.CustomCursor = {
+            pixelMap: cursorImage,
+            focusX: hotspotX,
+            focusY: hotspotY
           }
+          pointer.setCustomCursor(windowId, cuisor, { followSystem: false })
+            .catch((error: BusinessError) => {
+              LogUtil.error(TAG, "Failed to set setCustomCursor. Cause: " + JSON.stringify(error));
+            });
+        } else {
+          pointer.setCustomCursorSync(windowId, cursorImage, hotspotX, hotspotY);
         }
       })
       .catch((error: BusinessError) => {

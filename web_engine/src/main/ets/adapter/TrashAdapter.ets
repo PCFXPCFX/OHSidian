@@ -38,7 +38,6 @@ import LogMethod from '../common/LogDecorator';
 
 const TAG: string = 'TrashAdapter';
 const DOCS_URI_PREFIX: string = 'file://docs';
-const PUBLIC_STORAGE_PREFIX: string = '/storage/Users/currentUser';
 
 @injectable()
 export class TrashAdapter extends BaseAdapter {
@@ -74,9 +73,12 @@ export class TrashAdapter extends BaseAdapter {
     let uris = new Array<string>();
     this.addCandidateUri(uris, pathOrUri);
     if (!pathOrUri.startsWith('file://')) {
-      if (pathOrUri.startsWith(PUBLIC_STORAGE_PREFIX)) {
-        this.addCandidateUri(uris, DOCS_URI_PREFIX + pathOrUri);
-      }
+      // The docs provider URIs files under the current user's storage as
+      // file://docs<path>; paths outside that subtree (USB drives, sandbox
+      // dirs) used to get no docs candidate at all and could never be
+      // trashed. A wrong candidate is harmless - deleteToTrash just rejects
+      // it and the loop tries the next one.
+      this.addCandidateUri(uris, DOCS_URI_PREFIX + pathOrUri);
       try {
         this.addCandidateUri(uris, fileUri.getUriFromPath(pathOrUri));
       } catch (err) {

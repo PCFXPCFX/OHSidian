@@ -118,7 +118,9 @@ export class FilePickerAdapter extends BaseAdapter {
     let allFileDescription = context.resourceManager.getStringSync(this.allFIleDescriptionId);
     if (params.extensions.length > 0) {
       let filterDescriptions: Array<string> = this.getFilterArray(params.extensions, params.descriptions);
-      DocumentSaveOptions.fileSuffixChoices = [filterDescriptions[0]];
+      // Keep every suffix group: taking only [0] hid all but the first
+      // choice, so "save as txt/json" was impossible when md came first.
+      DocumentSaveOptions.fileSuffixChoices = filterDescriptions;
       if (params.include_all_files) {
         DocumentSaveOptions.fileSuffixChoices.push(allFileDescription + "|.*");
       }
@@ -145,10 +147,27 @@ export class FilePickerAdapter extends BaseAdapter {
         let copyFile: fs.File | undefined;
         try {
           let filePath = this.ctxAdapter.getContext().tempDir;
+          // Media selections can collide on file name (IMG_001.jpg from two
+          // different albums) - a plain tempDir/name copy would overwrite
+          // the first file and hand the engine the same bytes twice.
+          let targetName: string = uri.name;
+          let stem: string = targetName;
+          let ext: string = '';
+          let dot = targetName.lastIndexOf('.');
+          if (dot > 0) {
+            stem = targetName.slice(0, dot);
+            ext = targetName.slice(dot);
+          }
+          let copyPath: string = filePath + '/' + targetName;
+          let counter = 1;
+          while (fs.accessSync(copyPath)) {
+            copyPath = filePath + '/' + stem + '-' + counter + ext;
+            counter++;
+          }
           file = fs.openSync(path, fs.OpenMode.READ_ONLY);
-          copyFile = fs.openSync(filePath + '/' + uri.name, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
+          copyFile = fs.openSync(copyPath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
           fs.copyFileSync(file.fd, copyFile.fd);
-          copy.push(filePath + '/' + uri.name);
+          copy.push(copyPath);
         } catch (err) {
           LogUtil.error(TAG, `copy failed: ${JSON.stringify(err)}`);
         } finally {

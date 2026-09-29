@@ -68,7 +68,16 @@ export class PopupWindowAdapter extends BaseWindowAdapter {
   @LogMethod
   createWindow(param: NewWindowParam) {
     let proxy = this.abilityManager.getProxy(param.parent_id);
-    proxy?.createSubWindow(param.window_id)
+    if (!proxy) {
+      // The optional-chained call below would short-circuit into a silent
+      // no-op; make the missing parent visible instead.
+      LogUtil.error(TAG, 'Failed to resolve the parent proxy: ' + param.parent_id);
+      return;
+    }
+    // Capture the owning ability's context now: the popup proxy answers
+    // getWindowContext() with it for the lifetime of the window.
+    this.windowContext = proxy.getWindowContext();
+    proxy.createSubWindow(param.window_id)
       .then((data: window.Window) => {
         this.adjustWindow(data, param, WindowType.SUB_WINDOW);
       }).catch((err: BusinessError) => {
@@ -133,6 +142,11 @@ export class PopupWindowAdapter extends BaseWindowAdapter {
         LogUtil.error(TAG, 'Failed to destroy the window. Cause: ' + JSON.stringify(err));
         return;
       }
+      // Drop the proxy registration: the singleton adapter registered itself
+      // under this id, and a stale entry both blocks re-registration of a
+      // new popup with the same id (addProxy dedup) and routes show/hide/
+      // setBounds calls to the destroyed window.
+      this.abilityManager.removeProxy(id);
       LogUtil.info(TAG, 'Succeeded in destroying the window.');
     });
   }
@@ -199,11 +213,15 @@ export class PopupWindowAdapter extends BaseWindowAdapter {
     let xComTop: number = mainWindowProp?.drawableRect.top || 0;
 
     try {
+      // Frame borders are symmetric (see AppWindowAdapter.setBounds): width
+      // grows by 2x the left border, height by 2x the TOP border. Mixing
+      // xComBorder into the height mis-sized framed windows whenever the
+      // frame height differed from the frame width.
       let windowLimits: window.WindowLimits = {
         minWidth: minWidth === 0 ? minWidth : minWidth + xComBorder + xComBorder,
-        minHeight: minHeight === 0 ? minHeight : minHeight + xComTop + xComBorder,
+        minHeight: minHeight === 0 ? minHeight : minHeight + xComTop + xComTop,
         maxWidth: maxWidth === 0 ? maxWidth : maxWidth + xComBorder + xComBorder,
-        maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComBorder,
+        maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComTop,
       };
 
       windowClass?.setWindowLimits(windowLimits)

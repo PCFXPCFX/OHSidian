@@ -59,6 +59,9 @@ export class AppWindowAdapter extends BaseAdapter {
   private ctxAdapter: ContextAdapter;
   private defaultBackgroundColor: string = '#00000000';
   private loginWindow: window.Window | null = null;
+  // Set synchronously on show=true, cleared when the create callback settles
+  // - closes the window between "show requested" and "window assigned".
+  private loginWindowCreating: boolean = false;
 
   constructor(
     @inject(AbilityManager) abilityManager: AbilityManager,
@@ -519,11 +522,13 @@ export class AppWindowAdapter extends BaseAdapter {
     let xComTop: number = windowProp?.drawableRect.top || 0;
 
     try {
+      // Symmetric borders (see setBounds): width grows by 2x the left
+      // border, height by 2x the TOP border.
       let windowLimits: window.WindowLimits = {
         minWidth: minWidth === 0 ? minWidth : minWidth + xComBorder + xComBorder,
-        minHeight: minHeight === 0 ? minHeight : minHeight + xComTop + xComBorder,
+        minHeight: minHeight === 0 ? minHeight : minHeight + xComTop + xComTop,
         maxWidth: maxWidth === 0 ? maxWidth : maxWidth + xComBorder + xComBorder,
-        maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComBorder,
+        maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComTop,
       };
 
       windowClass.setWindowLimits(windowLimits)
@@ -823,28 +828,40 @@ export class AppWindowAdapter extends BaseAdapter {
       anonymousPhone: ''
     };
 
-    if (!show && this.loginWindow) {
-      this.loginWindow.destroyWindow((err: BusinessError) => {
-        let errCode: number = err.code;
-        if (errCode) {
-          LogUtil.error(TAG, 'Failed to destroy the window. Cause: ' + JSON.stringify(err));
-          return;
-        }
-        LogUtil.info(TAG, 'Succeeded in destroying the window.');
-
+    if (!show) {
+      if (this.loginWindow) {
+        // Release the reference BEFORE the async destroy: if destroy fails,
+        // keeping it would make every later show=true fail fast forever
+        // (login permanently broken until restart). Recover instead - the
+        // stale window object is dropped and a fresh one can be created.
+        const staleWindow = this.loginWindow;
         this.loginWindow = null;
-      });
+        staleWindow.destroyWindow((err: BusinessError) => {
+          let errCode: number = err.code;
+          if (errCode) {
+            LogUtil.error(TAG, 'Failed to destroy the login window. Cause: ' + JSON.stringify(err));
+            return;
+          }
+          LogUtil.info(TAG, 'Succeeded in destroying the login window.');
+        });
+      }
+      this.loginWindowCreating = false;
       return;
-    };
+    }
 
-    if (this.loginWindow) {
+    // The window reference is only assigned inside the async createWindow
+    // callback, so a second show=true arriving before that must fail fast
+    // here too - otherwise two windows get created and one leaks.
+    if (this.loginWindow || this.loginWindowCreating) {
       callback(loginFailInfo);
       return;
     }
+    this.loginWindowCreating = true;
 
     let activeContext = this.ctxAdapter.getActiveContext() as common.UIAbilityContext;
     if (!activeContext) {
       LogUtil.error(TAG, 'Failed to get active context');
+      this.loginWindowCreating = false;
       return;
     }
     let config: window.Configuration = {
@@ -855,12 +872,12 @@ export class AppWindowAdapter extends BaseAdapter {
     window.createWindow(config, (err: BusinessError, data) => {
       if (err.code) {
         LogUtil.error(TAG, 'Failed to create window. Cause: ' + JSON.stringify(err));
+        this.loginWindowCreating = false;
         return;
       }
       let windowClass: window.Window = data;
-      if (!this.loginWindow) {
-        this.loginWindow = windowClass;
-      }
+      this.loginWindow = windowClass;
+      this.loginWindowCreating = false;
       windowClass.moveWindowTo(bounds.left, bounds.top, (err: BusinessError) => {
         let errCode: number = err.code;
         if (errCode) {

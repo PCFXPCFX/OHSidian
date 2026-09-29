@@ -70,9 +70,19 @@ export class AppLifecycleAdapter extends BaseAdapter {
 
   destroy() {
     let proxy_list = this.abilityManager.getProxyList();
+    // Sub-window/floating-window proxies share their parent ability's
+    // context, and a single ability can own several windows - terminating
+    // the same context N+1 times only works once and then rejects with
+    // "already terminating". Terminate each DISTINCT context once; killing
+    // the owning ability also tears down its child windows.
+    let terminated: Set<Object> = new Set();
     for (let i = 0; i < proxy_list.length; i++) {
       let context = proxy_list[i].getWindowContext() as common.UIAbilityContext;
-      context?.terminateSelf()?.catch((err: BusinessError) => {
+      if (!context || terminated.has(context)) {
+        continue;
+      }
+      terminated.add(context);
+      context.terminateSelf()?.catch((err: BusinessError) => {
         LogUtil.error('AppLifecycleAdapter', 'terminateSelf failed: ' + JSON.stringify(err));
       });
     }

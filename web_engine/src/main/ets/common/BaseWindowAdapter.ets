@@ -39,6 +39,12 @@ import { WebProxy } from '../interface/WebProxy';
 export class BaseWindowAdapter extends BaseAdapter implements WebProxy {
   protected ctxAdapter: ContextAdapter;
   protected windowClass: window.Window | undefined = undefined;
+  // Context of the UIAbility that owns this window, captured at creation.
+  // getWindowContext() must NOT delegate to ContextAdapter.getActiveContext():
+  // getActiveContext() looks the active proxy up and calls its
+  // getWindowContext(), so when this adapter itself is the active window the
+  // two calls recurse until the stack overflows.
+  protected windowContext: common.Context | undefined = undefined;
   protected xcomponentId: string = '';
   protected originWindowId: number = -1;
 
@@ -65,7 +71,7 @@ export class BaseWindowAdapter extends BaseAdapter implements WebProxy {
   }
 
   getWindowContext(): common.Context | undefined {
-    return this.ctxAdapter.getActiveContext();
+    return this.windowContext;
   }
 
   getWindowId(): string {
