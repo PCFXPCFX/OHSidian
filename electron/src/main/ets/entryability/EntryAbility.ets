@@ -31,10 +31,12 @@ import window from '@ohos.window';
 import Want from '@ohos.app.ability.Want';
 import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import { Configuration } from '@ohos.app.ability.Configuration';
-import { initialize } from '@hw-agconnect/hmcore';
-import { util } from '@kit.ArkTS';
 
 import { WebAbility } from 'web_engine';
+
+// Huawei-cloud entry points were removed in this fork (attack surface +
+// dead weight): no AGC initialization, no cloud sync, no quick login.
+// See docs/CHANGES-2026-09.md round 65.
 
 export default class EntryAbility extends WebAbility {
   onConfigurationUpdate(config: Configuration) {
@@ -43,19 +45,6 @@ export default class EntryAbility extends WebAbility {
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam) {
     super.onCreate(want, launchParam);
-    // 初始化华为 AGC 云服务
-    this.initAgc();
-  }
-
-  private async initAgc(): Promise<void> {
-    try {
-      const input = await this.context.resourceManager.getRawFileContent('agconnect-services.json');
-      const jsonString = new util.TextDecoder().decodeWithStream(input, undefined);
-      initialize(this.context, JSON.parse(jsonString));
-      console.info('AGC initialized successfully');
-    } catch (err) {
-      console.error('AGC init failed: ' + JSON.stringify(err));
-    }
   }
 
   onDestroy() {

@@ -2120,3 +2120,35 @@ versionCode。改为把两个值作为展开后的命令行参数(argv)传入 no
 
 **使用**:发版只需 `git tag v1.2.x && git push origin v1.2.x`,不再
 需要手动改 app.json5(它只在无 tag 的手动构建时作为回退)。
+
+### 第 65 轮(2026-09-27):本 Fork 完全移除华为云支持(攻击面收敛)
+
+**动机**:华为云/AGC 相关代码攻击面过大(网络凭据、AGC 配置文件、云
+存储桶访问),且该功能在本内核从未真正可用——登录触发 IPC 的写入端
+在 1.13.7 内核 asar 中不存在,云同步链路本来就是死路(第 38 轮实证),
+留着只有风险没有收益。
+
+**移除的活代码**:
+- `EntryAbility.initAgc()` 与 `@hw-agconnect/hmcore` 初始化(启动时读
+  rawfile/agconnect-services.json 并调 initialize 的唯一入口);
+- `electron/oh-package.json5` 的 `@hw-agconnect/hmcore` 依赖
+  (lockfile 由 CI 的 ohpm install 自动再生成);
+- `WebAbility.onCreate` 的 `CloudSyncAdapter.initCloudSync` 启动链路与
+  onForeground/onBackground 的云同步通知(前台/后台只剩 RunningLock
+  守卫);
+- `rawfile/agconnect-services.example.json` 示例配置文件。
+
+**保留的死代码(不接线,供参考)**:`CloudSyncAdapter.ets`(依赖
+CloudFoundationKit 但从未被构造)、`CloudSyncAdapterBind.ets`、
+`Login.ets`/`QuickLoginButtonComponent`、`AppWindowAdapter.
+showHuaweiQuickLogin`(引擎侧无调用点,libadapter 探针确认)。
+删除它们会牵动 JsBindingMethod/模块页注册,收益低,维持惰性。
+
+**文档**:README/README_EN 简介去掉"华为账号一键登录/云同步"卖点,
+新增"华为云支持已移除"专节(动机+升级说明:数据不受影响,同步需求
+建议用 Remotely Save 等插件走自有存储);依赖表/目录树/页面表/AGC
+配置章节同步更新;DEV-ENV-SETUP 第 2.2 节改为"无需配置"。
+
+**验证要点**:构建通过(无 hmcore 依赖);启动日志无 AGC init 字样;
+onForeground/onBackground 仅 RunningLock 生效;原上游用户升级后仓库
+与设置不受影响。

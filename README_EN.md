@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Run the Obsidian note-taking experience you know and love on HarmonyOS tablets and 2-in-1 PCs — with multi-window support, one-tap Huawei Account sign-in, Huawei Cloud sync, and comprehensive native system integration.<br>Tablets and 2-in-1 PCs only; phones are not supported.
+  Run the Obsidian note-taking experience you know and love on HarmonyOS tablets and 2-in-1 PCs — with multi-window support and comprehensive native system integration. This fork has removed all Huawei Cloud features (see below).<br>Tablets and 2-in-1 PCs only; phones are not supported.
 </p>
 
 <p align="center">
@@ -28,7 +28,7 @@
 - [Features](#features)
 - [Module Structure](#module-structure)
 - [Adapter Layer](#adapter-layer)
-- [Huawei Cloud Sync](#huawei-cloud-sync)
+- [Huawei Cloud Support (Removed)](#huawei-cloud-support-removed)
 - [Build & Run](#build--run)
 - [Project Structure](#project-structure)
 - [Dependencies](#dependencies)
@@ -41,7 +41,7 @@
 
 **OHsidian** is an unofficial port of the Obsidian note-taking application for the HarmonyOS (HongMeng) platform. Rather than reimplementing Obsidian from scratch, it wraps the original Obsidian (`obsidian.asar`) inside a complete Electron compatibility layer running atop the HarmonyOS native runtime.
 
-At its core, OHsidian **shims the Electron API surface using HarmonyOS native capabilities**. A C++ native library (`libadapter.so`), an ArkTS adapter layer, and a JSBind bridge work together to make Obsidian's Node.js/Electron runtime operate seamlessly on HarmonyOS. Meanwhile, deep integration with the Huawei ecosystem — Account Kit, Cloud Foundation Kit, Status Bar extensions — makes the experience feel truly native.
+At its core, OHsidian **shims the Electron API surface using HarmonyOS native capabilities**. A C++ native library (`libadapter.so`), an ArkTS adapter layer, and a JSBind bridge work together to make Obsidian's Node.js/Electron runtime operate seamlessly on HarmonyOS. Status Bar extensions remain integrated; Huawei Cloud features were removed in this fork (see [below](#huawei-cloud-support-removed)).
 
 | Project Info | |
 |-------------|------|
@@ -89,7 +89,7 @@ At its core, OHsidian **shims the Electron API surface using HarmonyOS native ca
 - **JSBind Bridge** — Connects the JS runtime to the ArkTS native layer, forwarding Electron API calls to the appropriate adapters
 - **C++ Native Library** — `libadapter.so` provides core system-level API bindings
 - **ArkTS Adapter Layer** — ~50 adapters wrapping HarmonyOS APIs as Electron-compatible interfaces
-- **HarmonyOS Foundation** — System-native capabilities: Ability components, ArkUI, Huawei Account, Cloud Storage, etc.
+- **HarmonyOS Foundation** — System-native capabilities: Ability components, ArkUI, etc. (Huawei Account / Cloud Storage removed in this fork)
 
 ---
 
@@ -170,7 +170,7 @@ The executable application module containing all UI pages and application logic.
 
 | Ability | Page | Purpose |
 |---------|------|---------|
-| `EntryAbility` | Index.ets | Main entry point, initializes AGC |
+| `EntryAbility` | Index.ets | Main entry point (AGC initialization removed in this fork) |
 | `BrowserAbility` | WindowNode.ets | Browser process window |
 | `StatelessAbility` | Index.ets | Stateless windows |
 | `BrowserEmbeddedAbility` | EmbeddedWindow.ets | Embedded UI |
@@ -184,7 +184,7 @@ The executable application module containing all UI pages and application logic.
 | `WindowNode.ets` | Browser window node |
 | `SubWindow.ets` | Sub-window (popups, settings, etc.) |
 | `EmbeddedWindow.ets` | Embedded window |
-| `Login.ets` | Huawei Account sign-in page |
+| `Login.ets` | Huawei Account sign-in page (disabled, no entry point) |
 | `StatusBarPage.ets` | Status bar page |
 | `WebPage.ets` | WebView page for privacy agreements, etc. |
 
@@ -208,7 +208,7 @@ web_engine/src/main/ets/adapter/
 ├── BluetoothLowEnergy.ets      # Bluetooth Low Energy
 ├── BrowserPolicy.ets           # Browser security policies
 ├── CertManager.ets             # Certificate management
-├── CloudSync.ets               # Huawei Cloud Sync ⭐
+├── CloudSync.ets               # Huawei Cloud Sync (unwired in this fork)
 ├── Context.ets                 # Application context
 ├── ContextPath.ets             # File path resolution
 ├── Cursor.ets                  # Custom cursors
@@ -266,55 +266,11 @@ All bindings are activated at startup through `JsBindingMethod.ets`.
 
 ---
 
-## Huawei Cloud Sync
+## Huawei Cloud Support (Removed)
 
-OHsidian implements Vault cloud synchronization based on Huawei Cloud Foundation Kit.
+This fork has **completely removed Huawei Cloud support** — cloud sync (Cloud Foundation Kit), one-tap Huawei Account sign-in (AGC Account Kit), and AGC initialization. Rationale: the cloud surfaces widen the attack surface (network credentials, AGC config, cloud storage bucket) while the feature itself never left the experimental stage in this kernel (the login-trigger IPC writer does not exist in the 1.13.7 asar, so sync could never fire). The related adapter files (CloudSyncAdapter, Login page) remain as inert, unwired code for reference.
 
-### Sync Architecture
-
-```
-┌──────────────┐     ┌──────────────────┐     ┌─────────────────────┐
-│   Obsidian   │────▶│  CloudSyncAdapter │────▶│ CloudFoundation Kit  │
-│   triggers    │     │  (ArkTS Adapter)  │     │  (Huawei Cloud)      │
-│   writes     │     │                  │     │                     │
-└──────────────┘     └──────────────────┘     └─────────────────────┘
-                                                    │
-                                              ┌─────▼──────────┐
-                                              │  Bucket:        │
-                                              │  ohsidian-vault │
-                                              │  -sync-75ued    │
-                                              └────────────────┘
-```
-
-### Storage Structure
-
-```
-{userId}/
-  └── vaults/
-      └── {vaultName}/
-          ├── file1.md
-          ├── attachments/
-          │   └── image.png
-          └── ...
-```
-
-### Sync Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `uploadFile` | Upload local file to cloud |
-| `downloadFile` | Download file from cloud |
-| `listCloudFiles` | List files in cloud |
-| `deleteCloudFile` | Delete cloud file |
-| `getSyncStatus` | Get sync status |
-
-### Sign-In Flow
-
-1. Obsidian writes a `.hcs-login-pending` marker file
-2. The HarmonyOS side detects it via a 3-second polling interval
-3. An `hcs-login` dialog appears with a one-tap Huawei Account sign-in button
-4. After user authorization, `userId` is persisted to `hcs-user.json` for Obsidian to read
-5. All subsequent sync operations build cloud paths based on this `userId`
+**Upgrading from upstream OHSidian:** existing vaults and settings are untouched; only cloud-related paths are gone. Use any Obsidian sync plugin (e.g. Remotely Save) over your own storage if you need sync.
 
 ---
 
@@ -378,12 +334,7 @@ Configure signing in `build-profile.json5`:
 
 ### Huawei AGC Setup
 
-> **Note:** `agconnect-services.json` is `.gitignore`-d. Copy `agconnect-services.example.json` and fill in your own credentials.
-
-1. Create an app on [AppGallery Connect](https://developer.huawei.com/consumer/en/service/josp/agc/)
-2. Download `agconnect-services.json`
-3. Place it at `electron/src/main/resources/rawfile/agconnect-services.json`
-4. Enable Account Kit and Cloud Storage services
+**Not needed anymore.** This fork removed AGC / Huawei Cloud initialization entirely — no `agconnect-services.json` is required to build or run.
 
 ---
 
@@ -421,7 +372,7 @@ obsidian/
 │           └── obsidian.asar          # Obsidian application archive
 │
 ├── electron/                         # HAP entry module
-│   ├── oh-package.json5              # Deps: web_engine, AGC hmcore
+│   ├── oh-package.json5              # Deps: web_engine (AGC hmcore removed)
 │   ├── hvigorfile.ts                 # hapTasks build
 │   └── src/main/
 │       ├── module.json5              # Module manifest (Abilities, pages, permissions)
@@ -434,7 +385,7 @@ obsidian/
 │       ├── resources/
 │       │   ├── base/element/         # String resources
 │       │   ├── base/profile/         # main_pages routing config
-│       │   ├── rawfile/              # agconnect-services.json
+│       │   ├── rawfile/              # (AGC config removed with cloud features)
 │       │   └── zh_CN|en_US/element/  # i18n strings
 │       └── ohosTest/                 # Unit tests
 │
@@ -456,7 +407,7 @@ obsidian/
 | `inversify` | ^6.0.1 | IoC container for adapter dependency injection |
 | `reflect-metadata` | ^0.1.13 | TypeScript decorator metadata |
 | `@electron/remote` | ^2.1.3 | Electron remote module compatibility |
-| `@hw-agconnect/hmcore` | ^1.0.1 | Huawei AGC core services |
+
 | `libadapter.so` | — | C++ native adapter library (local reference) |
 | `btime` | — | File timestamp utilities |
 | `get-fonts` | — | System font enumeration |

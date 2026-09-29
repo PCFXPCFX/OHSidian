@@ -40,14 +40,11 @@ DevEco Studio 是华为官方 IDE(基于 IntelliJ 平台,和 Android Studio 类�
 > 本地调试签名不校验包名归属,**可以直接构建安装**;
 > 只有要发布到应用市场 / 使用华为 AGC 服务时才需要改成你自己注册的包名。
 
-### 2.2 agconnect-services.json(华为账号登录 / 云同步配置,可选)
+### 2.2 华为云 / AGC 配置(本 Fork 已移除,无需配置)
 
-- 仓库里只有 `electron/src/main/resources/rawfile/agconnect-services.example.json`。
-- 不放这个文件**应用可以正常构建运行**,只是"华为账号一键登录"和"华为云同步"功能
-  会在启动日志里报初始化失败(代码里做了容错)。
-- 想启用这两个功能:去 https://developer.huawei.com/consumer/cn/service/josp/agc/
-  创建应用(包名要和你 app.json5 里的 bundleName 一致),开通 Account Kit 和
-  Cloud Foundation Kit,下载 agconnect-services.json 放到上述 rawfile 目录。
+本 Fork 已完全移除华为云相关功能(云同步 / 华为账号一键登录 / AGC 初始化),
+**不需要** agconnect-services.json,构建与运行均无涉及。原上游的
+配置说明已随功能移除。
 
 ## 第 3 步:构建
 

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  在 HarmonyOS 平板 / 2in1 电脑上运行你熟悉的 Obsidian 笔记体验 —— 支持多窗口、华为账号一键登录以及完整的系统级原生适配。<br>仅支持平板与 2in1 电脑，暂不支持手机。
+  在 HarmonyOS 平板 / 2in1 电脑上运行你熟悉的 Obsidian 笔记体验 —— 支持多窗口与完整的系统级原生适配。本 Fork 已完全移除华为云相关功能（云同步 / 华为账号登录 / AGC），详情见下文。<br>仅支持平板与 2in1 电脑，暂不支持手机。
 </p>
 
 <p align="center">
@@ -136,7 +136,7 @@
 - **JSBind 桥接层** —— 连接 JS 运行时与 ArkTS 原生层，将 Electron API 调用转发到对应适配器
 - **C++ 原生库** —— `libadapter.so` 提供核心系统级 API 对接
 - **ArkTS 适配层** —— 约 50 个适配器，将 HarmonyOS API 包装为 Electron 兼容接口
-- **HarmonyOS 底层** —— 系统原生能力：Ability 组件、ArkUI 界面、华为账号、云存储等
+- **HarmonyOS 底层** —— 系统原生能力：Ability 组件、ArkUI 界面等（华为账号 / 云存储已在本 Fork 移除）
 
 ---
 
@@ -159,7 +159,7 @@
 
 ### 华为生态集成
 
-- **华为账号一键登录** —— 通过 Account Kit 的 `LoginWithHuaweiIDButton` 实现无感认证
+- **华为云功能已移除** —— 本 Fork 出于攻击面与稳定性考虑，移除了云同步（Cloud Foundation Kit）、华为账号一键登录（AGC Account Kit）及 AGC 初始化；相关适配器文件保留为惰性代码，不再接线。状态栏扩展保留。
 - **状态栏扩展** —— 通过 `StatusBarViewExtensionAbility` 常驻系统状态栏
 
 ### 系统级原生适配
@@ -217,7 +217,7 @@ AdapterModule → ContextAdapter, DragDropAdapter, MultiInputAdapter,
 
 | Ability | 页面 | 用途 |
 |---------|------|------|
-| `EntryAbility` | Index.ets | 主入口，初始化 AGC |
+| `EntryAbility` | Index.ets | 主入口（本 Fork 已移除华为云/AGC 初始化） |
 | `BrowserAbility` | WindowNode.ets | 浏览器进程窗口 |
 | `StatelessAbility` | Index.ets | 无状态窗口 |
 | `BrowserEmbeddedAbility` | EmbeddedWindow.ets | 嵌入 UI |
@@ -231,7 +231,7 @@ AdapterModule → ContextAdapter, DragDropAdapter, MultiInputAdapter,
 | `WindowNode.ets` | 浏览器窗口节点 |
 | `SubWindow.ets` | 子窗口（弹窗、设置等） |
 | `EmbeddedWindow.ets` | 嵌入式窗口 |
-| `Login.ets` | 华为账号登录页 |
+| `Login.ets` | 华为账号登录页（本 Fork 已停用，无入口） |
 | `StatusBarPage.ets` | 状态栏页面 |
 | `WebPage.ets` | 隐私协议等 WebView 页面 |
 
@@ -255,7 +255,7 @@ web_engine/src/main/ets/adapter/
 ├── BluetoothLowEnergy.ets      # 低功耗蓝牙
 ├── BrowserPolicy.ets           # 浏览器安全策略
 ├── CertManager.ets             # 证书管理
-├── CloudSync.ets               # 华为云同步 ⭐
+├── CloudSync.ets               # 华为云同步（本 Fork 已停用，未接线）
 ├── Context.ets                 # 应用上下文
 ├── ContextPath.ets             # 文件路径解析
 ├── Cursor.ets                  # 自定义光标
@@ -405,7 +405,7 @@ obsidian/
 │           └── obsidian.asar          # Obsidian 应用包
 │
 ├── electron/                         # HAP 入口模块
-│   ├── oh-package.json5              # 依赖：web_engine、AGC hmcore
+│   ├── oh-package.json5              # 依赖：web_engine（AGC hmcore 已移除）
 │   ├── hvigorfile.ts                 # hapTasks 构建
 │   └── src/main/
 │       ├── module.json5              # 模块清单（Ability、页面、权限）
@@ -418,7 +418,7 @@ obsidian/
 │       ├── resources/
 │       │   ├── base/element/         # 字符串资源
 │       │   ├── base/profile/         # main_pages 路由配置
-│       │   ├── rawfile/              # agconnect-services.json
+│       │   ├── rawfile/              # （AGC 配置已随云功能移除）
 │       │   └── zh_CN|en_US/element/  # 国际化字符串
 │       └── ohosTest/                 # 单元测试
 │
@@ -440,7 +440,7 @@ obsidian/
 | `inversify` | ^6.0.1 | IoC 容器，管理适配器依赖注入 |
 | `reflect-metadata` | ^0.1.13 | TypeScript 装饰器元数据 |
 | `@electron/remote` | ^2.1.3 | Electron remote 模块兼容 |
-| `@hw-agconnect/hmcore` | ^1.0.1 | 华为 AGC 核心服务 |
+
 | `libadapter.so` | — | C++ 原生适配库（本地引用） |
 | `btime` | — | 文件时间处理 |
 | `get-fonts` | — | 系统字体枚举 |

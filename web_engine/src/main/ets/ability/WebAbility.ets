@@ -45,7 +45,6 @@ import CheckEmptyUtils from '../utils/CheckEmptyUtils';
 import { WebBaseAbility } from './WebBaseAbility';
 import { WindowStyle, IStyleData, IUpdateStyle } from '../common/WindowStyle';
 import { CommandType, ConfigData } from '../common/Constants';
-import { CloudSyncAdapter } from '../adapter/CloudSyncAdapter';
 import { PermissionManagerAdapter } from '../adapter/PermissionManagerAdapter';
 import { RunningLockAdapter } from '../adapter/RunningLockAdapter';
 import { ConfigurationConstant } from '@kit.AbilityKit';
@@ -594,38 +593,18 @@ export class WebAbility extends WebBaseAbility {
 
     Inject.get(PermissionManagerAdapter).initPermissions();
 
-    // Initialize cloud sync. The login-trigger poll is NOT started here:
-    // its trigger file (.hcs-login-pending) was written by the hcs-login IPC
-    // handler the upstream fork injected into the 1.12.7 asar main.js, which
-    // no longer exists in the stock 1.13.7 kernel (no writer greps in the
-    // asar), so the poll could never fire. Restart it via
-    // startLoginTriggerPolling once a login trigger writer is (re)introduced;
-    // the foreground gating in the adapter is already in place.
-    try {
-      const cloudSync = Inject.getOrCreate(CloudSyncAdapter);
-      cloudSync.initCloudSync(this.context, (ret: boolean) => {
-        LogUtil.info(TAG, 'CloudSync init: ' + (ret ? 'success' : 'failed'));
-      });
-    } catch (e) {
-      LogUtil.warn(TAG, 'CloudSync not available: ' + e);
-    }
+    // Huawei cloud sync was REMOVED in this fork (attack surface, dead
+    // upstream feature - see docs/CHANGES-2026-09.md round 65). The
+    // CloudSyncAdapter/Bind files stay as inert code for reference; they
+    // are no longer constructed, injected, or notified from here.
   }
 
   // Foreground/background hooks shared by every window ability (Entry,
   // Browser, Stateless all extend WebAbility). They gate the battery-sensitive
   // pieces on actual app visibility:
-  //  - CloudSync login-trigger poll: DORMANT (no trigger-file writer exists
-  //    in the 1.13.7 kernel, see onCreate); the notify calls are no-op
-  //    counter updates until the poll is re-enabled, and then the poll will
-  //    automatically run only while the app is visible.
   //  - RunningLock guard: a leaked engine keep-screen-on request must not
   //    hold the screen awake after the last window is backgrounded.
   onForeground(): void {
-    try {
-      Inject.getOrCreate(CloudSyncAdapter).notifyAppForeground();
-    } catch (e) {
-      LogUtil.warn(TAG, 'onForeground cloudSync notify failed: ' + e);
-    }
     try {
       Inject.getOrCreate(RunningLockAdapter).notifyAppForeground();
     } catch (e) {
@@ -634,11 +613,6 @@ export class WebAbility extends WebBaseAbility {
   }
 
   onBackground(): void {
-    try {
-      Inject.getOrCreate(CloudSyncAdapter).notifyAppBackground();
-    } catch (e) {
-      LogUtil.warn(TAG, 'onBackground cloudSync notify failed: ' + e);
-    }
     try {
       Inject.getOrCreate(RunningLockAdapter).notifyAppBackground();
     } catch (e) {
