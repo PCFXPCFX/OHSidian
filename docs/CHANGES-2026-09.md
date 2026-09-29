@@ -2152,3 +2152,46 @@ showHuaweiQuickLogin`(引擎侧无调用点,libadapter 探针确认)。
 **验证要点**:构建通过(无 hmcore 依赖);启动日志无 AGC init 字样;
 onForeground/onBackground 仅 RunningLock 生效;原上游用户升级后仓库
 与设置不受影响。
+
+### 第 66 轮(2026-09-27):系统字体样式跟随(字体样式真正生效,补上第 60 轮缺的一半)
+
+**审计结论(先答"为什么之前没效果")**:第 49/60 轮只做了两件事——静态
+注入 `--font-default: "HarmonyOS Sans", ...` 和字号缩放(fontSizeScale)。
+而"系统字体样式"(fontId)是另一个配置维度:`onConfigurationUpdate` 我们
+只消费 fontSizeScale,fontId 变化被无视;渲染层 `--font-default` 是写死
+的静态栈,没有任何"系统样式变化 → 更新 CSS"的路径。引擎 Skia 层
+(SkFontMgr_OHOS)理论上可能把默认家族重映射到样式字体,但实测(用户)
+未生效,被动路径不可靠。
+
+**新依据(本地 SDK 24 d.ts 逐条核实)**:
+- `ApplicationContext.onSystemConfigurationUpdated(callback)`(API 24,
+  本机满足):专用系统配置监听,回调含 **onFontIdUpdated**(字体样式变化
+  专用)、onFontSizeScaleUpdated、onFontWeightScaleUpdated——比
+  onConfigurationUpdate 可靠且保证样式事件;
+- `@ohos.graphics.text.getSystemFontFullNamesByType(SystemFontType.
+  STYLISH)`(API 14+):枚举系统样式字体;`getFontDescriptorByFullName(
+  fullName, STYLISH)` 取每个的 FontDescriptor(fontFamily/fullName)——
+  补上"fontId → CSS 家族名"的反查映射。
+
+**实现**:
+- **ArkTS(WebAbility)**:
+  - `publishFontId(fontId)`:发布 cfg.fontId(去重写);
+  - `publishStyleFonts()`:STYLISH 枚举(上限 40)逐个取
+    FontDescriptor,发布 cfg.styleFonts=[{id,family}](变化才写);
+  - `registerSystemConfigListener()`:注册
+    onSystemConfigurationUpdated——onFontIdUpdated → 重发 fontId+映射;
+    onFontSizeScaleUpdated → 复用既有 writeFontScaleToFile;
+  - 启动:`context.config.fontId` 初始值 + 两项发布 + 监听注册;
+- **渲染层**:
+  - `applySystemFonts` 重写为动态:`cfg.fontId` 在 styleFonts 映射到
+    家族 → `--font-default` 前插该家族;fontId 存在但映射不上 →
+    **探针法**兜底(canvas 测宽对比 serif 基线,找出渲染宽度不同的
+    非 HarmonyOS 家族,按 fontId 缓存);都没有 → 回落默认栈;
+  - 家族变化才重写样式(去重);挂入 200ms 文件变化消费者;
+  - "界面字体循环"命令的"跟随系统"提示现在会显示解析出的当前样式
+    字体名。
+
+**验证要点**:系统设置 → 显示与字体 → 字体样式 切换 → 约 1s 内
+Obsidian 界面字体变化(Notice/hilog 可见 fontId 更新);切回原样式同样
+生效;重启后初始 fontId 正确;Obsidian 设置里自选字体仍优先;探针仅在
+fontId 无映射时运行且按 id 缓存。

@@ -36,6 +36,7 @@ import { BusinessError, deviceInfo, settings } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
 import environment from '@ohos.file.environment';
 import font from '@ohos.font';
+import text from '@ohos.graphics.text';
 import { NativeThemeAdapter } from '../adapter/NativeThemeAdapter';
 import { AbilityManager } from '../common/AbilityManager';
 import { Configuration } from '@ohos.app.ability.Configuration';
@@ -585,6 +586,137 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
+  // Publishes the SYSTEM STYLE font (设置 → 显示与字体 → 字体样式) so the
+  // web content can follow it — the piece round 60 was missing. Two parts:
+  //  1. cfg.fontId: the opaque id of the currently selected style font
+  //     (Configuration.fontId). Changes push through
+  //     onSystemConfigurationUpdated/onFontIdUpdated (API 24) and are
+  //     republished here.
+  //  2. cfg.styleFonts: [{id, family}] mapping built from the
+  //     SystemFontType.STYLISH list via getFontDescriptorByFullName —
+  //     the renderer resolves fontId to a CSS family name with it.
+  // The renderer applies the resolved family to --font-default (user picks
+  // in Obsidian settings still win; HarmonyOS Sans remains the fallback).
+  private publishFontId(fontId: string): void {
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const filePath: string = filesDir + '/ohsidian-mode.json';
+      let cfg: Record<string, Object> = {};
+      try {
+        if (fileIo.accessSync(filePath)) {
+          cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+          if (!cfg) {
+            cfg = {};
+          }
+        }
+      } catch (e) {
+        cfg = {};
+      }
+      if (cfg['fontId'] === fontId) {
+        return;
+      }
+      cfg['fontId'] = fontId;
+      const file = fileIo.openSync(filePath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      try {
+        fileIo.writeSync(file.fd, JSON.stringify(cfg));
+      } finally {
+        fileIo.closeSync(file);
+      }
+      LogUtil.info(TAG, 'font id published: ' + fontId);
+    } catch (err) {
+      LogUtil.error(TAG, 'failed to write fontId to mode file: ' + JSON.stringify(err));
+    }
+  }
+
+  private publishStyleFonts(): void {
+    text.getSystemFontFullNamesByType(text.SystemFontType.STYLISH)
+      .then((names: Array<string>) => {
+        const resolveOne = (name: string): Promise<Record<string, string> | null> => {
+          return new Promise((resolve) => {
+            try {
+              text.getFontDescriptorByFullName(name, text.SystemFontType.STYLISH)
+                .then((desc: text.FontDescriptor) => {
+                  resolve({
+                    'id': name,
+                    'family': desc.fontFamily || desc.fullName || name,
+                  });
+                })
+                .catch(() => resolve({ 'id': name, 'family': name }));
+            } catch (e) {
+              resolve({ 'id': name, 'family': name });
+            }
+          });
+        };
+        Promise.all(names.slice(0, 40).map(resolveOne))
+          .then((mapping: Array<Record<string, string>>) => {
+            try {
+              const filesDir: string = this.context.getApplicationContext().filesDir;
+              const filePath: string = filesDir + '/ohsidian-mode.json';
+              let cfg: Record<string, Object> = {};
+              try {
+                if (fileIo.accessSync(filePath)) {
+                  cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+                  if (!cfg) {
+                    cfg = {};
+                  }
+                }
+              } catch (e) {
+                cfg = {};
+              }
+              const nextJson: string = JSON.stringify(mapping);
+              if (cfg['styleFonts'] === nextJson) {
+                return;
+              }
+              cfg['styleFonts'] = nextJson;
+              const file = fileIo.openSync(filePath,
+                fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+              try {
+                fileIo.writeSync(file.fd, JSON.stringify(cfg));
+              } finally {
+                fileIo.closeSync(file);
+              }
+              LogUtil.info(TAG, 'style fonts published: ' + mapping.length + ' entries');
+            } catch (err) {
+              LogUtil.error(TAG, 'failed to write styleFonts: ' + JSON.stringify(err));
+            }
+          })
+          .catch((err: BusinessError) => {
+            LogUtil.warn(TAG, 'style font resolve failed: ' + JSON.stringify(err));
+          });
+      })
+      .catch((err: BusinessError) => {
+        LogUtil.warn(TAG, 'getSystemFontFullNamesByType(STYLISH) failed: ' + JSON.stringify(err));
+      });
+  }
+
+  // Registers the API-24 system-configuration listener (font style/size/
+  // weight pushes) and republishes the font pieces of the mode file.
+  private registerSystemConfigListener(): void {
+    try {
+      const appContext = this.context.getApplicationContext();
+      appContext.onSystemConfigurationUpdated({
+        onFontIdUpdated: (fontId: string) => {
+          LogUtil.info(TAG, 'onFontIdUpdated: ' + fontId);
+          this.publishFontId(fontId);
+          this.publishStyleFonts();
+        },
+        onFontSizeScaleUpdated: (fontSizeScale: number) => {
+          if (fontSizeScale > 0) {
+            const next: number = Math.round(fontSizeScale * 100) / 100;
+            if (next !== this.fontScale) {
+              this.fontScale = next;
+              this.writeFontScaleToFile(next);
+            }
+          }
+        },
+      });
+      LogUtil.info(TAG, 'system configuration listener registered');
+    } catch (exception) {
+      LogUtil.warn(TAG, 'onSystemConfigurationUpdated registration failed: ' + JSON.stringify(exception));
+    }
+  }
+
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam) {
     super.onCreate(want, launchParam);
 
@@ -671,6 +803,19 @@ export class WebAbility extends WebBaseAbility {
     // request is a no-op dialog after the first approval.
     this.publishDocumentsDir();
     this.publishSystemFonts();
+    // System style font: publish the initial fontId (Configuration.fontId)
+    // and the STYLISH family mapping, then keep both fresh via the API-24
+    // system-configuration listener (onFontIdUpdated etc.).
+    try {
+      const initialFontId = this.context.config.fontId;
+      if (typeof initialFontId === 'string' && initialFontId.length > 0) {
+        this.publishFontId(initialFontId);
+      }
+    } catch (exception) {
+      LogUtil.warn(TAG, 'read initial fontId failed: ' + JSON.stringify(exception));
+    }
+    this.publishStyleFonts();
+    this.registerSystemConfigListener();
     if (this.xcomponentId === ConfigData.DEFAULT_WINDOW_ID) {
       // Startup-time user_grant permissions (main window only). 0 ==
       // REQUEST_PERMISSION_SUCCESS (module-private constant there).

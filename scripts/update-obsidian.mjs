@@ -248,23 +248,79 @@ function applyWindowDecor(){
     }
   }catch(e){}
 }
-/* Prefer HarmonyOS system fonts for the default stacks. The engine's
-   Chromium reads /system/fonts via SkFontMgr_OHOS (verified in
-   libelectron.so), so "HarmonyOS Sans" resolves - but Obsidian's stock
-   --font-default is a desktop stack (Segoe UI/Roboto) that mostly misses
-   it. User-chosen fonts (--font-*-override) still win over this. The
-   "restore system fonts" command below clears those overrides so this
-   default applies again. */
+/* System font STYLE following (设置 → 显示与字体 → 字体样式). Round 66
+   redesign of the static round-49 style: the ArkTS layer publishes
+   cfg.fontId (the opaque id of the user-selected style font, fresh via
+   ApplicationContext.onSystemConfigurationUpdated/onFontIdUpdated) and
+   cfg.styleFonts ([{id,family}] built from
+   text.getSystemFontFullNamesByType(STYLISH) + getFontDescriptorByFullName).
+   The dynamic stack becomes: [style family] + "HarmonyOS Sans" + desktop
+   fallbacks. If the fontId has no mapping (or no STYLISH list), a probe
+   pass measures canvas text width for each candidate family against the
+   current default and picks a differing one (style fonts usually ship a
+   distinct glyph set); the probe result is cached per fontId.
+   User-chosen fonts (--font-*-override via Obsidian settings or the cycle
+   command) still win over this. */
 var FONT_STYLE_ID="ohsidian-system-fonts";
+var lastAppliedFamily=null;
+function styleFontFamilyFromCfg(cfg){
+  try{
+    if(!cfg||typeof cfg.fontId!=="string"||!cfg.fontId)return null;
+    if(cfg.styleFonts){
+      var list=JSON.parse(cfg.styleFonts);
+      if(Array.isArray(list)){
+        for(var i=0;i<list.length;i++){
+          if(list[i]&&list[i].id===cfg.fontId&&list[i].family)return list[i].family;
+        }
+      }
+    }
+    return undefined; /* fontId present but unmapped - probe */
+  }catch(e){return null}
+}
+var probeCache={};
+function probeStyleFamily(fontId,cfg){
+  try{
+    if(probeCache[fontId])return probeCache[fontId];
+    if(!cfg||!cfg.systemFonts)return null;
+    var list=JSON.parse(cfg.systemFonts);
+    if(!Array.isArray(list))return null;
+    var canvas=document.createElement("canvas");
+    var ctx=canvas.getContext("2d");
+    if(!ctx)return null;
+    var sample="OHSidian字段读写测宽Ag7";
+    ctx.font="48px serif";
+    var baseW=ctx.measureText(sample).width;
+    var best=null;
+    for(var i=0;i<list.length&&i<60;i++){
+      var fam=list[i];
+      if(!fam||fam.indexOf("HarmonyOS")===0)continue;
+      try{ctx.font="48px \""+fam+"\", serif"}catch(e){continue}
+      var w=ctx.measureText(sample).width;
+      if(Math.abs(w-baseW)>0.5){best=fam;break}
+    }
+    probeCache[fontId]=best;
+    return best;
+  }catch(e){return null}
+}
 function applySystemFonts(){
   try{
+    var cfg=readMode();
+    var family=null;
+    var mapped=styleFontFamilyFromCfg(cfg);
+    if(mapped===undefined){family=probeStyleFamily(cfg.fontId,cfg)}
+    else if(typeof mapped==="string"){family=mapped}
+    if(family===lastAppliedFamily&&document.getElementById(FONT_STYLE_ID))return;
+    lastAppliedFamily=family;
+    var stack=family
+      ? "\""+family+"\",\"HarmonyOS Sans\",\"HarmonyOS Sans SC\",\"HarmonyOS Sans TC\",ui-sans-serif,-apple-system,BlinkMacSystemFont,system-ui,\"Segoe UI\",Roboto,sans-serif;"
+      : "\"HarmonyOS Sans\",\"HarmonyOS Sans SC\",\"HarmonyOS Sans TC\",ui-sans-serif,-apple-system,BlinkMacSystemFont,system-ui,\"Segoe UI\",Roboto,sans-serif;";
     var el=document.getElementById(FONT_STYLE_ID);
     if(!el&&document.head){
       el=document.createElement("style");
       el.id=FONT_STYLE_ID;
-      el.textContent=':root{--font-default:"HarmonyOS Sans","HarmonyOS Sans SC","HarmonyOS Sans TC",ui-sans-serif,-apple-system,BlinkMacSystemFont,system-ui,"Segoe UI",Roboto,sans-serif;}';
       document.head.appendChild(el);
     }
+    if(el){el.textContent=":root{--font-default:"+stack+"}"}
   }catch(e){}
 }
 /* Pure event-driven keyboard handling (docs/window-state-machine.md §7).
@@ -333,29 +389,43 @@ function applyFontScale(){
   }catch(e){}
 }
 /* Single mode-file consumer: re-reads the file every 200ms and re-applies
-   every publisher (mode switch / decor / trash / keyboard / font scale)
-   ONLY when the file content changed - one small readFileSync per tick, no
-   work and no event spam when nothing moved. The ArkTS side writes on every
-   keyboardHeightChange / fontScale change, so consumers follow within one
-   tick without dedicated polling ladders. */
+   every publisher (safe area / mode switch / decor / trash / keyboard /
+   font scale / system fonts) ONLY when the file content changed - one small
+   readFileSync per tick, no work and no event spam when nothing moved. The
+   ArkTS side writes on every keyboardHeightChange / fontScale change, so
+   consumers follow within one tick without dedicated polling ladders. */
 var modePollMs=200,lastModeRaw=null;
 function pollTick(){
   try{
-    var dir=dataDir();
-    if(dir){
-      var txt=require("fs").readFileSync(dir+MODE_FILE,"utf8");
-      if(txt!==lastModeRaw){
-        lastModeRaw=txt;
-        try{lastWant=syncFromSystem(lastWant)}catch(e){}
-        try{applyWindowDecor()}catch(e){}
-        try{hookTrash()}catch(e){}
-        try{applyKeyboard()}catch(e){}
-        try{applyFontScale()}catch(e){}
+    if(document.hidden){
+      /* Hidden windows skip the read entirely; visibilitychange resumes the
+         loop, which re-checks immediately so nothing is missed while away.
+         (Protocol deep-link polling in the main process stays on - OAuth
+         callbacks arrive exactly while the app is backgrounded.) */
+    }else{
+      var dir=dataDir();
+      if(dir){
+        var txt=require("fs").readFileSync(dir+MODE_FILE,"utf8");
+        if(txt!==lastModeRaw){
+          lastModeRaw=txt;
+          try{lastWant=syncFromSystem(lastWant)}catch(e){}
+          /* Rotation / bar changes rewrite cfg.insets without touching
+             systemMode - re-apply the safe area on every change too. */
+          try{applySafeArea()}catch(e){}
+          try{applyWindowDecor()}catch(e){}
+          try{hookTrash()}catch(e){}
+          try{applyKeyboard()}catch(e){}
+          try{applyFontScale()}catch(e){}
+          try{applySystemFonts()}catch(e){}
+        }
       }
     }
   }catch(e){}
   setTimeout(pollTick,modePollMs);
 }
+document.addEventListener("visibilitychange",function(){
+  if(!document.hidden){lastModeRaw=null}
+});
 /* Deletion safety net. vault.trash(file, system) dispatches to
    adapter.trashSystem (engine bridge; HarmonyOS has no recycle-bin API for
    apps, so it may fail silently or unlink the file outright) or to
@@ -399,13 +469,22 @@ function hookTrash(){
    target layout file leaves nothing to rewrite (first switch, layout will
    be built fresh and empty-main fallback opens lastOpenFiles[0], which we
    also set). */
-function syncActiveFileToTargetLayout(on){
+function syncActiveFileToTargetLayout(on,done){
+  /* settle() fires exactly once, after every write chain finished (or on an
+     early return with nothing to write). The caller reloads on it: a fixed
+     800ms timer raced slow storage and reloaded onto the stale layout. */
+  var settled=false;
+  var settle=function(){if(!settled){settled=true;if(done)done()}};
+  var awaitWrite=function(w){
+    if(w&&typeof w.then==="function"){w.then(settle,function(){settle()})}
+    else{settle()}
+  };
   try{
     var v=window.app&&window.app.vault;
-    if(!v||!v.adapter||!v.configDir)return;
+    if(!v||!v.adapter||!v.configDir){settle();return}
     var active=null;
     try{active=window.app.workspace.getActiveFile()}catch(e){}
-    if(!active||!active.path)return;
+    if(!active||!active.path){settle();return}
     var target=on?"workspace-mobile.json":"workspace.json";
     var p=v.configDir+"/"+target;
     var rewriteLeaves=function(node){
@@ -480,24 +559,25 @@ function syncActiveFileToTargetLayout(on){
     v.adapter.read(p).then(function(txt){
       var layout=null;
       try{layout=txt?JSON.parse(txt):null}catch(e){}
-      finish(layout);
+      awaitWrite(finish(layout));
     },function(){/* target file missing: first switch. Seed a minimal
       layout marker so the empty-main fallback opens the right file. */
       try{
         var seed={lastOpenFiles:[active.path]};
-        return v.adapter.write(p,JSON.stringify(seed,null,2));
-      }catch(e){}
+        awaitWrite(v.adapter.write(p,JSON.stringify(seed,null,2)));
+      }catch(e){settle()}
     });
-  }catch(e){}
+  }catch(e){settle()}
 }
 function applyMobile(on,reason){
   try{
     var cur=!!localStorage.getItem(KEY);
     if(cur===on){applySafeArea();return false}
-    syncActiveFileToTargetLayout(on);
+    /* Reload only after the target layout write settled - see
+       syncActiveFileToTargetLayout. Mode flag + notice go out immediately. */
+    syncActiveFileToTargetLayout(on,function(){window.location.reload()});
     if(on)localStorage.setItem(KEY,"1");else localStorage.removeItem(KEY);
     try{new Notice("OHSidian: "+(on?"进入触屏模式(移动布局)":"返回桌面模式")+(reason?(" ["+reason+"]"):"")+",即将重载…")}catch(e){}
-    setTimeout(function(){window.location.reload()},800);
     return true;
   }catch(e){return false}
 }
@@ -755,6 +835,10 @@ var install=function(app){
         })();
         var idx=fams.indexOf(curFamily);
         var next=fams[(idx+1+fams.length)%fams.length]||"@system";
+        var styleFamily=(function(){
+          try{var f=styleFontFamilyFromCfg(readMode());return typeof f==="string"?f:null}catch(e){return null}
+        })();
+        var followLabel=styleFamily?("跟随系统("+styleFamily+")"):"跟随系统(默认栈)";
         if(next==="@system"){
           v.setConfig("interfaceFontFamily","");
           v.setConfig("textFontFamily","");
@@ -762,7 +846,7 @@ var install=function(app){
             var b=document.body;
             ["--font-interface-override","--font-text-override"].forEach(function(k){b.style.removeProperty(k)});
           }catch(e){}
-          try{new Notice("OHSidian 界面字体 → 跟随系统")}catch(e){}
+          try{new Notice("OHSidian 界面字体 → "+followLabel)}catch(e){}
         }else{
           v.setConfig("interfaceFontFamily",next);
           v.setConfig("textFontFamily",next);
@@ -848,7 +932,21 @@ setInterval(function(){
     var cfg=JSON.parse(fsMod.readFileSync(p,"utf8"));
     if(!cfg)return;
     var items=cfg.items||[];
-    var last=typeof cfg.lastDispatchedSeq==="number"?cfg.lastDispatchedSeq:0;
+    /* Dispatch cursor lives in a SEPARATE file: this loop used to write
+       lastDispatchedSeq back into the main file, and that read-modify-write
+       raced the ArkTS writer - a deep link appended between our read and
+       write got erased with the stale snapshot (OAuth callback lost). The
+       main file is now ArkTS-write-only; this side never rewrites it. */
+    var cursorPath=p+".cursor.json";
+    var last;
+    try{
+      var cursorCfg=JSON.parse(fsMod.readFileSync(cursorPath,"utf8"));
+      last=cursorCfg&&typeof cursorCfg.lastDispatchedSeq==="number"?cursorCfg.lastDispatchedSeq:0;
+    }catch(e2){
+      /* First tick after the cursor-file split: fall back to the legacy
+         field so already-dispatched links are not re-fired. */
+      last=typeof cfg.lastDispatchedSeq==="number"?cfg.lastDispatchedSeq:0;
+    }
     var maxDispatched=0;
     for(var i=0;i<items.length;i++){
       var it=items[i];
@@ -870,7 +968,7 @@ setInterval(function(){
       }
     }
     if(maxDispatched>last){
-      try{cfg.lastDispatchedSeq=maxDispatched;fsMod.writeFileSync(p,JSON.stringify(cfg),"utf8")}catch(e){}
+      try{fsMod.writeFileSync(cursorPath,JSON.stringify({lastDispatchedSeq:maxDispatched}),"utf8")}catch(e){}
     }
   }catch(e){}
 },1500);

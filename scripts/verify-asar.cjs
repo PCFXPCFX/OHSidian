@@ -33,6 +33,7 @@ try {
     'app trash hook': app.includes('__ohsidianTrashHook'),
     'app mode-switch file sync': app.includes('syncActiveFileToTargetLayout'),
     'app font scale follower': app.includes('applyFontScale'),
+    'app style-font follower': app.includes('styleFontFamilyFromCfg') && app.includes('probeStyleFamily'),
     'app documents-dir migration': app.includes('pickMigration') && app.includes('当前仓库在应用沙箱内'),
     'app migration self-copy guard': app.includes('目标目录在当前仓库内'),
     'app font family cycle command': app.includes('ohsidian-font-family'),
@@ -41,6 +42,13 @@ try {
     'app no adaptive keyboard poll': !app.includes('isEditing()?'),
     'main IPC guard': main.includes('__ohsidianIpcGuard'),
     'main updater disabled': main.includes('(at||(D.updateDisabled=!0))'),
+    // The two most load-bearing textual patches: if upstream re-minifies and
+    // these go silently unmatched, the app crashes at startup (version gate)
+    // or touch-mode vault switching dead-ends (drawer). Verify the patched
+    // forms explicitly instead of trusting update-obsidian.mjs warnings.
+    'main version-floor gate patched': main.includes('bo=Math.max(parseInt(fo.split(".")[0]),28)'),
+    'app drawer switch routed': app.includes('i.app.openVaultChooser()'),
+    'main deeplink cursor file (no main-file rewrite)': main.includes('.cursor.json'),
     'main default vault fix': main.includes('__ohsidianDefaultVault'),
     'main deeplink bridge': main.includes('__ohsidianDeepLink'),
   };
