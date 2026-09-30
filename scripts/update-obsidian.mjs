@@ -289,16 +289,37 @@ function applyThemeFontFace(cfg){
   try{
     var p=cfg&&cfg.themeFontPath;
     if(!p||p===themeFontLoadedPath)return;
+    /* Remove stale faces first: FontFaceSet resolves a family to the
+       FIRST matching face - without cleanup an old theme font keeps
+       winning after the user switches (the reported "切换无效"). */
+    try{
+      var stale=[];
+      document.fonts.forEach(function(f){if(f.family==="OhosThemeFont")stale.push(f)});
+      for(var si=0;si<stale.length;si++){try{document.fonts.delete(stale[si])}catch(se){}}
+    }catch(e0){}
     var fsMod=require("fs");
-    if(!fsMod.existsSync(p))return;
-    var buf=fsMod.readFileSync(p);
-    if(!buf||!buf.length||typeof FontFace!=="function")return;
+    var st=null;
+    try{st=fsMod.statSync(p)}catch(se){
+      console.warn("[OHSidian] themeFontPath stat failed:",p,String(se&&se.message||se));
+      themeFontLoadedPath=p; /* missing file: do not hammer it every tick */
+      return;
+    }
+    if(!st||!st.size){console.warn("[OHSidian] themeFontPath empty file:",p);themeFontLoadedPath=p;return}
+    var buf;
+    try{buf=fsMod.readFileSync(p)}catch(re){
+      console.warn("[OHSidian] themeFontPath read failed (EACCES?):",p,String(re&&re.message||re));
+      themeFontLoadedPath=p;
+      return;
+    }
+    if(!buf||!buf.length||typeof FontFace!=="function"){console.warn("[OHSidian] themeFontPath unreadable bytes:",p);return}
     var ff=new FontFace("OhosThemeFont",buf.buffer.slice(buf.byteOffset,buf.byteOffset+buf.byteLength));
-    var done=function(f){try{document.fonts.add(f||ff)}catch(e){}lastAppliedStack=null;applySystemFonts()};
+    var ok=function(f){try{document.fonts.add(f)}catch(e){}themeFontLoadedPath=p;lastAppliedStack=null;applySystemFonts()};
+    var bad=function(err){console.warn("[OHSidian] theme FontFace load rejected:",p,String(err&&err.message||err));themeFontLoadedPath=null};
     var pr=ff.load();
-    if(pr&&pr.then){pr.then(done,function(){done()})}else{done()}
-    themeFontLoadedPath=p;
-  }catch(e){}
+    if(pr&&pr.then){pr.then(ok,bad)}else{ok(ff)}
+  }catch(e){
+    try{console.warn("[OHSidian] applyThemeFontFace error",String(e&&e.message||e))}catch(e2){}
+  }
 }
 function applySystemFonts(){
   try{
@@ -600,7 +621,7 @@ function refreshSystemFontGlobals(){
        picking them warned 系统中不存在此字体. cfg.fontFiles maps each
        family to its file; probe with canvas and FontFace-load ONLY the
        unresolved ones (bounded, one-time, cached). */
-    if(c&&c.fontFiles&&!window.__ohsidianFontBridge){
+    if(c&&c.fontFiles){
       var map;try{map=JSON.parse(c.fontFiles)}catch(e){map=null}
       if(Array.isArray(map)&&map.length){
         window.__ohsidianFontBridge={};
@@ -608,7 +629,7 @@ function refreshSystemFontGlobals(){
         var sample="OHSidian字体测宽Ag7";
         var base=0;if(cx){cx.font="48px serif";base=cx.measureText(sample).width}
         var done=0,pending=0;
-        for(var i=0;i<map.length&&done<40;i++){
+        for(var i=0;i<map.length&&done<80;i++){
           var fam=map[i]&&map[i].f,fp=map[i]&&map[i].p;
           if(!fam||!fp||window.__ohsidianFontBridge[fam]!==undefined)continue;
           window.__ohsidianFontBridge[fam]=null;

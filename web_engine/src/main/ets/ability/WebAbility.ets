@@ -611,10 +611,10 @@ export class WebAbility extends WebBaseAbility {
   // loaded it, so Node fs can read it too).
   private publishThemeFontPath(): void {
     let fontPath: string = '';
-    // The user's theme font (downloaded from the theme store) is a
-    // CUSTOMIZED font - the device log shows STYLISH returns only the six
-    // built-in /sys_prod/fonts style fonts, not the active theme font.
-    // Try CUSTOMIZED first, fall back to STYLISH.
+    // Priority: 1) CUSTOMIZED paths; 2) ALL descriptors minus the static
+    // system dirs. Device logs: CUSTOMIZED returns [] and STYLISH only
+    // has the six built-in /sys_prod fonts - the user's theme font is
+    // neither, but ALL covers "user-installed font type" per SDK docs.
     try {
       const custom = text.getFontPathsByType(text.SystemFontType.CUSTOMIZED);
       LogUtil.info(TAG, 'CUSTOMIZED font paths: ' + JSON.stringify(custom));
@@ -625,38 +625,47 @@ export class WebAbility extends WebBaseAbility {
             break;
           }
         }
-        if (!fontPath && custom.length > 0) {
-          fontPath = custom[0];
-        }
       }
     } catch (exception) {
       LogUtil.warn(TAG, 'getFontPathsByType(CUSTOMIZED) failed: ' + JSON.stringify(exception));
     }
-    // getFontByName('OhosThemeFont') does NOT resolve runtime-registered
-    // theme fonts (device log: ParseFontDescriptor "Failed to find font
-    // name OhosThemeFont") - the alias lives only in ArkUI's TexGine.
-    // Use the font engine's file API instead: STYLISH = style fonts.
-    if (!fontPath) {
-    try {
-      const paths = text.getFontPathsByType(text.SystemFontType.STYLISH);
-      if (Array.isArray(paths)) {
-        for (const p of paths) {
-          if (p && (p.endsWith('.ttf') || p.endsWith('.otf'))) {
-            fontPath = p;
-            break;
-          }
-        }
-        if (!fontPath && paths.length > 0) {
-          fontPath = paths[0];
-        }
-      }
-      LogUtil.info(TAG, 'STYLISH font paths: ' + JSON.stringify(paths));
-    } catch (exception) {
-      LogUtil.warn(TAG, 'getFontPathsByType(STYLISH) failed: ' + JSON.stringify(exception));
-    }
-    }
     if (fontPath) {
       this.writeThemeFontPath(fontPath);
+      return;
+    }
+    try {
+      text.getSystemFontFullNamesByType(text.SystemFontType.ALL)
+        .then((names: Array<string>) => {
+          LogUtil.info(TAG, 'ALL font names: ' + names.length);
+          const isStatic = (pth: string): boolean =>
+            pth.startsWith('/system/fonts') || pth.startsWith('/sys_prod');
+          const pick = (idx: number): void => {
+            if (fontPath) {
+              this.writeThemeFontPath(fontPath);
+              return;
+            }
+            if (idx >= names.length) {
+              LogUtil.warn(TAG, 'no non-static font path found via ALL descriptors');
+              return;
+            }
+            text.getFontDescriptorByFullName(names[idx], text.SystemFontType.ALL)
+              .then((desc: text.FontDescriptor) => {
+                if (desc && desc.path && desc.path.length > 0 && !isStatic(desc.path) &&
+                  (desc.path.endsWith('.ttf') || desc.path.endsWith('.otf'))) {
+                  fontPath = desc.path;
+                  LogUtil.info(TAG, 'candidate font path: ' + desc.path + ' (' + names[idx] + ')');
+                }
+              })
+              .catch(() => {})
+              .then(() => pick(idx + 1));
+          };
+          pick(0);
+        })
+        .catch((err: BusinessError) => {
+          LogUtil.warn(TAG, 'ALL name enumeration failed: ' + JSON.stringify(err));
+        });
+    } catch (exception) {
+      LogUtil.warn(TAG, 'ALL descriptor fallback threw: ' + JSON.stringify(exception));
     }
   }
 

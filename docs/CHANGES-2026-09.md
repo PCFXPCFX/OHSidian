@@ -2405,3 +2405,37 @@ ArkTS/TexGine 侧,但其中 /sys_prod 与自定义字体对 web 引擎 Skia 的
 (应含 shaonianzhangyangsiyiailian.ttf)→ `theme font path published`
 → 界面跟随;②设置字体列表点选宋体/楷体等不再报"不存在",立即生效;
 ③恢复默认样式回 HarmonyOS Sans;④全部字体可解析时无 FontFace 开销。
+
+### 第 72 轮(2026-09-29):主题字体路径终极方案(ALL 描述符兜底)+ 渲染层 FontFace 卫生
+
+**新日志铁证**:`CUSTOMIZED font paths: []` ——用户下载的主题字体
+不属于 CUSTOMIZED 枚举;STYLISH 又只有六个内置 /sys_prod 字体。
+路径获取的三条公开枚举全部失效,但 SDK 文档明确
+`SystemFontType.ALL` 覆盖"系统 + 样式 + **用户安装**"三类——主题字体
+即用户安装字体,用 ALL 全量描述符逐个取 path,**过滤掉静态目录
+(/system/fonts、/sys_prod)后剩下的就是运行时安装的主题字体**。
+
+**ArkTS(publishThemeFontPath 重写)**:
+1. CUSTOMIZED 路径(保留,日志照打);
+2. 兜底:getSystemFontFullNamesByType(ALL) → 逐个
+   getFontDescriptorByFullName(ALL) → 取 path,过滤 /system/fonts 与
+   /sys_prod、仅收 .ttf/.otf;找到即 writeThemeFontPath;
+3. 全部落空则发布为空(渲染层回退 HarmonyOS Sans),日志明确打
+   "no non-static font path found"。
+
+**渲染层(外部审计确认的四个缺陷全修)**:
+- **旧 FontFace 不清理**:FontFaceSet 按插入顺序解析同 family,旧
+  主题字体永远胜出("切换无效"的主因)——applyThemeFontFace 现在先
+  遍历删除全部 OhosThemeFont 旧 face 再注册新的;
+- **空 catch 吞错**:stat/read/FontFace/load 每个失败路径都打
+  console.warn(含路径与错误消息),不再静默;
+- **reject 仍 add broken face**:load 失败不再 add,置
+  themeFontLoadedPath=null 允许下轮重试;
+- **fontFiles 桥的单次守卫**:去掉 !__ohsidianFontBridge 整体闸门,
+  改为按 family 增量跳过(晚装的字体也能桥接);上限 40→80。
+
+**验证要点**:切主题字体后 hilog 依次出现 `CUSTOMIZED font paths: []`
+→ `ALL font names: N` → `candidate font path: <主题字体路径> (<名>)`
+→ `theme font path published` → 界面 1s 内跟随;若 ALL 也无,日志见
+"no non-static font path found"(此时只能等华为开放 API,应用回退
+HarmonyOS Sans);设置点选系统字体不再报"不存在"。
