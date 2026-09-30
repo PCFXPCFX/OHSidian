@@ -46,7 +46,7 @@
 
 ## Project Introduction
 
-**OHsidian** is an unofficial port of the Obsidian note-taking app for HarmonyOS. It does not reimplement Obsidian; instead, it builds a complete Electron compatibility layer that runs the stock Obsidian (`obsidian.asar`) on top of the HarmonyOS native runtime.
+**OHsidian** is an unofficial port of the Obsidian note-taking app for HarmonyOS. It does not reimplement Obsidian; instead, it builds a complete Electron compatibility layer that runs real Obsidian (`obsidian.asar`, the official artifact plus runtime compatibility patches) on top of the HarmonyOS native runtime.
 
 The core idea: **simulate the Electron API surface with native HarmonyOS capabilities**. Through a C++ native library (`libadapter.so`), an ArkTS adapter layer, and JSBind bridging, Obsidian's Node.js/Electron runtime works on HarmonyOS. The project also integrates deeply with system-level capabilities (status-bar extension, IME framework, etc.) so the experience feels close to a native app.
 
@@ -102,7 +102,7 @@ This fork ([PCFXPCFX/OHSidian][fork]) builds on the upstream repository ([Hanver
 
 **Layer breakdown** (top to bottom):
 
-- **Obsidian layer**: stock `obsidian.asar`, unmodified Obsidian 1.13.7 application code.
+- **Obsidian layer**: the official obsidian-1.13.7.asar signed artifact (SHA-256 and official RSA-SHA256 verified at download time), with runtime compatibility patches injected by the `scripts/update-obsidian.mjs` pipeline (IPC guard, `obsidian://` deep-link bridge, touch-mode adaptation, default-vault redirect, auto-update disable); the note-editing core is untouched. Obsidian is proprietary software copyrighted by its owners; this repository is unaffiliated with them.
 - **Electron compatibility layer**: `@electron/remote` provides the remote module API; `main.js` loads the asar and manages updates.
 - **JSBind bridge layer**: connects the JS runtime to the ArkTS native layer, forwarding Electron API calls to the matching adapters.
 - **C++ native library**: `libadapter.so` provides core system-level API bindings.
@@ -435,7 +435,7 @@ The upstream project ([HanversionOvO/OHSidian][upstream]), maintained by Hanvers
 
 ### Proprietary Components
 
-- Obsidian (`obsidian.asar`): proprietary software, declared UNLICENSED in the wrapper `package.json`, and NOT covered by this repository's license. Obsidian and its logos are trademarks of their respective owners; the `obsidian.asar` in this repository is compiled by ourselves for running on HarmonyOS only.
+- Obsidian (`obsidian.asar`): proprietary software, declared UNLICENSED in the wrapper `package.json`, and NOT covered by this repository's license. The asar in this repository is generated from the official signed artifact through the patch pipeline; modifying and redistributing it goes beyond what its terms of service authorize. Obsidian and its logos are trademarks of their respective owners; this is a non-commercial community project unaffiliated with them — reach out for takedown if needed.
 
 ### Third-Party Components
 

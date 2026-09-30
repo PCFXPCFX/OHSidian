@@ -46,7 +46,7 @@
 
 ## 项目简介
 
-**OHsidian** 是 Obsidian 笔记应用在 HarmonyOS（鸿蒙）平台上的非官方移植项目。它不重新实现 Obsidian，而是构建一个完整的 Electron 兼容层，让原版 Obsidian（`obsidian.asar`）运行在 HarmonyOS 原生运行时之上。
+**OHsidian** 是 Obsidian 笔记应用在 HarmonyOS（鸿蒙）平台上的非官方移植项目。它不重新实现 Obsidian，而是构建一个完整的 Electron 兼容层，运行真正的 Obsidian（`obsidian.asar`，官方产物加运行时补丁）。
 
 核心思路是：**用 HarmonyOS 原生能力模拟 Electron API 表面**。项目通过 C++ 原生库（`libadapter.so`）、ArkTS 适配层与 JSBind 桥接，让 Obsidian 的 Node.js / Electron 运行时在 HarmonyOS 上正常运转；同时深度集成系统级能力（状态栏扩展、输入法框架等），让体验更接近原生应用。
 
@@ -104,7 +104,7 @@
 
 **分层说明**（自上而下）：
 
-- **Obsidian 层**：原版 `obsidian.asar`，未经修改的 Obsidian 1.13.7 应用代码。
+- **Obsidian 层**：官方 obsidian-1.13.7.asar 签名产物（下载时做 SHA-256 与官方 RSA-SHA256 校验），经 `scripts/update-obsidian.mjs` 补丁管线注入运行时兼容补丁（IPC 守卫、`obsidian://` 深链桥、触摸模式适配、默认仓库重定向、自动更新关闭）；笔记编辑核心未改动。Obsidian 为专有软件，版权归其权利人所有，本仓库与其无任何关联。
 - **Electron 兼容层**：`@electron/remote` 提供 remote 模块 API，`main.js` 负责加载 asar 与更新管理。
 - **JSBind 桥接层**：连接 JS 运行时与 ArkTS 原生层，把 Electron API 调用转发到对应的适配器。
 - **C++ 原生库**：`libadapter.so` 提供核心系统级 API 对接。
@@ -437,7 +437,7 @@ OHsidian/
 
 ### 专有组件
 
-- Obsidian（`obsidian.asar`）：专有软件，包装层 `package.json` 声明为 UNLICENSED，不受本仓库许可覆盖。Obsidian 及其徽标为对应权利人的商标，本仓库的 asar 为自行编译，仅供在 HarmonyOS 上运行。
+- Obsidian（`obsidian.asar`）：专有软件，包装层 `package.json` 声明为 UNLICENSED，不受本仓库许可覆盖。仓库内的 asar 由官方签名产物经补丁管线生成，对其修改与再分发超出其使用条款的授权范围；Obsidian 及其徽标为对应权利人的商标，本仓库为非商业社区项目，与其无任何关联，如有侵权请联系移除。
 
 ### 第三方组件
 
