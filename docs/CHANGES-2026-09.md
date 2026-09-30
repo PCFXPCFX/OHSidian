@@ -2439,3 +2439,68 @@ ArkTS/TexGine 侧,但其中 /sys_prod 与自定义字体对 web 引擎 Skia 的
 → `theme font path published` → 界面 1s 内跟随;若 ALL 也无,日志见
 "no non-static font path found"(此时只能等华为开放 API,应用回退
 HarmonyOS Sans);设置点选系统字体不再报"不存在"。
+
+---
+
+## 九、文档与构建管线(2026-09-30 ~ 10-01)
+
+### 9.1 README 双语重写与许可分层
+
+- README.md 按阮一峰《中文技术文档的写作规范》重写:全角标点、
+  中英文间距、引用式链接、代码块语言标注;修正依赖表断裂、
+  克隆地址、项目树旧目录名;README_EN 整体重写对齐中文版
+  (旧版残留华为云/AGC/自动更新章节);两份 README 顶部互加
+  语言切换入口;
+- 许可查证:上游 290 个 .ets/.ts 源文件带文件级 BSD 3-Clause 头
+  (Copyright Haitai FangYuan Co., Ltd.),libelectron.so 闭源中间层
+  随上游同声明分发,obsidian.asar 为专有(包装层 UNLICENSED)。
+  LICENSE 改为 BSD 3-Clause 三版权行(Haitai FangYuan 原始代码 /
+  HanversionOvO(昵称 MikannQAQ)上游作者 / PCFXPCFX 本 Fork 修改),
+  附适用范围说明;中英文许可段按"源码 / 闭源中间层 / 专有组件 /
+  第三方组件"分层;reflect-metadata 0.2.x 实为 Apache-2.0(旧表误写 MIT);
+- Obsidian 层口径修正:"未经修改的官方应用代码"不实——
+  update-obsidian.mjs 实际注入大量运行时补丁。架构图与两份 README
+  改为"官方签名产物 + 可复现运行时补丁",专有组件段注明
+  "修改与再分发超出其使用条款授权,如有侵权请联系移除"。
+
+### 9.2 平板功能演示文档
+
+- docs/tablet-demo.md:9 项平板功能的说明 + 建议拍摄内容 + 素材占位
+  (01~09 GIF/MP4,位于 docs/media/tablet-demo/,含命名约定);
+- "平板状态栏自动隐藏"按产品决定取消:代码已撤,全部文档移除并重编号。
+
+### 9.3 架构图生成脚本
+
+- scripts/render-architecture.mjs:数据驱动生成
+  docs/images/architecture{,.en}.svg/png(@2x),中英文案集中于 I18N 表;
+  Edge/Chrome 无头渲染(PNG),跨平台浏览器探测;
+  scripts/package.json 注册 npm run render-architecture。
+  两份 README 的 ASCII 架构图弃用。
+
+### 9.4 obsidian.asar 出库 + CI 产物管线
+
+- 动机:git 仓库不再托管修改过的专有二进制(再分发面);asar 出库
+  (25 MB,LFS 指针删除),本地文件保留,.gitignore 防误提交;
+- build-release.yml 新增产物管线(构建前置):读 app package.json
+  钉住版本 → actions/cache 按版本缓存 asar.gz →
+  update-obsidian.mjs <版本> --repatch(官方源下载,SHA-256 +
+  RSA-SHA256 双校验,注入补丁,重打包安装)→ verify-asar.cjs
+  断言语法 + 24 个补丁标记(复用现有脚本,本地全绿);
+- --repatch 为必选:asar 出库后普通路径会"已是最新"直接退出
+  不产出;版本升级 = PR 改 package.json,CI 不追 latest;
+- 收益:供应链校验前置(每次构建重验哈希与签名)、仓库瘦身
+  25 MB、再分发面缩小(只有 Release HAP 含修改版 asar)。
+
+### 9.5 本地构建自动补全(hvigor 挂钩)
+
+- 根 hvigorfile.ts 调用 scripts/ensure-obsidian-asar.mjs:asar 存在
+  则 0.17 s 放行(日常零开销,升级仍显式跑 update-obsidian.mjs);
+  缺失(新 clone 首次构建)则按需 npm ci + --repatch 全流程,
+  DevEco GUI 与 hvigorw 同样生效;无法产出时中止构建并给出指引,
+  绝不静默打包无应用载荷的 HAP;OHSIDIAN_SKIP_ASAR_ENSURE=1 跳过;
+- 实测:本机直连 github.com 下载失败(CN 网络,releases.obsidian.md
+  的 asar 路径本身 404),失败信息含离线预置通道——官方
+  obsidian-<版本>.asar.gz 放入 scripts/.tmp-update/ 后管线照常校验
+  哈希与签名,预置来源不需要被信任;CI runner 出网不受影响;
+- README 构建步骤、项目树注释、DEV-ENV-SETUP 与实际机制对齐;
+  DEV-ENV-SETUP 遗留的"状态栏自动隐藏"验证行替换为触屏模式检查。
