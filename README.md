@@ -91,7 +91,7 @@
 ### 深链与工程化
 
 - `obsidian://` 深链桥接：Remotely Save 等插件的浏览器 OAuth 登录可用。
-- GitHub Actions 全自动构建：Release 附 SHA-256 / MD5 校验值，支持可选签名、同版双图标发布（OHsidian 图标 / Obsidian 官方图标）、可选变体，以及 SDK 组合与构建模式选择。
+- GitHub Actions 全自动构建：Release 附 SHA-256 / MD5 校验值，支持可选签名、同版双图标发布（OHsidian 图标 / Obsidian 官方图标）、可选变体，以及 SDK 组合与构建模式选择。`obsidian.asar` 不入库，构建时从官方源下载、校验哈希与签名后注入补丁，并断言补丁标记完整。
 - 关闭 Release 构建的 ArkGuard 混淆。原版以 Release 模式构建会因混淆在启动时闪退，这是本 Fork 能正常分发的关键修复。
 
 ---
@@ -302,13 +302,17 @@ JsBindingUtils.bindFunction("CloudSync.listCloudFiles", cloudSyncAdapter.listClo
 git clone https://github.com/PCFXPCFX/OHSidian.git
 cd OHSidian
 
-# 2. 安装依赖（在 DevEco Studio 中自动完成，或手动执行）
+# 2. 生成 obsidian.asar（从官方源下载并校验 SHA-256 与 RSA 签名，注入运行时补丁；升级内核重跑即可）
+npm ci --prefix scripts
+node scripts/update-obsidian.mjs
+
+# 3. 安装依赖（在 DevEco Studio 中自动完成，或手动执行）
 hvigorw install
 
-# 3. 构建 HAP
+# 4. 构建 HAP
 hvigorw assembleHap
 
-# 4. 构建产物位于
+# 5. 构建产物位于
 # build/outputs/default/electron-default-signed.hap
 ```
 
@@ -371,8 +375,8 @@ OHsidian/
 │       ├── cpp/types/libadapter/     # C++ 原生库类型声明
 │       └── resources/resfile/resources/app/
 │           ├── main.js               # Electron 启动入口
-│           ├── package.json          # Obsidian 1.13.7 包装配置
-│           └── obsidian.asar         # Obsidian 应用包
+│           ├── package.json          # Obsidian 1.13.7 包装配置（版本即 asar 拉取钉子）
+│           └── obsidian.asar         # Obsidian 应用包（不入库，由 scripts/update-obsidian.mjs 生成）
 │
 ├── electron/                         # HAP 入口模块
 │   ├── oh-package.json5              # 依赖：web_engine（AGC hmcore 已移除）

@@ -10,6 +10,13 @@
 #     Get the current "Command Line Tools" linux-x64 zip URL from
 #     https://developer.huawei.com/consumer/cn/download/ and put it into the
 #     repository variable for reproducible builds.
+#   - obsidian.asar is NOT stored in the repository. Every build downloads
+#     the official obsidian-<version>.asar.gz pinned by the app package.json,
+#     verifies its SHA-256 hash and RSA-SHA256 signature against the pinned
+#     distribution cert (scripts/cert-obsidian.pem), injects the OHSidian
+#     runtime patches and repacks it (scripts/update-obsidian.mjs), then
+#     scripts/verify-asar.cjs asserts syntax and all patch markers. The
+#     download is cached per version (actions/cache).
 #   - build-profile.json5 is gitignored (it holds local signing credentials);
 #     CI generates it from build-profile.example.json5 and strips the
 #     placeholder signing config, producing an UNSIGNED HAP.
@@ -69,7 +76,7 @@ jobs:
         # One build per launcher icon; both HAPs attach to the same Release.
         icon: [ohsidian, obsidian]
     steps:
-      - name: Checkout (with LFS for libelectron.so / obsidian.asar)
+      - name: Checkout (with LFS for native libs)
         uses: actions/checkout@v5
         with:
           lfs: true
@@ -84,6 +91,29 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '20'
+
+      - name: Read pinned Obsidian version
+        id: obsidian
+        run: echo "version=$(node -p "require('./web_engine/src/main/resources/resfile/resources/app/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache official Obsidian asar download
+        uses: actions/cache@v4
+        with:
+          path: scripts/.tmp-update
+          key: obsidian-asar-${{ steps.obsidian.outputs.version }}
+
+      - name: Install scripts dependencies
+        run: npm ci --prefix scripts
+
+      # Version is pinned to the app package.json (upgrade via PR), NOT to
+      # upstream "latest". --repatch is REQUIRED here: the plain path would
+      # exit "already up to date" without producing an asar, because the
+      # asar itself is no longer committed to the repository.
+      - name: Fetch, verify and patch obsidian.asar (official source)
+        run: node scripts/update-obsidian.mjs "${{ steps.obsidian.outputs.version }}" --repatch
+
+      - name: Verify patched asar (syntax + patch markers)
+        run: node scripts/verify-asar.cjs
 
       - name: Resolve command-line-tools URL
         id: cli
