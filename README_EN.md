@@ -79,6 +79,13 @@ This fork ([PCFXPCFX/OHSidian][fork]) builds on the upstream repository ([Hanver
 - Publishes the IME height (`--keyboard-height`) to the engine, so the formatting toolbar (bold, italic, etc.) floats correctly above the keyboard.
 - Fixed the quick-start "folder not found" error (the default vault is redirected to a writable directory).
 
+### External Content Ingestion
+
+- **Drop to insert**: images and files dragged onto the editor from the SuperHub transfer station (single or multiple), Files, or the screenshot floating window are inserted as attachments. Fixes the upstream behavior where dragging a single image triggered the "Open external link?" prompt and never inserted anything regardless of the choice (root cause: `general.file-uri` records were swallowed by a parser short-circuit, and the file path leaked to the engine as plain text, which it turned into a link).
+- **Automatic cross-app file retrieval**: dragged files living in another app's sandbox (e.g. the transfer station's staging directory, invisible in this app's mount namespace) are automatically copied into the app cache by the adapter layer using the temporary URI permission granted with the drop; unreadable files are no longer demoted to links. Sources that are already readable (the Files app) keep their original direct path with no extra copy.
+- **System share target (Share Kit)**: registers `ohos.want.action.sendData`, so the share sheet (Gallery, Files, etc.) can share images, videos, audio, arbitrary files, and text straight into the focused note via the unified sanitizing pipeline; when the app is not running, the shared content is delivered automatically after launch. The receiver parses payloads with the official `systemShare.getSharedData` API — no sender-private key names involved.
+- **OneHop / cross-device**: cross-device content arriving as a system drag (UDMF) naturally goes through the drag-in pipeline; content arriving as a Want goes through the share-target path. Architecture and remaining verification items: docs/DRAG-DROP-INBOUND.md (Chinese).
+
 ### Data Safety and Power
 
 - In-app deletions are forced into the vault's `.trash` folder (the engine's trash bridge behaves unpredictably on HarmonyOS and may delete files permanently).

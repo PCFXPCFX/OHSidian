@@ -54,6 +54,53 @@
                 "scheme": "obsidian"
               }
             ]
+          },
+          {
+            // Share target (system share sheet / 华为分享 / 碰一碰). The
+            // system matches the shared UTD types against this declaration,
+            // so every accepted type MUST be enumerated; maxFileSupported
+            // defaults to 0 (= never listed). See docs/DRAG-DROP-INBOUND.md.
+            "actions": [
+              "ohos.want.action.sendData",
+              "ohos.want.action.sendMultipleData"
+            ],
+            "uris": [
+              {
+                "scheme": "file",
+                "utd": "general.image",
+                "maxFileSupported": 9
+              },
+              {
+                "scheme": "file",
+                "utd": "general.video",
+                "maxFileSupported": 9
+              },
+              {
+                "scheme": "file",
+                "utd": "general.audio",
+                "maxFileSupported": 9
+              },
+              {
+                "scheme": "file",
+                "utd": "general.file",
+                "maxFileSupported": 9
+              },
+              {
+                "scheme": "file",
+                "utd": "general.plain-text",
+                "maxFileSupported": 1
+              },
+              {
+                "scheme": "file",
+                "utd": "general.hyperlink",
+                "maxFileSupported": 1
+              },
+              {
+                "scheme": "file",
+                "utd": "general.html",
+                "maxFileSupported": 1
+              }
+            ]
           }
         ],
       },

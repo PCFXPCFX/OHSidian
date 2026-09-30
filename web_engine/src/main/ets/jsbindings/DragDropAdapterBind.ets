@@ -40,8 +40,16 @@ function startDrag(dragParams: OhosDragParamToJs) {
   implDragDropAdapter().startDrag(dragParams);
 }
 
+function ingestExternalContent(xComponentId: string, fileUris: Array<string>, text: string, html: string) {
+  implDragDropAdapter().ingestExternalContent(xComponentId, fileUris, text, html);
+}
+
 export class DragDropAdapterBind {
   static bind() {
     JsBindingUtils.bindFunction('DragDropAdapter.StartDrag', startDrag);
+    // Lets engine-side callers (e.g. a patched asar handling a share /
+    // 碰一碰 delivery) push content into the focused editor without going
+    // through the system drag event flow.
+    JsBindingUtils.bindFunction('DragDropAdapter.IngestExternalContent', ingestExternalContent);
   }
 }

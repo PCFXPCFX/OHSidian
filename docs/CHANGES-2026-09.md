@@ -2504,3 +2504,73 @@ HarmonyOS Sans);设置点选系统字体不再报"不存在"。
   哈希与签名,预置来源不需要被信任;CI runner 出网不受影响;
 - README 构建步骤、项目树注释、DEV-ENV-SETUP 与实际机制对齐;
   DEV-ENV-SETUP 遗留的"状态栏自动隐藏"验证行替换为触屏模式检查。
+
+### 第 79 轮(2026-10-01):外部内容接入——拖入管线修复 + 系统分享目标(Share Kit)+ 拖拽会话重放
+
+**问题一(真机)**:中转站/截图悬浮窗拖**单张**图片进编辑器,弹
+"Open external link?"(file:// 链接),确认与否都插不进去;多张图正常。
+
+根因(引擎把 OhosDropData 拼成 renderer 的 DataTransfer:fileUris →
+File 对象,text/url → 链接;两条解析缺陷 + 一个可读性问题叠加):
+1. `general.file-uri` 记录被"网页图片"短路吞掉——`case UTD_FILE_URI`
+   先用 `getRecordForEntries(UTD_FILE_URI)`(读 records[0] 自己)判断,
+   单条 file-uri 记录恒命中 → URI 永不进 fileUris;多张图走
+   general.image/general.file 记录(FILE 分支 + F17 兜底)所以没事;
+2. hiwrite 单张拖拽常把文件路径放 PlainText,fileUris 为空时引擎把
+   它降级成 uri-list 链接 → 弹窗;
+3. 跨应用沙箱路径(.../appdata/el2/base/com.huawei.hmos.hiwrite/...)
+   在本应用挂载命名空间不可见,引擎读不到只能当链接。
+
+**DragParamManager**:
+- UTD_FILE_URI 短路只在本地拖拽生效(isLocalDrag 由
+  dragSourceWindowId 判定,编辑器内拖图/文本行为不变);record 级
+  兜底(File.uri / Image.imageUri);fileUris 去重;
+- 新增 sanitizeExternalDropData:清空 path-like 的 text/url(file://、
+  /storage/、/data/ 开头),fileUris 为空时从 text/url 提升;逐条
+  可读性检查——本进程按路径可读(共享存储/自身沙箱/引擎临时文件)
+  原样透传(文件管理器拖拽现状不动),不可读(跨应用沙箱)则借拖拽
+  授予的临时 URI 权限 fs.open 复制进 `<cacheDir>/drag-in/`(appdata
+  路径按 /storage/Users/currentUser/appdata/<elN>/base/<bundle>/...
+  → file://<bundle>/data/storage/<elN>/base/... 映射做第二次 open
+  尝试),副本 24h 自动清理,同一毫秒同名副本加序号防覆盖。
+
+**WebAbility.onNewWant**:file:// 的 want.uri 旧逻辑走 openNewWindow
+(永远无效),改为注入编辑器。
+
+**系统分享目标(Share Kit)**:
+- module.json5:EntryAbility 增加 skills
+  ohos.want.action.sendData(+旧版 sendMultipleData),uris 按 UTD
+  穷举并声明 maxFileSupported(不声明默认 0,分享面板不会列出):
+  image/video/audio/file 各 9,plain-text/hyperlink/html 各 1;
+- 接收端三级解析:裸 file:// want.uri → systemShare.getSharedData
+  (@kit.ShareKit 官方接收 API,读 SharedRecord.uri/content,**不依赖
+  发送方私有键名**——真机实测图库分享 URI 在 ability.params.stream,
+  官方解析无感)→ 参数启发式兜底(已知键 + 全 parameters 的
+  path-like 值扫描,未知发送方也能接);
+- 坑:@kit.AbilityKit 重导出的 wantConstant(@ohos.app.ability.
+  wantConstant)只有 ACTION_SEND_TO_DATA,分享 action 常量在旧版
+  @ohos.ability.wantConstant,需单独导入;
+- 冷启动(应用未运行时分享):onCreate 暂存 want,onWindowStageCreate
+  后延迟 15s 一次性派发(引擎与编辑器需要启动时间,尽力而为);
+  热启动经 onAcceptWant 路由到最后活跃窗口即时注入。
+
+**问题二(真机日志复盘)**:分享后"跳转了但没反应"——日志显示解析
+(getSharedData parsed, uris:1)、复制(cache/drag-in/...jpg)、派发
+(OnDropCB into browser1)全部成功,编辑器却无任何反应。结论:引擎
+只为**已有活跃拖拽会话**的窗口合成 renderer 落点,孤立 OnDropCB
+(无前导 enter/move)被静默忽略。
+
+**DragDropAdapter.ingestExternalContent 重放完整拖拽时序**:
+OnDragEnterCB → OnDragMoveCB(可绘制区中心,XComponent 表面像素,
+与真实拖拽 vp2px(windowX)-drawableRect.left 同一坐标系)→ 延时
+80/120ms → OnDropCB。真机复测:图库分享照片即时插入当前笔记 ✓。
+
+**验证要点**:① 中转站拖单张截图,不再弹 "Open external link?",
+直接插入(tag OhosDrag:`sanitizeExternalDropData, copied external
+file into cache`);② 图库分享照片到 Obsidian,应用切前台后图片插入
+当前笔记(`getSharedData parsed, uris:1` → `dispatch drag session`);
+③ 文件管理器拖多张图行为不变(可读源透传,零拷贝);④ 编辑器内
+拖图/拖文本(本地拖拽)不受影响;⑤ 冷启动分享约 15s 后自动插入。
+
+**文档**:新增 docs/DRAG-DROP-INBOUND.md(入站管线 + share-target
+说明),README/README_EN 增"外部内容接入"小节,tablet-demo 增第 10 节。

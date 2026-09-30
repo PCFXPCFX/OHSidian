@@ -62,6 +62,13 @@ export class ContextAdapter extends BaseAdapter {
         this.activeWindow = activeWindow;
     }
 
+    // The engine reports the focused window through ContextAdapter.SetActiveWindow;
+    // callers without their own xComponentId (share targets, 碰一碰 ingestion)
+    // route into the editor through this id.
+    public getActiveWindow(): string {
+        return this.activeWindow;
+    }
+
     public getActiveContext(): Context | undefined {
         let activeProxy = this.abilityManager.getProxy(this.activeWindow);
         if (!activeProxy) {

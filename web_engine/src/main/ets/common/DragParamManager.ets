@@ -67,6 +67,16 @@ const HYPERLINK_DRAG_DEFAULT_TITLE = "ExampleHolder";
 const PLAINTEXT_DRAG_DEFAULT_VALUE = "ExamplePlainText";
 const UTD_FILE_URI = "general.file-uri";
 const TAG: string = 'OhosDrag';
+// Cache subdirectory where files dragged in from OTHER apps (中转站, 碰一碰,
+// share targets) are copied before being handed to the engine: cross-app
+// sandbox paths are not mounted in our namespace, so the engine can only
+// read a copy that lives inside our own sandbox.
+const DRAG_IN_DIRNAME: string = "drag-in";
+const DRAG_IN_STALE_MS: number = 24 * 60 * 60 * 1000;
+// Path segment mapping /storage/Users/currentUser/appdata/<elN>/base/<bundle>/...
+// to the bundle-scoped file URI (file://<bundle>/data/storage/...) that
+// URI-permission grants attach to.
+const APPDATA_PATH_PREFIX: string = "/storage/Users/currentUser/appdata/";
 
 @injectable()
 export class DragParamManager {
@@ -257,10 +267,12 @@ export class DragParamManager {
       webCustomBuffer: new ArrayBuffer(0)
     };
     if (this.dragData && this.dragData.getRecords() && this.dragData.getRecords().length > 0) {
+      // this.dragData is only populated while THIS app drives the drag, so
+      // this branch is by definition a local (self-initiated) drag.
       if (deviceInfo.sdkApiVersion >= 15) {
-        this.handleDropDataFromRecordsForEntries(this.dragData.getRecords(), dropData);
+        this.handleDropDataFromRecordsForEntries(this.dragData.getRecords(), dropData, true);
       } else {
-        this.handleDropDataFromRecords(this.dragData.getRecords(), dropData);
+        this.handleDropDataFromRecords(this.dragData.getRecords(), dropData, true);
       }
       return dropData;
     }
@@ -316,7 +328,7 @@ export class DragParamManager {
     return dropData;
   }
 
-  public handleDropDataForDrop(dragData: UnifiedData) : OhosDropData {
+  public handleDropDataForDrop(dragData: UnifiedData, isLocalDrag: boolean = false) : OhosDropData {
     let dropData: OhosDropData = {
       text: "",
       url: "",
@@ -336,11 +348,211 @@ export class DragParamManager {
       return dropData;
     }
     if (deviceInfo.sdkApiVersion >= 15) {
-      this.handleDropDataFromRecordsForEntries(records, dropData);
+      this.handleDropDataFromRecordsForEntries(records, dropData, isLocalDrag);
     } else {
-      this.handleDropDataFromRecords(records, dropData);
+      this.handleDropDataFromRecords(records, dropData, isLocalDrag);
+    }
+    this.dedupFileUris(dropData);
+    return dropData;
+  }
+
+  private dedupFileUris(dropData: OhosDropData) {
+    let seen = new Set<string>();
+    let unique: Array<string> = [];
+    for (let i = 0; i < dropData.fileUris.length; i++) {
+      let uri = dropData.fileUris[i];
+      if (!uri || seen.has(uri)) {
+        continue;
+      }
+      seen.add(uri);
+      unique.push(uri);
+    }
+    dropData.fileUris = unique;
+  }
+
+  /**
+   * External drops (中转站, 文件管理器, 碰一碰/分享) must reach the engine as
+   * files it can actually read - never as a bare file:// link pointing into
+   * another app's sandbox. The engine builds DataTransfer.files from
+   * `fileUris`; when a uri is unreadable, or fileUris is empty and only the
+   * file location leaked through as plain text, the renderer instead sees a
+   * link, which Obsidian turns into the "Open external link?" prompt and
+   * never inserts anything.
+   */
+  public async sanitizeExternalDropData(dropData: OhosDropData, cacheDir: string): Promise<OhosDropData> {
+    try {
+      let textIsPath = DragParamManager.isPathLikeText(dropData.text);
+      let urlIsPath = DragParamManager.isPathLikeText(dropData.url);
+      if (dropData.fileUris.length === 0 && (textIsPath || urlIsPath)) {
+        // Source apps like hiwrite (single-image drag) often send the file
+        // location as a PlainText record instead of a file record. Promote
+        // it to a real file uri so the engine can build a File from it.
+        dropData.fileUris.push((textIsPath ? dropData.text : dropData.url).trim());
+        LogUtil.info(TAG, `sanitizeExternalDropData, promoted path-like text to fileUris`);
+      }
+      if (textIsPath) {
+        // Otherwise the engine puts the file:// uri into the uri-list and
+        // Obsidian treats the drop as an external link.
+        dropData.text = "";
+      }
+      if (urlIsPath) {
+        dropData.url = "";
+        dropData.urlTitle = "";
+      }
+      if (dropData.fileUris.length === 0) {
+        return dropData;
+      }
+      if (!cacheDir) {
+        LogUtil.warn(TAG, `sanitizeExternalDropData, no cacheDir, skip readability fixups`);
+        this.dedupFileUris(dropData);
+        return dropData;
+      }
+      this.purgeStaleDragInCopies(cacheDir);
+      this.ensureDragInDir(cacheDir);
+      let resolved: Array<string> = [];
+      for (let i = 0; i < dropData.fileUris.length; i++) {
+        let rawUri = dropData.fileUris[i];
+        if (!rawUri) {
+          continue;
+        }
+        let uri = rawUri.trim();
+        try {
+          resolved.push(await this.resolveReadableFileUri(uri, cacheDir, i));
+        } catch (err) {
+          LogUtil.error(TAG, `sanitizeExternalDropData, resolve failed for ${uri}: ${JSON.stringify(err)}`);
+          resolved.push(uri);
+        }
+      }
+      dropData.fileUris = resolved;
+      this.dedupFileUris(dropData);
+    } catch (err) {
+      LogUtil.error(TAG, `sanitizeExternalDropData failed, keep raw drop data: ${JSON.stringify(err)}`);
     }
     return dropData;
+  }
+
+  private static isPathLikeText(value: string): boolean {
+    if (!value) {
+      return false;
+    }
+    let trimmed = value.trim();
+    if (trimmed.length === 0 || trimmed.length > 2048) {
+      return false;
+    }
+    return trimmed.startsWith("file://") || trimmed.startsWith("/storage/") || trimmed.startsWith("/data/");
+  }
+
+  private async resolveReadableFileUri(uri: string, cacheDir: string, index: number): Promise<string> {
+    let filePath = uri.startsWith("file://") ? uri.substring("file://".length) : uri;
+    // Readable by path inside our own process (shared storage, our sandbox,
+    // engine-owned temp files): pass through untouched - file-manager drags
+    // already arrive in this shape and the engine reads them fine.
+    let accessible = false;
+    try {
+      accessible = fs.accessSync(filePath);
+    } catch (err) {
+      accessible = false;
+    }
+    if (accessible) {
+      return uri;
+    }
+    // Cross-app sources (e.g. 中转站 appdata) are not mounted in our
+    // namespace. The drop grants temporary URI permission, so open the file
+    // through its URI and copy the bytes into our cache; the engine then
+    // reads the copy like any local file. The index keeps same-millisecond
+    // copies of identically named files from clobbering each other.
+    let destPath = `${cacheDir}/${DRAG_IN_DIRNAME}/${Date.now()}-${index}-${DragParamManager.baseName(filePath)}`;
+    let source = DragParamManager.openTargetForUri(uri, filePath);
+    try {
+      this.copyViaOpen(source, destPath);
+    } catch (firstErr) {
+      let bundleUri = DragParamManager.bundleScopedUri(filePath);
+      if (!bundleUri || bundleUri === source) {
+        throw firstErr as Error;
+      }
+      LogUtil.info(TAG, `sanitizeExternalDropData, open failed (${JSON.stringify(firstErr)}), retry as ${bundleUri}`);
+      this.copyViaOpen(bundleUri, destPath);
+    }
+    LogUtil.info(TAG, `sanitizeExternalDropData, copied external file into cache: ${destPath}`);
+    return "file://" + destPath;
+  }
+
+  private copyViaOpen(source: string, destPath: string): void {
+    let srcFile = fs.openSync(source, fs.OpenMode.READ_ONLY);
+    try {
+      fs.copyFileSync(srcFile.fd, destPath);
+    } finally {
+      fs.closeSync(srcFile);
+    }
+  }
+
+  private static openTargetForUri(uri: string, filePath: string): string {
+    if (!uri.startsWith("file://")) {
+      return uri;
+    }
+    // "file://<bundle>/data/storage/..." must stay a URI (URI permission is
+    // granted per-uri); "file:///abs/path" (empty authority) is just an
+    // absolute path spelled with a scheme.
+    return uri.startsWith("file:///") ? filePath : uri;
+  }
+
+  private static bundleScopedUri(filePath: string): string {
+    let index = filePath.indexOf(APPDATA_PATH_PREFIX);
+    if (index < 0) {
+      return "";
+    }
+    let relative = filePath.substring(index + APPDATA_PATH_PREFIX.length);
+    // <el1|el2>/base/<bundleName>/<rest> -> file://<bundleName>/data/storage/<elN>/base/<rest>
+    let match = /^(el[12])\/base\/([^/]+)\/(.*)$/.exec(relative);
+    if (!match) {
+      return "";
+    }
+    return `file://${match[2]}/data/storage/${match[1]}/base/${match[3]}`;
+  }
+
+  private static baseName(filePath: string): string {
+    if (!filePath) {
+      return "";
+    }
+    let name = filePath.substring(filePath.lastIndexOf("/") + 1);
+    return name ? name : "file";
+  }
+
+  private ensureDragInDir(cacheDir: string): void {
+    let dir = `${cacheDir}/${DRAG_IN_DIRNAME}`;
+    try {
+      if (!fs.accessSync(dir)) {
+        fs.mkdirSync(dir, true);
+      }
+    } catch (err) {
+      // Already exists or mkdir raced - copyFileSync below surfaces real errors.
+    }
+  }
+
+  private purgeStaleDragInCopies(cacheDir: string): void {
+    let dir = `${cacheDir}/${DRAG_IN_DIRNAME}`;
+    try {
+      if (!fs.accessSync(dir)) {
+        return;
+      }
+      let cutoff = Date.now() - DRAG_IN_STALE_MS;
+      let names = fs.listFileSync(dir);
+      for (let i = 0; i < names.length; i++) {
+        let path = `${dir}/${names[i]}`;
+        try {
+          let stat = fs.statSync(path);
+          // Stat.mtime is seconds on some API levels and ms on others.
+          let mtimeMs = stat.mtime < 100000000000 ? stat.mtime * 1000 : stat.mtime;
+          if (mtimeMs < cutoff) {
+            fs.unlinkSync(path);
+          }
+        } catch (err) {
+          // best effort: unreadable entries are left alone
+        }
+      }
+    } catch (err) {
+      LogUtil.warn(TAG, `purgeStaleDragInCopies failed: ${JSON.stringify(err)}`);
+    }
   }
 
   /**
@@ -348,7 +560,7 @@ export class DragParamManager {
    * @param dragParams Initial drag-and-drop data
    * @returns Drag data required by the drag framework.
    */
-  private handleDropDataFromRecords(records: Array<UDC.UnifiedRecord>, dropData: OhosDropData) {
+  private handleDropDataFromRecords(records: Array<UDC.UnifiedRecord>, dropData: OhosDropData, isLocalDrag: boolean = false) {
     records.forEach((record) => {
       let recordType = record.getType();
       LogUtil.info(TAG, `handleDropDataFromRecords, recordType: ${recordType}`);
@@ -378,12 +590,24 @@ export class DragParamManager {
         case UTD.UniformDataType.VIDEO:
         case UTD.UniformDataType.AUDIO:
         case UTD.UniformDataType.FOLDER:
-          // web page images do not require push filePath
-          let webImage = this.getRecord(UTD.UniformDataType.IMAGE) as UDC.Image;
-          if (!webImage) {
-            let file = record as unifiedDataChannel.File;
-            dropData.fileUris.push(file.uri);
+          if (isLocalDrag) {
+            // web page images do not require push filePath
+            let webImage = this.getRecord(UTD.UniformDataType.IMAGE) as UDC.Image;
+            if (webImage) {
+              break;
+            }
           }
+          if (recordType === UTD.UniformDataType.IMAGE) {
+            // UDC.Image carries imageUri, not uri; casting to File yields
+            // undefined for image records.
+            let imageRecord = record as unifiedDataChannel.Image;
+            if (imageRecord.imageUri) {
+              dropData.fileUris.push(imageRecord.imageUri);
+              break;
+            }
+          }
+          let file = record as unifiedDataChannel.File;
+          dropData.fileUris.push(file.uri);
           LogUtil.info(TAG, `handleDropDataFromRecords, fileUris data length: ${dropData.fileUris.length}`);
           break;
         default:
@@ -399,7 +623,7 @@ export class DragParamManager {
    * @param dragParams Initial drag-and-drop data
    * @returns Drag data required by the drag framework.
    */
-  private handleDropDataFromRecordsForEntries(records: Array<UDC.UnifiedRecord>, dropData: OhosDropData) {
+  private handleDropDataFromRecordsForEntries(records: Array<UDC.UnifiedRecord>, dropData: OhosDropData, isLocalDrag: boolean = false) {
     records.forEach((record) => {
       let entryMap = record.getEntries();
       record.getTypes().forEach((recordType) => {
@@ -441,13 +665,33 @@ export class DragParamManager {
             dropData.webCustomBuffer = webCustomData;
             break;
           case UTD_FILE_URI:
-            // web page images do not require push filePath
-            let webImage = this.getRecordForEntries(UTD_FILE_URI) as uniformDataStruct.FileUri;
-            if (!webImage) {
-              let fileUri = entryMap[UTD_FILE_URI] as uniformDataStruct.FileUri;
-              if (fileUri) {
-                LogUtil.info(TAG, `handleDropDataFromRecordsForEntries, FILE_URI data length: ${fileUri.oriUri.length}`);
-                dropData.fileUris.push(fileUri.oriUri);
+            // Local drags keep the legacy web-image short-circuit: for a web
+            // image dragged out of Obsidian the engine already owns the temp
+            // file and rebuilds the drop from html/text, so the uri must NOT
+            // be pushed. For EXTERNAL sources (中转站, 文件管理器, 碰一碰)
+            // this short-circuit silently ate the uri: a lone general.file-uri
+            // record matches getRecordForEntries() against records[0] (itself),
+            // so the guard was always truthy and the file never reached the
+            // engine - only the path leaked as text, which Obsidian then
+            // offered to "open" instead of inserting.
+            if (isLocalDrag) {
+              let webImage = this.getRecordForEntries(UTD_FILE_URI) as uniformDataStruct.FileUri;
+              if (webImage) {
+                LogUtil.info(TAG, `handleDropDataFromRecordsForEntries, local web image, skip file uri push`);
+                break;
+              }
+            }
+            let extFileUri = entryMap[UTD_FILE_URI] as uniformDataStruct.FileUri;
+            if (extFileUri && extFileUri.oriUri) {
+              LogUtil.info(TAG, `handleDropDataFromRecordsForEntries, FILE_URI data length: ${extFileUri.oriUri.length}`);
+              dropData.fileUris.push(extFileUri.oriUri);
+            } else {
+              let recUri = this.readUriFromRecord(record);
+              if (recUri) {
+                LogUtil.info(TAG, `handleDropDataFromRecordsForEntries, FILE_URI fallback from record, length: ${recUri.length}`);
+                dropData.fileUris.push(recUri);
+              } else {
+                LogUtil.warn(TAG, `handleDropDataFromRecordsForEntries, FILE_URI entry has no oriUri`);
               }
             }
             break;
@@ -468,7 +712,13 @@ export class DragParamManager {
               LogUtil.info(TAG, `handleDropDataFromRecordsForEntries, ${recordType} data length: ${fileEntry.oriUri.length}`);
               dropData.fileUris.push(fileEntry.oriUri);
             } else {
-              LogUtil.warn(TAG, `handleDropDataFromRecordsForEntries, ${recordType} has no file uri entry`);
+              let fileRecUri = this.readUriFromRecord(record);
+              if (fileRecUri) {
+                LogUtil.info(TAG, `handleDropDataFromRecordsForEntries, ${recordType} fallback from record, length: ${fileRecUri.length}`);
+                dropData.fileUris.push(fileRecUri);
+              } else {
+                LogUtil.warn(TAG, `handleDropDataFromRecordsForEntries, ${recordType} has no file uri entry`);
+              }
             }
             break;
           default:
@@ -478,6 +728,22 @@ export class DragParamManager {
       })
     })
     LogUtil.info(TAG, `handleDropDataFromRecordsForEntries, fileUris size: ${dropData.fileUris.length}`);
+  }
+
+  /**
+   * Last-resort uri read: legacy UDC records (new UDC.File()/new UDC.Image())
+   * may surface with an empty entry map, keeping the uri on the record body.
+   */
+  private readUriFromRecord(record: UDC.UnifiedRecord): string {
+    let recordType = record.getType();
+    if (recordType === UTD.UniformDataType.IMAGE) {
+      let imageRecord = record as unifiedDataChannel.Image;
+      if (imageRecord && imageRecord.imageUri) {
+        return imageRecord.imageUri;
+      }
+    }
+    let fileRecord = record as unifiedDataChannel.File;
+    return (fileRecord && fileRecord.uri) ? fileRecord.uri : "";
   }
 
   private handleTextDragDataForEntries(dragParams: OhosDragParamToJs) {

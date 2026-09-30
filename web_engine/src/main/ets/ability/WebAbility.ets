@@ -49,12 +49,24 @@ import { WindowStyle, IStyleData, IUpdateStyle } from '../common/WindowStyle';
 import { CommandType, ConfigData } from '../common/Constants';
 import { PermissionManagerAdapter } from '../adapter/PermissionManagerAdapter';
 import { RunningLockAdapter } from '../adapter/RunningLockAdapter';
+import lazy { DragDropAdapter } from '../adapter/DragDropAdapter';
 import { ConfigurationConstant } from '@kit.AbilityKit';
+// NOTE: the wantConstant re-exported by @kit.AbilityKit (@ohos.app.ability.
+// wantConstant) only knows ACTION_SEND_TO_DATA; the share actions live in
+// the legacy @ohos.ability.wantConstant namespace.
+import wantConstant from '@ohos.ability.wantConstant';
+import { systemShare } from '@kit.ShareKit';
 
 const TAG: string = 'WebAbility';
 
 export class WebAbility extends WebBaseAbility {
   private static WINDOW_CLOSE: number = 1000;
+  // Share / 碰一碰 cold-start handoff: the share want arrives in onCreate,
+  // long before any window or the editor exists. It is stashed here and
+  // dispatched exactly once from onWindowStageCreate (COLD_SHARE_DELAY_MS).
+  private static pendingShareWant: Want | undefined = undefined;
+  private static pendingShareDispatched: boolean = false;
+  private static COLD_SHARE_DELAY_MS: number = 15000;
   private abilityManager: AbilityManager | undefined = undefined;
   private nativeThemeAdapter: NativeThemeAdapter | undefined = undefined;
   // PC-mode (floating windows) state on tablets; kept in sync with the
@@ -845,6 +857,12 @@ export class WebAbility extends WebBaseAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam) {
     super.onCreate(want, launchParam);
 
+    // Cold-start share: remember it, dispatch after the window stage is up
+    // (see the pendingShareWant block in onWindowStageCreate).
+    if (WebAbility.isShareKitWant(want)) {
+      WebAbility.pendingShareWant = want;
+    }
+
     this.abilityManager = Inject.get(AbilityManager);
     this.nativeThemeAdapter = Inject.get(NativeThemeAdapter);
 
@@ -890,6 +908,20 @@ export class WebAbility extends WebBaseAbility {
     // a stale terminating flag (set by the previous last-window shutdown) so
     // future onAcceptWant calls resume the last-active lookup.
     GlobalThisHelper.markAlive();
+
+    if (WebAbility.pendingShareWant && !WebAbility.pendingShareDispatched) {
+      WebAbility.pendingShareDispatched = true;
+      const pending: Want = WebAbility.pendingShareWant;
+      WebAbility.pendingShareWant = undefined;
+      // Best effort: the engine and Obsidian's editor still need a few
+      // seconds after the window stage exists, so dispatch exactly once,
+      // late. If the editor is not mounted yet the drop is lost (logged) -
+      // warm shares via onNewWant have no such gap.
+      setTimeout(() => {
+        LogUtil.info(TAG, 'dispatching cold-start share want');
+        this.ingestSharedWant(pending, []);
+      }, WebAbility.COLD_SHARE_DELAY_MS);
+    }
 
     this.mainWindow = windowStage.getMainWindowSync();
     // Publish the current system font scale once at startup (onConfigur-
@@ -1288,8 +1320,150 @@ export class WebAbility extends WebBaseAbility {
     }
     if (uriNotNull) {
       let uri = want['uri'] as string;
+      if (uri.startsWith('file://')) {
+        // A file:// want.uri is a shared file (华为分享 / 碰一碰 / "其他应用
+        // 打开"), not a web location - opening a new window on it never
+        // produced anything useful. Push it into the focused editor instead.
+        this.ingestSharedWant(want, [uri]);
+        return;
+      }
       this.openNewWindow(uri);
+      return;
     }
+    this.ingestSharedWant(want, []);
+  }
+
+  // ===== Share / 碰一碰 ingestion =====
+  // Routes one want's shared content (files and/or text) into the focused
+  // editor through DragDropAdapter.ingestExternalContent - the same
+  // sanitized pipeline system drags use. See docs/DRAG-DROP-INBOUND.md.
+  // Priority: bare file:// want.uri (directUris) > Share Kit parse
+  // (getSharedData, the official receiver API - no key names involved) >
+  // parameter heuristics (known keys + generic file:// scan).
+  private ingestSharedWant(want: Want, directUris: Array<string>): void {
+    if (directUris.length > 0) {
+      let text = WebAbility.wantSharedText(want);
+      Inject.getOrCreate(DragDropAdapter).ingestExternalContent('', directUris, text, '');
+      return;
+    }
+    if (WebAbility.isShareKitWant(want)) {
+      try {
+        systemShare.getSharedData(want).then((data: systemShare.SharedData) => {
+          let uris: Array<string> = [];
+          let text: string = '';
+          let records = data.getRecords();
+          for (let i = 0; i < records.length; i++) {
+            let record = records[i];
+            if (record.uri && record.uri.length > 0) {
+              uris.push(record.uri);
+            } else if (!text && record.content && record.content.length > 0) {
+              text = record.content;
+            }
+          }
+          LogUtil.info(TAG, 'getSharedData parsed, uris:' + uris.length + ' text length:' + text.length);
+          if (uris.length > 0 || text.length > 0) {
+            Inject.getOrCreate(DragDropAdapter).ingestExternalContent('', uris, text, '');
+          } else {
+            this.ingestSharedWantHeuristics(want);
+          }
+        }).catch((err: BusinessError) => {
+          // Not a Share Kit payload (or parse failed): older senders put the
+          // data straight into want.parameters.
+          LogUtil.info(TAG, 'getSharedData failed, fall back to heuristics: ' + JSON.stringify(err));
+          this.ingestSharedWantHeuristics(want);
+        });
+        return;
+      } catch (err) {
+        LogUtil.info(TAG, 'getSharedData threw, fall back to heuristics: ' + JSON.stringify(err));
+      }
+    }
+    this.ingestSharedWantHeuristics(want);
+  }
+
+  private ingestSharedWantHeuristics(want: Want): void {
+    let uris = WebAbility.wantSharedFileUris(want);
+    let text = WebAbility.wantSharedText(want);
+    if (uris.length > 0 || text.length > 0) {
+      Inject.getOrCreate(DragDropAdapter).ingestExternalContent('', uris, text, '');
+    }
+  }
+
+  private static isShareKitWant(want: Want): boolean {
+    if (!want) {
+      return false;
+    }
+    let action = want.action;
+    return action === wantConstant.Action.ACTION_SEND_DATA
+      || action === wantConstant.Action.ACTION_SEND_MULTIPLE_DATA;
+  }
+
+  private static wantSharedFileUris(want: Want): Array<string> {
+    let uris: Array<string> = [];
+    if (!want || !want.parameters) {
+      return uris;
+    }
+    const keys: Array<string> = ['uris', 'uriList', 'ability.want.params.uris', 'ability.want.params.uriList', 'fileUris'];
+    for (let i = 0; i < keys.length; i++) {
+      let value: Object | undefined = want.parameters[keys[i]];
+      if (Array.isArray(value)) {
+        let list = value as Array<Object>;
+        for (let j = 0; j < list.length; j++) {
+          if (typeof list[j] === 'string' && (list[j] as string).length > 0) {
+            uris.push(list[j] as string);
+          }
+        }
+        if (uris.length > 0) {
+          return uris;
+        }
+      } else if (typeof value === 'string' && (value as string).length > 0) {
+        uris.push(value as string);
+        return uris;
+      }
+    }
+    // Last resort: scan every parameter for path-shaped values, so an
+    // unknown sender (碰一碰 variants, future share sources) still works
+    // without hard-coding its key name. The path filter keeps unrelated
+    // parameters (instance keys, urls, ...) out.
+    const scanKeys: Array<string> = Object.keys(want.parameters);
+    for (let k = 0; k < scanKeys.length; k++) {
+      let scan: Object | undefined = want.parameters[scanKeys[k]];
+      if (typeof scan === 'string' && WebAbility.isPathLikeUri(scan as string)) {
+        uris.push(scan as string);
+        return uris;
+      }
+      if (Array.isArray(scan)) {
+        let list = scan as Array<Object>;
+        for (let j = 0; j < list.length; j++) {
+          if (typeof list[j] === 'string' && WebAbility.isPathLikeUri(list[j] as string)) {
+            uris.push(list[j] as string);
+          }
+        }
+        if (uris.length > 0) {
+          return uris;
+        }
+      }
+    }
+    return uris;
+  }
+
+  private static isPathLikeUri(value: string): boolean {
+    return !!value && (value.startsWith('file://')
+      || value.startsWith('/storage/')
+      || value.startsWith('/data/'));
+  }
+
+  private static wantSharedText(want: Want): string {
+    if (!want || !want.parameters) {
+      return '';
+    }
+    const keys: Array<string> = ['text', 'content', 'ability.want.params.text'];
+    for (let i = 0; i < keys.length; i++) {
+      let value: Object | undefined = want.parameters[keys[i]];
+      if (typeof value === 'string') {
+        return value as string;
+      }
+    }
+    return '';
   }
 
   onPrepareToTerminate(): boolean {
