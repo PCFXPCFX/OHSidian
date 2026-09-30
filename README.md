@@ -302,9 +302,10 @@ JsBindingUtils.bindFunction("CloudSync.listCloudFiles", cloudSyncAdapter.listClo
 git clone https://github.com/PCFXPCFX/OHSidian.git
 cd OHSidian
 
-# 2. 生成 obsidian.asar（从官方源下载并校验 SHA-256 与 RSA 签名，注入运行时补丁；升级内核重跑即可）
-npm ci --prefix scripts
-node scripts/update-obsidian.mjs
+# 2. obsidian.asar 无需手动准备：首次构建会自动从官方源下载并注入补丁
+#    （约 27 MB，一次性；升级内核时手动执行 node scripts/update-obsidian.mjs）
+#    无法直连 GitHub 时：把官方 obsidian-<版本>.asar.gz 放入 scripts/.tmp-update/
+#    再构建——管线总是校验哈希与签名，下载来源不需要被信任
 
 # 3. 安装依赖（在 DevEco Studio 中自动完成，或手动执行）
 hvigorw install
@@ -376,7 +377,7 @@ OHsidian/
 │       └── resources/resfile/resources/app/
 │           ├── main.js               # Electron 启动入口
 │           ├── package.json          # Obsidian 1.13.7 包装配置（版本即 asar 拉取钉子）
-│           └── obsidian.asar         # Obsidian 应用包（不入库，由 scripts/update-obsidian.mjs 生成）
+│           └── obsidian.asar         # Obsidian 应用包（不入库，构建时自动生成）
 │
 ├── electron/                         # HAP 入口模块
 │   ├── oh-package.json5              # 依赖：web_engine（AGC hmcore 已移除）

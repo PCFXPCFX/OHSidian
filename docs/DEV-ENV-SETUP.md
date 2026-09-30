@@ -48,6 +48,13 @@ DevEco Studio 是华为官方 IDE(基于 IntelliJ 平台,和 Android Studio 类�
 
 ## 第 3 步:构建
 
+> **obsidian.asar 首次构建自动生成**:仓库不包含 `obsidian.asar`(它是官方
+> 签名产物加运行时补丁)。首次构建时 hvigor 会自动从官方源下载、校验
+> SHA-256 与 RSA 签名并注入补丁(约 27 MB,一次性)。无法直连 GitHub 时,
+> 把官方 `obsidian-<版本>.asar.gz` 放入 `scripts/.tmp-update/` 后再构建,
+> 管线总是校验哈希与签名,下载来源不需要被信任。升级内核手动执行
+> `node scripts/update-obsidian.mjs`。
+
 DevEco Studio 里:**Build > Build Hap(s)/APP(s) > Build Hap(s)**。
 成功后产物在 `electron/build/default/outputs/default/*.hap`。
 
@@ -72,7 +79,7 @@ hvigorw assembleHap --mode module -p product=default
 | 修改点 | 预期现象 |
 |--------|---------|
 | Obsidian 1.13.7 | 启动后 `帮助 > 关于` 显示 1.13.7;若启动异常,回滚命令见 docs/CHANGES-2026-09.md |
-| 状态栏自动隐藏 | 平板模式进入应用后顶部时间/电量条消失,内容满屏;从屏幕顶缘下拉仍能呼出控制中心 |
+| 触屏模式跟随系统 | 平板切到 PC 窗口模式后界面自动变桌面布局;命令面板可手动切换("OHSidian: 切换触屏模式") |
 | 触摸触发范围 | 按钮更容易按中;若还难按,把 ohsidian-flags.json 的 touchSlopDistance 调大(见 docs/CHANGES-2026-09.md) |
 | 触屏模式 | Ctrl+Shift+P 或侧栏命令面板搜"触屏"或 "touch mode",执行后切换为移动布局 |
 
