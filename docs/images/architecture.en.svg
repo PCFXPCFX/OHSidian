@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="640" viewBox="0 0 920 640">
+<defs><style>text { font-family:'Segoe UI','Microsoft YaHei','PingFang SC','Noto Sans SC',sans-serif; }.title{font-size:21px;font-weight:700;fill:#FFFFFF;text-anchor:middle;}.sub{font-size:14px;fill:#FFFFFF;opacity:.78;text-anchor:middle;}.label{font-size:17px;font-weight:700;fill:#5B21B6;}.chip{font-size:13px;fill:#5B21B6;text-anchor:middle;font-weight:600;}.box{font-size:14px;fill:#4C1D95;text-anchor:middle;font-weight:600;}.mid{font-size:17px;font-weight:700;fill:#FFFFFF;text-anchor:middle;}</style></defs>
+<rect width="920" height="640" fill="#FFFFFF"/>
+<rect x="60" y="20" width="800" height="76" rx="12" fill="#6D28D9"/>
+<text x="460" y="54" class="title">Obsidian 1.13.7</text>
+<text x="460" y="78" class="sub">obsidian.asar · unmodified official app code</text>
+<g stroke="#94A3B8" stroke-width="2" fill="#94A3B8">
+<line x1="460" y1="98" x2="460" y2="112"/>
+<polygon points="454,110 466,110 460,118"/>
+</g>
+<rect x="60" y="120" width="800" height="106" rx="12" fill="#F5F3FF" stroke="#DDD6FE"/>
+<text x="84" y="148" class="label">Electron API Compatibility Layer</text>
+<rect x="84" y="160" width="242" height="48" rx="8" fill="#FFFFFF" stroke="#A78BFA"/>
+<text x="205" y="189" class="box">@electron/remote</text>
+<rect x="338" y="160" width="242" height="48" rx="8" fill="#FFFFFF" stroke="#A78BFA"/>
+<text x="459" y="189" class="box">Node.js Runtime</text>
+<rect x="592" y="160" width="242" height="48" rx="8" fill="#FFFFFF" stroke="#A78BFA"/>
+<text x="713" y="189" class="box">main.js Wrapper</text>
+<g stroke="#94A3B8" stroke-width="2" fill="#94A3B8">
+<line x1="460" y1="234" x2="460" y2="242"/>
+<polygon points="454,240 466,240 460,248"/>
+<polygon points="454,236 466,236 460,228"/>
+</g>
+<rect x="60" y="250" width="800" height="44" rx="10" fill="#8B5CF6"/>
+<text x="460" y="278" class="mid">JSBind Bridge Layer</text>
+<g stroke="#94A3B8" stroke-width="2" fill="#94A3B8">
+<line x1="460" y1="302" x2="460" y2="310"/>
+<polygon points="454,308 466,308 460,316"/>
+<polygon points="454,304 466,304 460,296"/>
+</g>
+<rect x="60" y="318" width="800" height="48" rx="10" fill="#4C1D95"/>
+<text x="460" y="348" class="mid">C++ Native Library libadapter.so · Core system-level API bindings</text>
+<g stroke="#94A3B8" stroke-width="2" fill="#94A3B8">
+<line x1="460" y1="368" x2="460" y2="382"/>
+<polygon points="454,380 466,380 460,388"/>
+</g>
+<rect x="60" y="390" width="800" height="96" rx="12" fill="#F5F3FF" stroke="#DDD6FE"/>
+<text x="84" y="418" class="label">ArkTS Adapter Layer · ~50 adapters</text>
+<rect x="84" y="430" width="100" height="30" rx="15" fill="#EDE9FE" stroke="#C4B5FD"/>
+<text x="134" y="450" class="chip">FileSys</text>
+<rect x="192" y="430" width="100" height="30" rx="15" fill="#EDE9FE" stroke="#C4B5FD"/>
+<text x="242" y="450" class="chip">IME</text>
+<rect x="300" y="430" width="100" height="30" rx="15" fill="#EDE9FE" stroke="#C4B5FD"/>
+<text x="350" y="450" class="chip">Notify</text>
+<rect x="408" y="430" width="100" height="30" rx="15" fill="#EDE9FE" stroke="#C4B5FD"/>
+<text x="458" y="450" class="chip">Theme</text>
+<rect x="516" y="430" width="100" height="30" rx="15" fill="#EDE9FE" stroke="#C4B5FD"/>
+<text x="566" y="450" class="chip">Window</text>
+<rect x="624" y="430" width="100" height="30" rx="15" fill="#EDE9FE" stroke="#C4B5FD"/>
+<text x="674" y="450" class="chip">Device</text>
+<rect x="732" y="430" width="100" height="30" rx="15" fill="#EDE9FE" stroke="#C4B5FD"/>
+<text x="782" y="450" class="chip">Dialog</text>
+<g stroke="#94A3B8" stroke-width="2" fill="#94A3B8">
+<line x1="460" y1="488" x2="460" y2="502"/>
+<polygon points="454,500 466,500 460,508"/>
+</g>
+<rect x="60" y="510" width="800" height="76" rx="12" fill="#334155"/>
+<text x="460" y="544" class="title">HarmonyOS Native Runtime</text>
+<text x="460" y="568" class="sub">Ability · ArkUI · System Service Kits</text>
+</svg>

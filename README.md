@@ -9,13 +9,19 @@
 </p>
 
 <p align="center">
-  在 HarmonyOS 平板 / 2in1 电脑上运行你熟悉的 Obsidian 笔记体验 —— 支持多窗口与完整的系统级原生适配。本 Fork 已完全移除华为云相关功能（云同步 / 华为账号登录 / AGC），详情见下文。<br>仅支持平板与 2in1 电脑，暂不支持手机。
+  <strong>简体中文</strong> | <a href="README_EN.md">English</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/HarmonyOS-6.0.2%2822%29-blue?logo=harmonyos" alt="HarmonyOS" />
+  在 HarmonyOS 平板与 2in1 电脑上，提供与桌面版一致的 Obsidian 笔记体验，支持多窗口与系统级原生适配。<br>
+  本 Fork 已移除华为云相关功能（云同步、华为账号登录、AGC），详见下文。<br>
+  仅支持平板与 2in1 电脑，暂不支持手机。
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/HarmonyOS-6.1.1%2824%29-blue?logo=harmonyos" alt="HarmonyOS" />
   <img src="https://img.shields.io/badge/Obsidian-1.13.7-purple?logo=obsidian" alt="Obsidian" />
-  <img src="https://img.shields.io/badge/ArkTS-API%2022-orange" alt="ArkTS" />
+  <img src="https://img.shields.io/badge/ArkTS-API%2024-orange" alt="ArkTS" />
   <img src="https://img.shields.io/badge/license-BSD%203--Clause-green" alt="License" />
 </p>
 
@@ -25,6 +31,7 @@
 
 - [项目简介](#项目简介)
 - [本 Fork 相对原版的改进](#本-fork-相对原版的改进)
+- [平板功能演示](docs/tablet-demo.md)
 - [技术架构](#技术架构)
 - [功能特性](#功能特性)
 - [模块结构](#模块结构)
@@ -39,17 +46,17 @@
 
 ## 项目简介
 
-**OHsidian** 是 Obsidian 笔记应用在 HarmonyOS（鸿蒙）平台上的非官方移植项目。它并非重新实现 Obsidian，而是通过构建一个完整的 Electron 兼容层，将原版 Obsidian（`obsidian.asar`）运行在 HarmonyOS 原生运行时之上。
+**OHsidian** 是 Obsidian 笔记应用在 HarmonyOS（鸿蒙）平台上的非官方移植项目。它不重新实现 Obsidian，而是构建一个完整的 Electron 兼容层，让原版 Obsidian（`obsidian.asar`）运行在 HarmonyOS 原生运行时之上。
 
-核心思路是：**用 HarmonyOS 原生能力模拟 Electron API 表面**，通过 C++ 原生库（`libadapter.so`）+ ArkTS 适配层 + JSBind 桥接，让 Obsidian 的 Node.js/Electron 运行时在 HarmonyOS 上正常运转。同时，项目深度集成了华为生态能力 —— 账号 Kit、云存储 Kit、状态栏扩展等，让体验更像原生应用。
+核心思路是：**用 HarmonyOS 原生能力模拟 Electron API 表面**。项目通过 C++ 原生库（`libadapter.so`）、ArkTS 适配层与 JSBind 桥接，让 Obsidian 的 Node.js / Electron 运行时在 HarmonyOS 上正常运转；同时深度集成系统级能力（状态栏扩展、输入法框架等），让体验更接近原生应用。
 
-| 项目信息 | |
+| 项目信息 | 内容 |
 |---------|------|
 | 应用 ID | `com.mikannqaq.obsidian` |
-| 版本号 | 1.0.0（versionCode: 1000000） |
-| 目标 SDK | HarmonyOS 6.1.1(24) / API 24(CI 构建组合;兼容 6.0.2(22)) |
-| 目标设备 | 2in1（折叠屏/平板）、平板（不支持手机） |
-| 开发语言 | ArkTS (TypeScript) |
+| 版本号 | 1.0.0（versionCode 为 1000000） |
+| 目标 SDK | HarmonyOS 6.1.1 / API 24 |
+| 目标设备 | 平板、2in1 电脑（不支持手机） |
+| 开发语言 | ArkTS（TypeScript） |
 | 构建系统 | Hvigor |
 | 内核版本 | Obsidian 1.13.7 |
 
@@ -57,86 +64,52 @@
 
 ## 本 Fork 相对原版的改进
 
-本 Fork([PCFXPCFX/OHSidian](https://github.com/PCFXPCFX/OHSidian))基于
-原版([HanversionOvO/OHSidian](https://github.com/HanversionOvO/OHSidian),
-作者 Mikann/MikannQAQ)构建,在其 Electron 兼容层之上做了大量窗口、
-输入、数据与工程化修复。完整变更记录见
-[docs/CHANGES-2026-09.md](docs/CHANGES-2026-09.md)(45 轮,含逐轮审计)。
+本 Fork（[PCFXPCFX/OHSidian][fork]）基于上游仓库（[HanversionOvO/OHSidian][upstream]，OHsidian 原创始人 HanversionOvO，昵称 MikannQAQ）构建，在其 Electron 兼容层之上做了大量窗口、输入、数据与工程化修复。完整变更记录见[变更日志][changes]（45 轮，含逐轮审计）。
+
+平板相关功能的图文与视频演示，见[平板功能演示][tablet-demo]。
 
 ### 窗口与显示
 
-- 按官方沉浸式规范重做窗口链路:layout fullscreen + 真实系统条 insets,
-  触摸模式状态栏/导航条正确避让;修复启动铺不满、底部死区;
-- 引擎只读一次 surface 尺寸:增加几何稳定门控与首启强制整屏,
-  修复首次进入视口超宽、控件超出屏幕;
-- 多窗口(自由窗口):系统标题条 + 内容避让,消除双关闭按钮与白条;
-  恢复矩形超出屏幕时自动钳制到 80% 居中;
-- 触摸/多窗口模式跟随系统 PC 模式开关自动切换。
+- 按官方沉浸式规范重做窗口链路：layout fullscreen 加真实系统条 insets，触摸模式下状态栏与导航条正确避让；修复启动铺不满、底部死区的问题。
+- 引擎只读取一次 surface 尺寸：增加几何稳定门控与首启强制整屏，修复首次进入时视口超宽、控件超出屏幕的问题。
+- 多窗口（自由窗口）：使用系统标题条并做内容避让，消除双关闭按钮与白条；窗口矩形超出屏幕时，自动钳制到屏幕的 80% 并居中。
+- 触摸模式与多窗口模式跟随系统 PC 模式开关自动切换。
 
 ### 输入与首次启动
 
-- 修复触摸模式下仓库切换/管理(绕过引擎有缺陷的原生下拉弹窗);
-- 发布输入法高度(--keyboard-height),移动格式化工具栏(加粗等)
-  正确悬浮在键盘上方;
-- 修复快速开始 "folder not found"(默认仓库重定向到可写目录)。
+- 修复触摸模式下的仓库切换与管理（绕过引擎有缺陷的原生下拉弹窗）。
+- 把输入法高度（`--keyboard-height`）提供给引擎，加粗等格式化工具栏正确悬浮在键盘上方。
+- 修复快速开始的“folder not found”报错（默认仓库重定向到可写目录）。
 
 ### 数据安全与耗电
 
-- 应用内删除强制进入仓库 `.trash` 文件夹(引擎回收站桥在鸿蒙上
-  行为不可控,可能永久删除);
-- 命令面板新增 "迁移仓库到文件管理可见的位置":把仓库(含 .trash)
-  复制到系统文件夹选择器授权的目录,文件管理器/电脑可直接访问
-  (沙箱目录本身无法暴露,这是鸿蒙约束);
-- 自动更新彻底关闭(鸿蒙分发走本仓库 Release);
-- 移除无效的云同步轮询、GNSS 单订阅共享、亮屏锁前台守卫、
-  日志截断——更省电。
+- 应用内删除笔记时，强制进入仓库的 `.trash` 文件夹（引擎回收站桥在鸿蒙上行为不可控，可能永久删除文件）。
+- 命令面板新增“迁移仓库到文件管理可见的位置”：把仓库（含 `.trash`）复制到系统文件夹选择器授权的目录，文件管理器与电脑可以直接访问（沙箱目录本身无法暴露，这是鸿蒙的系统约束）。
+- 关闭自动更新，鸿蒙分发走本仓库 Release。引擎内的更新链路（检测 `obsidian-{version}.asar` 更新包、RSA 校验、热加载）保留，但不会触发，避免无意义的联网探测。升级时，下载新版 Release 包覆盖安装即可。
+- 移除无效的云同步轮询、共享 GNSS 单订阅、亮屏锁前台守卫与日志截断，降低耗电。
 
 ### 深链与工程化
 
-- `obsidian://` 深链桥接:Remotely Save 等插件的浏览器 OAuth 登录可用;
-- GitHub Actions 全自动构建:Release 附 SHA-256/MD5,可选签名、
-  同版双图标发布(OHsidian 图标 / Obsidian 官方图标)与可选变体、
-  SDK 组合与构建模式;
-- **关闭 release 构建的 ArkGuard 混淆**——原版以 release 模式构建会
-  因混淆在启动时闪退,这是本 Fork 能正常分发的关键修复。
+- `obsidian://` 深链桥接：Remotely Save 等插件的浏览器 OAuth 登录可用。
+- GitHub Actions 全自动构建：Release 附 SHA-256 / MD5 校验值，支持可选签名、同版双图标发布（OHsidian 图标 / Obsidian 官方图标）、可选变体，以及 SDK 组合与构建模式选择。
+- 关闭 Release 构建的 ArkGuard 混淆。原版以 Release 模式构建会因混淆在启动时闪退，这是本 Fork 能正常分发的关键修复。
 
 ---
 
 ## 技术架构
 
-```
-┌──────────────────────────────────────────────────────┐
-│                     Obsidian 1.13.7                   │
-│                   (obsidian.asar)                     │
-├──────────────────────────────────────────────────────┤
-│               Electron API Compatibility              │
-│    ┌──────────────┐  ┌──────────────┐                │
-│    │  @electron/   │  │   Node.js    │                │
-│    │    remote     │  │   Runtime    │                │
-│    └──────┬───────┘  └──────┬───────┘                │
-├──────────┼──────────────────┼────────────────────────┤
-│          │     JSBind 桥接层  │                        │
-│          ▼                  ▼                        │
-│  ┌──────────────────────────────────────┐            │
-│  │           C++ libadapter.so           │            │
-│  └──────────────────────────────────────┘            │
-├──────────────────────────────────────────────────────┤
-│               ArkTS 适配层 (~50 Adapters)              │
-│  CloudSync │ FileSys │ Notify │ IME │ Theme │ ...    │
-├──────────────────────────────────────────────────────┤
-│              HarmonyOS Native Runtime                 │
-│   Ability │ ArkUI │ AccountKit │ CloudFoundation     │
-└──────────────────────────────────────────────────────┘
-```
+![OHsidian 分层架构](docs/images/architecture.png)
 
-**分层说明：**
+*图：OHsidian 分层架构。图中已省略华为账号与云存储相关组件（本 Fork 移除）。*
 
-- **Obsidian 层** —— 原版 `obsidian.asar`，未经修改的 Obsidian 1.13.7 应用代码
-- **Electron 兼容层** —— `@electron/remote` 提供 remote 模块 API，`main.js` 负责加载 asar 和更新管理
-- **JSBind 桥接层** —— 连接 JS 运行时与 ArkTS 原生层，将 Electron API 调用转发到对应适配器
-- **C++ 原生库** —— `libadapter.so` 提供核心系统级 API 对接
-- **ArkTS 适配层** —— 约 50 个适配器，将 HarmonyOS API 包装为 Electron 兼容接口
-- **HarmonyOS 底层** —— 系统原生能力：Ability 组件、ArkUI 界面等（华为账号 / 云存储已在本 Fork 移除）
+**分层说明**（自上而下）：
+
+- **Obsidian 层**：原版 `obsidian.asar`，未经修改的 Obsidian 1.13.7 应用代码。
+- **Electron 兼容层**：`@electron/remote` 提供 remote 模块 API，`main.js` 负责加载 asar 与更新管理。
+- **JSBind 桥接层**：连接 JS 运行时与 ArkTS 原生层，把 Electron API 调用转发到对应的适配器。
+- **C++ 原生库**：`libadapter.so` 提供核心系统级 API 对接。
+- **ArkTS 适配层**：约 50 个适配器，把 HarmonyOS API 包装为 Electron 兼容接口。
+- **HarmonyOS 底层**：系统原生能力，包括 Ability 组件、ArkUI 界面等（华为账号与云存储已在本 Fork 移除）。
 
 ---
 
@@ -144,23 +117,28 @@
 
 ### Obsidian 核心体验
 
-- 完整的 Obsidian 1.13.7 笔记编辑与管理功能
-- 所有社区插件和主题的完整兼容
-- 本地 Vault（知识库）的创建、管理与浏览
-- Markdown 实时预览与编辑
-- 图谱视图、反向链接等高级特性
+- 完整的 Obsidian 1.13.7 笔记编辑与管理功能。
+- 兼容全部社区插件与主题。
+- 本地 Vault（知识库）的创建、管理与浏览。
+- Markdown 实时预览与编辑。
+- 图谱视图、反向链接等高级特性。
 
 ### 多窗口支持
 
-- 主窗口、子窗口、嵌入窗口、浮动窗口
-- 窗口位置与大小持久化记忆
-- 独立渲染进程隔离（通过 `ChildProcess`）
-- 状态栏扩展窗口
+- 主窗口、子窗口、嵌入窗口与浮动窗口。
+- 窗口位置与大小持久化记忆。
+- 独立渲染进程隔离（通过 `ChildProcess`）。
+- 状态栏扩展窗口。
 
-### 华为生态集成
+### 平板专属功能
 
-- **华为云功能已移除** —— 本 Fork 出于攻击面与稳定性考虑，移除了云同步（Cloud Foundation Kit）、华为账号一键登录（AGC Account Kit）及 AGC 初始化；相关适配器文件保留为惰性代码，不再接线。状态栏扩展保留。
-- **状态栏扩展** —— 通过 `StatusBarViewExtensionAbility` 常驻系统状态栏
+- 触屏模式跟随系统切换、自由窗口钳制、键盘避让等。
+- 每项功能的图文与视频说明，见[平板功能演示][tablet-demo]。
+
+### 生态集成
+
+- 本 Fork 出于攻击面与稳定性考虑，移除了云同步（Cloud Foundation Kit）、华为账号一键登录（AGC Account Kit）与 AGC 初始化。相关适配器文件保留为惰性代码，不再接线。
+- 状态栏扩展：通过 `StatusBarViewExtensionAbility` 常驻系统状态栏。
 
 ### 系统级原生适配
 
@@ -168,28 +146,21 @@
 |------|---------|
 | 文件系统 | 文件管理器、文件选择器、原生对话框、回收站兼容层 |
 | 输入 | IME 输入法框架、拖拽放置、多点触控 |
-| 显示 | 多显示器管理、深色/浅色主题跟随、自定义光标 |
+| 显示 | 多显示器管理、深色 / 浅色主题跟随、自定义光标 |
 | 通知 | 系统通知推送、锁屏事件监听 |
 | 设备 | 电池状态、蓝牙（经典 + BLE）、电源管理、屏幕截图 |
 | 安全 | 证书管理、生物识别认证、剪贴板访问 |
 | 其他 | 打印服务、文字转语音、OCR 识别、地理定位、外部协议处理 |
 
-### 自动更新
-
-- 本 Fork **关闭了 Obsidian 的自动更新**：鸿蒙分发走本仓库 Release，
-  引擎内的更新链路（检测 `obsidian-{version}.asar` 更新包、RSA 校验、
-  热加载）保留但不会触发，避免无意义的联网探测；
-- 版本升级：下载新版本 Release 包覆盖安装即可。
-
 ---
 
 ## 模块结构
 
-项目采用 HarmonyOS 标准双模块架构：
+项目采用 HarmonyOS 标准双模块架构。
 
 ### `web_engine`（HAR 静态库）
 
-核心引擎模块，提供所有 Electron 兼容功能和适配层。可被其他 HarmonyOS 应用复用。
+核心引擎模块，提供所有 Electron 兼容功能和适配层，可被其他 HarmonyOS 应用复用。
 
 ```typescript
 // 公共导出（Index.ets）
@@ -200,9 +171,9 @@ export { WebWindow, WebSubWindow, WebEmbeddedWindow, WebWindowNode } from './src
 export { WebChildProcess } from './src/main/ets/process/WebChildProcess'
 ```
 
-**依赖注入** —— 使用 InversifyJS 管理约 50 个适配器的单例注册：
+依赖注入使用 InversifyJS 管理约 50 个适配器的单例注册：
 
-```
+```text
 CommonModule  → AbilityManager, DragParamManager, SystemFloatingWindowManager
 AdapterModule → ContextAdapter, DragDropAdapter, MultiInputAdapter,
                 NativeThemeAdapter, PermissionManagerAdapter, DialogAdapter,
@@ -217,7 +188,7 @@ AdapterModule → ContextAdapter, DragDropAdapter, MultiInputAdapter,
 
 | Ability | 页面 | 用途 |
 |---------|------|------|
-| `EntryAbility` | Index.ets | 主入口（本 Fork 已移除华为云/AGC 初始化） |
+| `EntryAbility` | Index.ets | 主入口（本 Fork 已移除华为云 / AGC 初始化） |
 | `BrowserAbility` | WindowNode.ets | 浏览器进程窗口 |
 | `StatelessAbility` | Index.ets | 无状态窗口 |
 | `BrowserEmbeddedAbility` | EmbeddedWindow.ets | 嵌入 UI |
@@ -239,13 +210,13 @@ AdapterModule → ContextAdapter, DragDropAdapter, MultiInputAdapter,
 
 ## 适配层
 
-适配层是 OHsidian 最重要的基础设施 —— 它将 HarmonyOS 原生 API 包装为 Electron 兼容的调用接口，使 Obsidian 在毫无感知的情况下运行在 HarmonyOS 上。
+适配层是 OHsidian 最重要的基础设施：它把 HarmonyOS 原生 API 包装为 Electron 兼容的调用接口，使 Obsidian 在毫无感知的情况下运行在 HarmonyOS 上。
 
 ### 适配器清单
 
 每个适配器都继承自 `BaseAdapter`，通过 InversifyJS 注册为单例，并配有对应的 JSBind 绑定类：
 
-```
+```text
 web_engine/src/main/ets/adapter/
 ├── Accessibility.ets           # 无障碍功能
 ├── AppLifecycle.ets            # 应用生命周期
@@ -299,7 +270,7 @@ web_engine/src/main/ets/adapter/
 
 ### JSBind 绑定机制
 
-每个适配器配有一个 Bind 类，将方法注册到 JS 运行时：
+每个适配器配有一个 Bind 类，把方法注册到 JS 运行时：
 
 ```typescript
 // 示例：CloudSync 适配器的 JSBind 注册
@@ -313,7 +284,6 @@ JsBindingUtils.bindFunction("CloudSync.listCloudFiles", cloudSyncAdapter.listClo
 
 ---
 
-
 ## 构建与运行
 
 ### 环境要求
@@ -321,7 +291,7 @@ JsBindingUtils.bindFunction("CloudSync.listCloudFiles", cloudSyncAdapter.listClo
 | 工具 | 版本要求 |
 |------|---------|
 | DevEco Studio | 5.0.0+ |
-| HarmonyOS SDK | API 22 (6.0.2) |
+| HarmonyOS SDK | API 24（6.1.1） |
 | Node.js | 18.x+ |
 | Hvigor | 5.0.0+ |
 
@@ -329,21 +299,20 @@ JsBindingUtils.bindFunction("CloudSync.listCloudFiles", cloudSyncAdapter.listClo
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/your-username/ohsidian.git
-cd ohsidian
+git clone https://github.com/PCFXPCFX/OHSidian.git
+cd OHSidian
 
-# 2. 安装依赖（在 DevEco Studio 中自动完成）
-#    或手动:
+# 2. 安装依赖（在 DevEco Studio 中自动完成，或手动执行）
 hvigorw install
 
 # 3. 构建 HAP
 hvigorw assembleHap
 
-# 4. 产物位于
+# 4. 构建产物位于
 # build/outputs/default/electron-default-signed.hap
 ```
 
-或者直接在 DevEco Studio 中打开项目，点击 **Build > Build HAP(s)**。
+也可以直接在 DevEco Studio 中打开项目，点击 **Build > Build HAP(s)**。
 
 ### 签名配置
 
@@ -370,11 +339,12 @@ hvigorw assembleHap
 }
 ```
 
+---
 
 ## 项目结构
 
-```
-obsidian/
+```text
+OHsidian/
 ├── AppScope/                         # 全局应用配置
 │   ├── app.json5                     # bundleName、版本、多实例模式
 │   └── resources/base/
@@ -390,7 +360,7 @@ obsidian/
 │   └── src/main/
 │       ├── ets/
 │       │   ├── ability/              # WebAbility、WebEmbeddedAbility 基类
-│       │   ├── adapter/              # ~50 个系统适配器
+│       │   ├── adapter/              # 约 50 个系统适配器
 │       │   ├── application/          # AbilityStage
 │       │   ├── common/               # DI 容器、常量、管理器
 │       │   ├── components/           # WebWindow、WebSubWindow 等 UI 组件
@@ -401,8 +371,8 @@ obsidian/
 │       ├── cpp/types/libadapter/     # C++ 原生库类型声明
 │       └── resources/resfile/resources/app/
 │           ├── main.js               # Electron 启动入口
-│           ├── package.json           # Obsidian 1.13.7 包装配置
-│           └── obsidian.asar          # Obsidian 应用包
+│           ├── package.json          # Obsidian 1.13.7 包装配置
+│           └── obsidian.asar         # Obsidian 应用包
 │
 ├── electron/                         # HAP 入口模块
 │   ├── oh-package.json5              # 依赖：web_engine（AGC hmcore 已移除）
@@ -440,7 +410,6 @@ obsidian/
 | `inversify` | ^6.0.1 | IoC 容器，管理适配器依赖注入 |
 | `reflect-metadata` | ^0.1.13 | TypeScript 装饰器元数据 |
 | `@electron/remote` | ^2.1.3 | Electron remote 模块兼容 |
-
 | `libadapter.so` | — | C++ 原生适配库（本地引用） |
 | `btime` | — | 文件时间处理 |
 | `get-fonts` | — | 系统字体枚举 |
@@ -456,19 +425,29 @@ obsidian/
 
 ## 许可协议
 
-本项目基于 **BSD 3-Clause License** 开源。
+本仓库包含多个来源的代码与二进制文件，许可各不相同，需区分对待。
 
-```
-Copyright (c) 2023-2025, Haitai FangYuan Co., Ltd.
-All rights reserved.
-```
+### 本仓库源码（BSD 3-Clause）
 
-### 第三方许可
+上游项目（[HanversionOvO/OHSidian][upstream]）由 OHsidian 原创始人 HanversionOvO（昵称 MikannQAQ）维护，其源码带有文件级 BSD 3-Clause 声明，版权归 Haitai FangYuan Co., Ltd. 所有（当前约 290 个 `.ets` / `.ts` 文件：`web_engine` 136 个、`electron` 154 个）。本仓库只是上游的一个 Fork，本 Fork 的修改与新增代码同样以 **BSD 3-Clause** 发布，许可全文见 [LICENSE][license-file]。修改上游文件时，请保留原文件头的版权与许可声明。
 
-- **Obsidian** 是其各自所有者的商标，本项目为己编译的 `obsidian.asar` 提供 HarmonyOS 兼容运行环境
-- **Electron** 及 `@electron/remote` 遵循 MIT License
-- **InversifyJS** 遵循 MIT License
-- **Huawei SDK** 各组件遵循华为开发者协议
+### 闭源中间层（libelectron.so）
+
+`electron/libs/arm64-v8a/libelectron.so` 是上游分发的闭源 Electron / Chromium 中间层，无源码。它随上游以 BSD 3-Clause 声明分发，二进制内嵌 BSD 许可文本。
+
+### 专有组件
+
+- Obsidian（`obsidian.asar`）：专有软件，包装层 `package.json` 声明为 UNLICENSED，不受本仓库许可覆盖。Obsidian 及其徽标为对应权利人的商标，本仓库的 asar 为自行编译，仅供在 HarmonyOS 上运行。
+
+### 第三方组件
+
+| 组件 | 许可 | 依据 |
+|------|------|------|
+| Electron 与 `@electron/remote` | MIT | 随附的 LICENSE 文件 |
+| InversifyJS | MIT | npm 包声明 |
+| `reflect-metadata` 0.2.x | Apache-2.0 | 随附的 LICENSE 文件 |
+| `@ohos/hypium` | Apache-2.0 | 模块 `oh-package.json5` |
+| HarmonyOS SDK、Hvigor、DevEco Studio | 华为开发者协议 | 工具链，不随本仓库分发 |
 
 ---
 
@@ -476,13 +455,25 @@ All rights reserved.
 
 本项目站在以下巨人的肩膀上：
 
-- [Obsidian](https://obsidian.md) — 改变知识管理方式的笔记应用
-- [Electron](https://www.electronjs.org) — 跨平台桌面应用框架
-- [HarmonyOS](https://developer.huawei.com/consumer/cn/harmonyos/) — 全场景分布式操作系统
-- [InversifyJS](https://inversify.io) — 强大的 TypeScript IoC 容器
+- [Obsidian][obsidian]：改变知识管理方式的笔记应用。
+- [Electron][electron]：跨平台桌面应用框架。
+- [HarmonyOS][harmonyos]：全场景分布式操作系统。
+- [InversifyJS][inversify]：TypeScript IoC 容器。
 
 ---
 
 <p align="center">
   <sub>OHsidian 是一个社区项目，与 Obsidian 官方无关。</sub>
 </p>
+
+<!-- 参考链接（阮一峰规范：引用式链接，文末统一列出） -->
+
+[fork]: https://github.com/PCFXPCFX/OHSidian
+[upstream]: https://github.com/HanversionOvO/OHSidian
+[changes]: docs/CHANGES-2026-09.md
+[tablet-demo]: docs/tablet-demo.md
+[license-file]: LICENSE
+[obsidian]: https://obsidian.md
+[electron]: https://www.electronjs.org
+[harmonyos]: https://developer.huawei.com/consumer/cn/harmonyos/
+[inversify]: https://inversify.io

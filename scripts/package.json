@@ -1,1 +1,1 @@
-{"name":"ohsidian-tools","private":true,"type":"module","dependencies":{"@electron/asar":"^4.3.0"}}
+{"name":"ohsidian-tools","private":true,"type":"module","scripts":{"render-architecture":"node render-architecture.mjs"},"dependencies":{"@electron/asar":"^4.3.0"}}
