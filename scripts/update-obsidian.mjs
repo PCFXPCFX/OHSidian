@@ -280,15 +280,38 @@ function styleFontFamilyFromCfg(cfg){
 /* The theme font is registered by ArkUI's text engine (TexGine) at runtime
    and is NOT visible to the web engine's Skia font manager (which reads the
    static system font config) - CSS "OhosThemeFont" alone never resolved.
-   Bridge it: ArkTS publishes the theme font's FILE PATH (font.getFontByName
-   -> FontInfo.path) as cfg.themeFontPath; here we read the bytes with Node
-   (same uid that loaded it) and register a real FontFace named
-   OhosThemeFont, which the CSS stack then resolves. Cached per path. */
-var themeFontLoadedPath=null;
+   Bridge it: ArkTS reads the active theme's font manifest from
+   /data/themes/a|b/app/fonts (the same file ArkUI itself renders with -
+   the public font enumeration APIs never expose it), copies the ttf into
+   the app sandbox and publishes cfg.themeFontPath; here we read the bytes
+   with Node (same mechanism as the mode file) and register a real FontFace
+   named OhosThemeFont, which the CSS stack then resolves. Cached per path;
+   an EMPTY path resets to the plain HarmonyOS Sans stack. */
+var themeFontLoadedPath=null,failedThemePaths={};
 function applyThemeFontFace(cfg){
   try{
     var p=cfg&&cfg.themeFontPath;
-    if(!p||p===themeFontLoadedPath)return;
+    if(!p){
+      /* Empty path = the style font was reset to default. Drop the stale
+         face so the default stack falls through to HarmonyOS Sans again
+         (previously the last theme font kept winning forever). */
+      if(themeFontLoadedPath){
+        try{
+          var stale=[];
+          document.fonts.forEach(function(f){if(f.family==="OhosThemeFont")stale.push(f)});
+          for(var di=0;di<stale.length;di++){try{document.fonts.delete(stale[di])}catch(de2){}}
+        }catch(de1){}
+        themeFontLoadedPath=null;lastAppliedStack=null;
+      }
+      return;
+    }
+    if(p===themeFontLoadedPath)return;
+    /* A path whose stat/read/load once failed is never retried: the poll
+       re-runs this every 200ms and a dead file (e.g. the stub the system
+       publishes for the DEFAULT style) would be hammered forever. A real
+       font switch always arrives under a NEW path (per-font copy names),
+       so caching per path never blocks a legitimate load. */
+    if(failedThemePaths[p])return;
     /* Remove stale faces first: FontFaceSet resolves a family to the
        FIRST matching face - without cleanup an old theme font keeps
        winning after the user switches (the reported "切换无效"). */
@@ -301,20 +324,20 @@ function applyThemeFontFace(cfg){
     var st=null;
     try{st=fsMod.statSync(p)}catch(se){
       console.warn("[OHSidian] themeFontPath stat failed:",p,String(se&&se.message||se));
-      themeFontLoadedPath=p; /* missing file: do not hammer it every tick */
+      failedThemePaths[p]=1;
       return;
     }
-    if(!st||!st.size){console.warn("[OHSidian] themeFontPath empty file:",p);themeFontLoadedPath=p;return}
+    if(!st||!st.size){console.warn("[OHSidian] themeFontPath empty file:",p);failedThemePaths[p]=1;return}
     var buf;
     try{buf=fsMod.readFileSync(p)}catch(re){
       console.warn("[OHSidian] themeFontPath read failed (EACCES?):",p,String(re&&re.message||re));
-      themeFontLoadedPath=p;
+      failedThemePaths[p]=1;
       return;
     }
-    if(!buf||!buf.length||typeof FontFace!=="function"){console.warn("[OHSidian] themeFontPath unreadable bytes:",p);return}
+    if(!buf||!buf.length||typeof FontFace!=="function"){console.warn("[OHSidian] themeFontPath unreadable bytes:",p);failedThemePaths[p]=1;return}
     var ff=new FontFace("OhosThemeFont",buf.buffer.slice(buf.byteOffset,buf.byteOffset+buf.byteLength));
     var ok=function(f){try{document.fonts.add(f)}catch(e){}themeFontLoadedPath=p;lastAppliedStack=null;applySystemFonts()};
-    var bad=function(err){console.warn("[OHSidian] theme FontFace load rejected:",p,String(err&&err.message||err));themeFontLoadedPath=null};
+    var bad=function(err){console.warn("[OHSidian] theme FontFace load rejected:",p,String(err&&err.message||err));failedThemePaths[p]=1;themeFontLoadedPath=null};
     var pr=ff.load();
     if(pr&&pr.then){pr.then(ok,bad)}else{ok(ff)}
   }catch(e){
@@ -337,7 +360,15 @@ function applySystemFonts(){
       el.id=FONT_STYLE_ID;
       document.head.appendChild(el);
     }
-    if(el){el.textContent=":root{--font-default:"+stack+"}"}
+    /* Obsidian's app.css declares --font-default ON BODY - a :root-only
+       rule is shadowed for everything inside body (the whole UI), which is
+       why the OhosThemeFont stack never applied (round 74 device report).
+       Declare on both html and body, and !important so the injected <style>
+       wins regardless of its position relative to the app.css <link> (the
+       script evaluates before the head may have finished parsing) and any
+       later-injected theme styles. Obsidian's user font pick lives in the
+       SEPARATE --font-interface-override inline var, so nothing collides. */
+    if(el){el.textContent=":root,body{--font-default:"+stack+"!important}"}
   }catch(e){}
 }
 /* Pure event-driven keyboard handling (docs/window-state-machine.md §7).
@@ -610,41 +641,93 @@ function syncFromSystem(lastWant){
 var lastWant=null;
 try{lastWant=syncFromSystem(lastWant)}catch(e){}
 /* Full system family list for Obsidian's settings font picker (injected
-   into its candidate array by a body patch). */
+   into its candidate array by a body patch). Obsidian's own availability
+   probe (app.js _ne/Wne) measures "abcdefghijklmnopqrstuvwxyz0123456789"
+   and reports 系统中不存在此字体 when the width does not change - which is
+   ALWAYS the case for symbol/emoji fonts (HM Symbol, HMOS Color Emoji
+   Flags: no Latin glyphs at all, so selecting them is useless and only
+   produces the warning). Mirror that exact probe here and filter such
+   families OUT of the picker list: a font that would fail Obsidian's
+   check is simply not offered (round 80, user request). */
+var FONT_PROBE_SAMPLE="abcdefghijklmnopqrstuvwxyz0123456789";
 function refreshSystemFontGlobals(){
   try{
     var c=readMode();
-    if(c&&c.systemFonts)window.__ohsidianSystemFonts=JSON.parse(c.systemFonts);
-    /* Bridge families the web engine cannot resolve: the picker list comes
-       from the ArkTS font manager, but Skia only sees the static system
-       font config - /sys_prod and custom fonts are invisible to it, and
-       picking them warned 系统中不存在此字体. cfg.fontFiles maps each
-       family to its file; probe with canvas and FontFace-load ONLY the
-       unresolved ones (bounded, one-time, cached). */
+    if(c&&c.systemFonts){
+      try{window.__ohsidianSystemFontsRaw=JSON.parse(c.systemFonts)}catch(e1){window.__ohsidianSystemFontsRaw=null}
+    }
+    if(!window.__ohsidianFontUsable)window.__ohsidianFontUsable={};
+    if(!window.__ohsidianFontBridge)window.__ohsidianFontBridge={};
+    var recompute=function(){
+      var raw=window.__ohsidianSystemFontsRaw||[],list=[];
+      for(var i=0;i<raw.length;i++){
+        var f=raw[i];
+        if(window.__ohsidianFontUsable[f]===false)continue;
+        list.push(f);
+      }
+      window.__ohsidianSystemFonts=list;
+    };
+    recompute();
     if(c&&c.fontFiles){
       var map;try{map=JSON.parse(c.fontFiles)}catch(e){map=null}
       if(Array.isArray(map)&&map.length){
-        window.__ohsidianFontBridge={};
         var cv=document.createElement("canvas"),cx=cv.getContext("2d");
-        var sample="OHSidian字体测宽Ag7";
-        var base=0;if(cx){cx.font="48px serif";base=cx.measureText(sample).width}
-        var done=0,pending=0;
-        for(var i=0;i<map.length&&done<80;i++){
+        var base=0;
+        if(cx){cx.font="48px serif";base=cx.measureText(FONT_PROBE_SAMPLE).width}
+        var usable=function(fam){
+          if(!cx)return true;
+          try{
+            cx.font='48px "'+fam+'", serif';
+            return cx.measureText(FONT_PROBE_SAMPLE).width!==base;
+          }catch(e){return true}
+        };
+        var done=0,pending=0,dirty=false;
+        var mark=function(fam,ok){window.__ohsidianFontUsable[fam]=ok;dirty=true};
+        var flush=function(){if(dirty){dirty=false;recompute()}};
+        for(var i=0;i<map.length&&done<400;i++){
           var fam=map[i]&&map[i].f,fp=map[i]&&map[i].p;
-          if(!fam||!fp||window.__ohsidianFontBridge[fam]!==undefined)continue;
+          if(!fam||!fp)continue;
+          if(fp.indexOf('/system/fonts/')===0){
+            /* /system fonts: Skia resolves them natively - no FontFace
+               needed. Probe once (cached): no Latin coverage -> excluded
+               from the picker (symbol/emoji fonts). */
+            if(window.__ohsidianFontUsable[fam]===undefined){
+              mark(fam,usable(fam));
+            }
+            done++;continue;
+          }
+          /* Sandbox-copied style/theme fonts: Skia does not see them, so
+             load the FontFace unconditionally (a probe BEFORE the load
+             would always say "unresolved" and the face would never
+             register), then probe AFTER the load to decide picker
+             visibility. */
+          if(window.__ohsidianFontBridge[fam]!==undefined){
+            continue; /* handled in an earlier refresh */
+          }
           window.__ohsidianFontBridge[fam]=null;
-          var resolves=false;
-          if(cx){try{cx.font='48px "'+fam+'", serif';resolves=Math.abs(cx.measureText(sample).width-base)>0.5}catch(e){}}
-          if(resolves){done++;continue}
           try{
             var buf=require("fs").readFileSync(fp);
-            if(!buf||!buf.length||typeof FontFace!=="function"){done++;continue}
+            if(!buf||!buf.length||typeof FontFace!=="function"){
+              console.warn("[OHSidian] font bridge unusable file:",fam,fp);
+              mark(fam,false);done++;continue
+            }
             var ff=new FontFace(fam,buf.buffer.slice(buf.byteOffset,buf.byteOffset+buf.byteLength));
             pending++;
-            ff.load().then(function(f){try{document.fonts.add(f)}catch(e){}},function(){}).then(function(){pending--;if(pending<=0)lastAppliedStack=null;});
+            (function(fam2,fp2,face){
+              face.load().then(function(f){
+                  try{document.fonts.add(f)}catch(e){}
+                  mark(fam2,usable(fam2));
+                },
+                function(err){console.warn("[OHSidian] font bridge load rejected:",fam2,fp2,String(err&&err.message||err));mark(fam2,false);})
+                .then(function(){pending--;if(pending<=0){lastAppliedStack=null;flush()}});
+            })(fam,fp,ff);
             done++;
-          }catch(e){done++}
+          }catch(e){
+            console.warn("[OHSidian] font bridge read failed:",fam,fp,String(e&&e.message||e));
+            mark(fam,false);done++
+          }
         }
+        flush();
       }
     }
   }catch(e){}

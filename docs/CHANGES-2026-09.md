@@ -2440,6 +2440,124 @@ ArkTS/TexGine 侧,但其中 /sys_prod 与自定义字体对 web 引擎 Skia 的
 "no non-static font path found"(此时只能等华为开放 API,应用回退
 HarmonyOS Sans);设置点选系统字体不再报"不存在"。
 
+### 第 73 轮(2026-10-01):主题字体路径真正打通——复刻 ArkUI 的 /data/themes 清单读取
+
+**第 72 轮日志复盘**:切样式字体后依然是 `CUSTOMIZED font paths: []` →
+`ALL font names: 154` → "no non-static font path found",三条公开枚举
+(CUSTOMIZED/STYLISH/ALL)在此设备上全部拿不到用户主题字体。但同一份
+日志里有一直被忽略的铁证:紧挨着的
+`Ace: font path exist` → `AceFont: LoadThemeFont:shaonianzhangyangsiyiailian.ttf`
+→ `RegisterTypeface: family name: OhosThemeFont`——**ArkUI 自己在本应用
+进程里用普通文件 IO 读到了主题字体并注册成功**。
+
+**源码定位**(arkui_ace_engine,`adapter/ohos/entrance/ace_container.cpp`
+`CheckAndSetFontFamily` + `frameworks/core/common/container.cpp`):
+主题服务把当前激活主题发布到 `/data/themes/a/app` 或 `/data/themes/b/app`
+(A/B 双槽),内含 `flag` 标记、`fonts/` 目录和
+`fonts/manifest.json`(字段 `ttfFileSrc` + `ttfFileSrcExt`);ArkUI 取
+manifest 条目的 basename 拼回 fonts 目录,把 ttf 注册为固定家族
+"OhosThemeFont"。app uid 全程用 POSIX IO 直接读——所以 web 桥可以读
+同一份文件,枚举 API 不给路径根本无所谓。
+
+**ArkTS(WebAbility.ets)**:
+- 新增 `probeThemeManifestFont()`:按 Ace 的顺序探测 a→b 槽(flag+fonts
+  判定激活槽),读 `fonts/manifest.json` 收集 ttfFileSrc/ttfFileSrcExt,
+  按 basename 拼回 fonts 目录取第一个可读的 .ttf/.otf;全程打日志
+  (`theme manifest fonts (槽): [...]`);
+- 新增 `publishThemeFont(src)`:把字体**拷贝进应用沙箱**
+  `filesDir/fonts/theme-font.ttf` 再发布该副本——渲染层 Node fs 已被
+  证明能读 filesDir(ohsidian-mode.json 即在此),/data/themes 对 web
+  进程的可读性则无保证;拷贝失败时退回发布源路径;
+- `publishThemeFontPath` 优先级改为:manifest 探测 → CUSTOMIZED →
+  ALL 描述符(后两条保留兜底);ALL 兜底全部落空时
+  `writeThemeFontPath('')` 显式清空(此前只 warn 不清,切回默认样式
+  会一直沿用旧字体)。
+
+**渲染层(update-obsidian.mjs,applyThemeFontFace)**:themeFontPath
+为空且已有已加载 face 时,删除全部 OhosThemeFont 旧 face、复位
+themeFontLoadedPath/lastAppliedStack——"恢复默认字体"立即回退
+HarmonyOS Sans,不再残留上一个主题字体。
+
+**验证要点**:装新包切样式字体后 hilog 应依次出现
+`theme manifest fonts (/data/themes/a/app): ["shaonianzhangyangsiyiailian.ttf"]`
+→ `theme font copied: ... -> .../files/fonts/theme-font.ttf`
+→ `theme font path published` → 界面约 1s 内跟随系统字体;
+切回"默认"样式应见 `no active theme slot in /data/themes`(或 manifest
+无 ttf)+ 界面立即回 HarmonyOS Sans;设置点选系统字体、自选字体覆盖
+等既有行为不受影响。
+
+### 第 74 轮(2026-10-01):第 73 轮真机日志复盘——拷贝名按字体区分 + manifest 绝对路径兜底
+
+**第 73 轮首次真机日志确认**:链路完全走通——`theme manifest fonts
+(/data/themes/b/app): ["/data/themes/s/online/download/font/hf2183168533/fonts/shaonianzhangyangsiyiailian.ttf"]`
+→ `theme font copied: ... -> /data/storage/el2/base/files/fonts/theme-font.ttf`
+。三个新事实:①激活槽可能是 **b 槽**(a/b 双槽真实存在,不能只看 a);
+②manifest 的 ttfFileSrc 是**绝对路径**(指向按 fontId 组织的下载库
+/data/themes/s/online/download/font/<fontId>/),basename 拼回槽内
+fonts 目录后文件确实存在(硬链接/绑定挂载),第 73 轮的 basename
+处理因此必要;③copy 之后**没有** `theme font path published` 日志——
+writeThemeFontPath 因 cfg 值相同提前返回。
+
+**由此发现的隐患**:所有字体都拷贝到固定文件名 theme-font.ttf,发布
+的路径字符串恒定 → 渲染层 `p===themeFontLoadedPath` 永远跳过 → 从
+字体 A 切到字体 B 时界面永远是 A("切换无效"的变体)。本次日志
+fontId 未变(theme 切换 46→49/暗→亮)所以未复现,但必然踩中。
+
+**修复(WebAbility.ets)**:
+- `publishThemeFont` 拷贝目标改为 `theme-font-<字体文件名>.ttf`——
+  路径随字体变化,渲染层自然重载;同字体重复发布零开销;发布成功后
+  清理其它 `theme-font*` 旧拷贝(listFileSync 失败则保留,不影响主链);
+- `probeThemeManifestFont` 在 basename 拼接解析失败时,直接尝试
+  manifest 条目的原始绝对路径(下载库对 app uid 可读性未证,作为兜底)。
+
+**验证要点**:切样式字体 A→B 应看到 copy 目标文件名随字体变化
+(`theme-font-<B>.ttf`)且 `theme font path published` 跟着变,界面
+跟随 B;切回 A 同理;恢复默认样式回 HarmonyOS Sans 不受影响。
+
+### 第 75 轮(2026-10-01):主题字体"从不生效"的真根因 + 样式字体桥接补全
+
+**用户报告**:①界面仍不显示自定义字体;②设置 → 字体选"正方小标宋-简"
+提示"系统中不存在此字体"。
+
+**根因一(致命,解释了历轮全部失败)**:从 asar 的 app.css 提取确认,
+Obsidian 把 `--font-default` 声明在 **body** 上
+(`body{--font-default: ui-sans-serif,...}`),而第 69 轮以来注入的
+OhosThemeFont 栈一直写在 `:root`(html)上——body 级声明把 :root 级
+对整个 UI 全部遮蔽,**引用 OhosThemeFont 的 CSS 栈从未生效过**;且
+`--font-interface` 链的末端才是 `var(--font-default)`,用户自选字体
+(--font-interface-override)解析失败时沿链回落到的也是被 Obsidian
+遮蔽的原生栈 → 界面永远是 HarmonyOS Sans。
+修复:注入规则改为 `:root,body{--font-default:...!important}`——
+!important 保证注入的 <style> 无论相对 app.css <link> 的位置、以及
+后续主题样式注入顺序如何都必胜;用户自选字体走的是
+--font-interface-override 内联变量,互不冲突。
+
+**根因二**:字体选择器的候选名来自 font.getSystemFontList,但
+cfg.fontFiles(family→文件路径,渲染层 FontFace 桥的数据源)只用
+font.getFontByName 解析——/sys_prod 样式字体(正方小标宋-简即其中
+之一)对 TexGine 静态查询不可见(与第 69 轮
+getFontByName('OhosThemeFont') 失败同理),于是这些字体永远进不了
+fontFiles → 桥不加载 → Obsidian 探测失败报"系统中不存在此字体"。
+修复(WebAbility.ets):
+- publishSystemFonts 改 async:静态解析之后,追加
+  text.getSystemFontFullNamesByType + getFontDescriptorByFullName 的
+  STYLISH 与 ALL 两轮描述符查询(fontFamily 与 fullName 双键入表),
+  把 getFontByName 查不到的字体路径补齐;
+- 写入比较从"仅 systemFonts"改为 systemFonts+fontFiles 双键——否则
+  静态列表不变时路径映射的改进永远写不出去(同样的坑在第 74 轮
+  writeThemeFontPath 也踩过,属同型缺陷)。
+
+**渲染层配套**:FontFace 桥的探测缓存改为跨刷新保留
+(mode 文件每次键盘/安全区推送都会触发 refresh,原实现每次全量重探),
+条目上限 80→400(映射条目翻倍后仍能覆盖)。
+
+**验证要点**:新包启动后 hilog 应见
+`descriptor font files (STYLISH): +N (total M)` 与
+`system fonts published: 154 families, M file mappings`;设置 → 字体
+选"正方小标宋-简"不再报"不存在",界面立即变该字体;选"恢复默认"
+后界面应显示**系统样式字体**(OhosThemeFont 首次真正走到 CSS 栈);
+系统切样式字体,界面 1s 内跟随。
+
 ---
 
 ## 九、文档与构建管线(2026-09-30 ~ 10-01)
@@ -2504,6 +2622,122 @@ HarmonyOS Sans);设置点选系统字体不再报"不存在"。
   哈希与签名,预置来源不需要被信任;CI runner 出网不受影响;
 - README 构建步骤、项目树注释、DEV-ENV-SETUP 与实际机制对齐;
   DEV-ENV-SETUP 遗留的"状态栏自动隐藏"验证行替换为触屏模式检查。
+
+### 第 76 轮(2026-10-01):主题字体跟随打通(真机确认)+ 选择器字体桥接加固
+
+**用户真机确认**:**系统切换字体样式成功,界面跟随**——第 75 轮的
+`:root,body{--font-default:...!important}` 修复生效,困扰十几轮的
+"主题字体不生效"就此关闭。链路完整为:manifest 探测(/data/themes)
+→ 沙箱拷贝 → FontFace(OhosThemeFont)→ CSS 栈(首轮生效)。
+
+**遗留问题**:设置 → 字体里选择其它系统字体仍报"系统中不存在此字体",
+且日志无相关输出。两层定位:
+
+1. **Obsidian 的探测实现**(asar 反解):`_ne()` 用 canvas 测宽——
+   `72px "<family>", <fallback>` 与基线宽度比较,和渲染层桥接的探测
+   **同源**。所以只要 FontFace 注册并加载成功,该探测必过;仍报警告
+   等价于"该家族的 FontFace 没加载成功"。
+2. **桥接失败是静默的**:fontFiles 桥的 readFileSync/FontFace.load
+   失败路径全是空 catch/空 reject 回调——所以"日志没显示"。而主题
+   字体能成(沙箱路径)、选择器字体不成(/system、/sys_prod 原始
+   路径),指向**原始字体目录在 web 渲染进程的 Node fs 里不可读**
+   (SELinux 域差异),以及可能的描述符名与列表名不一致。
+
+**修复**:
+- ArkTS 新增 `sandboxFontCopy(family, path)`:/system/fonts 字体原样
+  通过(Skia 原生可见),**其余(/sys_prod 样式字体等)拷贝进沙箱
+  filesDir/fonts/font-<family>.ttf 再发布**——与主题字体同一机制;
+  目标已存在且尺寸相同则跳过拷贝(每次启动都会跑);
+- `appendDescriptorFontFiles` 接入沙箱拷贝,STYLISH 轮逐条打日志
+  (`stylish mapping: "<fontFamily>" / "<fullName>" -> <path>`),
+  下轮日志可直接核对名字是否与选择器候选一致;
+- **选择器只列出有文件映射的名字**(fontFiles 的键,列表序保持,
+  描述符独有的名字追加在后)——没有映射的名字永远无法渲染,列出来
+  只会报警告;
+- 渲染层桥接失败全部可观测:read 失败、load reject、空文件都打
+  `[OHSidian] font bridge ...` console.warn(并修掉 var 闭包捕获
+  循环变量的老坑,IIFE 逐项固化)。
+
+**验证要点**:新包启动 hilog 应见 `font mappings: N entries,
+pickable names: M` 与 6 条 `stylish mapping: ...`;设置 → 字体选
+"方正小标宋-简"(或任一样式字体)应立即生效且不再报"不存在";
+若仍报警告,抓取含 `[OHSidian] font bridge` 行的日志即可直接定位
+是 read 失败还是 load reject。
+
+### 第 77 轮(2026-10-01):发布链防挂起 + 阶段日志 + 沙箱字体无条件加载
+
+**现象**:选择器选系统字体仍报"系统中不存在此字体",且日志无任何
+记录。两个教训写进设计:
+
+1. **渲染层 console.warn 不进 hilog**——第 76 轮"桥接失败可观测"的
+   假设不成立,渲染层诊断在真机日志里永远看不到,唯一能落 hilog 的
+   是 ArkTS 侧 LogUtil;
+2. **发布链可能被挂起的 native promise 卡死**:publishSystemFonts
+   await 的 `getSystemFontFullNamesByType(STYLISH)` 从未在真机验证过
+   (验证过的只有 `getFontPathsByType`),一旦不 resolve,后续日志与
+   模式文件写入**全部静默不发生**——与"日志没显示"吻合;用户抓的
+   又只是点击窗口(字体日志在启动时打),双重不可见。
+
+**修复(WebAbility.ets)**:
+- `withTimeout<T>`:names 查询 5s、描述符批量 8s,超时回退空值继续;
+- 发布链阶段日志:`publishSystemFonts: begin families=N` →
+  `static pass done, mappings=N` → `descriptor passes done` →
+  `font mappings: N entries, pickable names: M` → `system fonts
+  published`,下一轮启动日志可精确定位卡在哪一级;
+- `sandboxFontCopy` 收窄:仅 /sys_prod 与 /data/* 拷贝,单次启动上限
+  24 个,已存在同尺寸副本则复用。
+
+**修复(渲染层)**:fontFiles 桥对**非 /system/fonts 条目跳过探测、
+无条件 FontFace 加载**——探测与 Obsidian 的 picker 探测同源,若探测
+误判则 face 永不注册、警告永在;沙箱副本数量少(≤24),直接加载
+零风险。/system 字体保留探测跳过(原生可见,避免无谓读盘)。
+
+**验证要点(务必抓启动日志!)**:冷启动后按 tag `WebAbility` 过滤,
+应看到 publishSystemFonts 五级阶段日志;若 `descriptor names empty
+or timed out (STYLISH)` 出现即坐实挂起假设。装新包后选样式字体
+(方正小标宋-简等)应直接生效;若仍报"不存在",启动阶段日志会指明
+是发布链哪一级断了。
+
+### 第 78 轮(2026-10-01):启动竞态——publishSystemFonts 静默空跑 + 默认样式 stub 字体
+
+**新日志(01:53 冷启动)**:用户切回默认样式(fontId 22200001),
+manifest 指向 `/sys_prod/.../font_01/default.ttf`;`theme manifest
+fonts` / `theme font copied` 正常,但**整个启动过程没有
+publishSystemFonts 的任何日志**(含第 77 轮的 begin 阶段日志),而
+同一次启动里 Ace 自己加载 default.ttf 也失败
+(`LoadThemeFont: Failed to load font default.ttf`,ashmem mmap
+EINVAL——空数据)。
+
+**由此确认两个根因**:
+
+1. **启动竞态(解释 75/76 两轮选择器"修复无效")**:onWindowStageCreate
+   里 publishSystemFonts 在 publishThemeFontPath 之前调用,但
+   `getSystemFontList()` 在字体服务未就绪时**返回空数组并静默
+   return**(在 begin 日志之前)——增强版 fontFiles 从未写进模式文件,
+   选择器一直用旧会话的陈旧数据(没有样式字体映射)。字体日志全无
+   之谜终于闭环。
+   - 修复:空列表先回退 **text 引擎 ALL 枚举**(真机已验证:154 个
+     名字)再重试(2s × 5 次,`no font names available (attempt N)`);
+     onFontIdUpdated 时也补一次 publishSystemFonts(此刻字体服务必然
+     就绪);每次尝试都有日志。
+
+2. **默认样式是 stub**:default.ttf 连 Ace 都加载不了(ashmem
+   EINVAL),我们的桥却照常拷贝发布 → 渲染层每 200ms 重试读死文件。
+   - 修复:publishThemeFont 加尺寸门槛(<8KB 视为 stub)→ 发布空
+     路径 → 渲染层回退 HarmonyOS Sans(与系统默认样式行为一致);
+     probeThemeManifestFont 候选同样加 statSync 门槛,让 manifest 里
+     的真字体条目仍可命中;
+   - 渲染层 failedThemePaths 缓存:stat/read/load 失败过的路径不再
+     重试(每 200ms 轮询下不再捶死文件);真实字体切换总是走新路径
+     (按字体命名的拷贝),缓存不会挡住合法加载。
+
+**验证要点**:冷启动(tag WebAbility)必见 publishSystemFonts 五级
+日志之一:理想序列 `publishSystemFonts: begin families=N` →
+`static pass done` → `descriptor passes done` → `font mappings` →
+`system fonts published`;若字体服务未就绪则先见 `no font names
+available (attempt N)` 或 `text engine fallback: N names`。切到默认
+样式应见 `theme font is a stub (... bytes), resetting` 且界面回
+HarmonyOS Sans;选择器选样式字体(方正小标宋-简等)应生效。
 
 ### 第 79 轮(2026-10-01):外部内容接入——拖入管线修复 + 系统分享目标(Share Kit)+ 拖拽会话重放
 
@@ -2574,3 +2808,86 @@ file into cache`);② 图库分享照片到 Obsidian,应用切前台后图片插
 
 **文档**:新增 docs/DRAG-DROP-INBOUND.md(入站管线 + share-target
 说明),README/README_EN 增"外部内容接入"小节,tablet-demo 增第 10 节。
+
+### 第 79 轮(2026-10-01):02:06 启动日志判读——发布链首次端到端跑通,无代码改动
+
+**关键事实(与外部分析结论相反,逐条校正)**:
+
+1. `theme manifest lists no readable ttf` **不是失败**——是第 78 轮的
+   尺寸门槛正确拒绝了默认样式的 stub(default.ttf,连 Ace 都加载不了
+   的占位文件)。默认样式下"无主题字体"就是正确结果。
+2. `getSystemFontList empty, text engine fallback: 154 names` →
+   `publishSystemFonts: begin` → … → `font mappings: 276 entries,
+   pickable names: 276`——**第 78 轮的竞态修复生效,发布链首次完整
+   跑通并写入模式文件**。此前 75/76 两轮的增强数据从未真正落地。
+3. `static pass done, mappings=0`:getFontByName 对回退来的
+   full-name 全部失败(字体服务未就绪/名字形态不匹配),但描述符轮
+   完全补偿:STYLISH 轮 +7(六个内置样式字体的沙箱拷贝:
+   FZXiaoBS-SC/HeiT-SC/ShuS-SC/FT Thymes/FangS-SC/KaiT-SC),ALL 轮
+   +269,共 276 条映射。样式字体首次拥有可用的 family→文件映射。
+4. `not variable font!` 刷屏是引擎枚举字体时的固有噪音(第一次启动
+   日志同样有,只是被抓取窗口截掉),与渲染质量无关。
+5. `no non-static font path found via ALL descriptors`:默认样式下
+   无主题字体 → ALL 兜底穷尽 → `writeThemeFontPath('')` 重置——
+   正确路径,渲染层随之下拉回 HarmonyOS Sans。
+
+**遗留观察项(不阻塞)**:选择器列表将出现 FZXiaoBS-SC 等英文
+postScript 名(描述符不暴露中文名);fontFamily/fullName 双键会让
+个别字体出现两个条目(如 FT Thymes / FT Thymes Regular),纯外观
+问题。沙箱里遗留的 theme-font-default.ttf stub 副本会在下一次发布
+真主题字体时被第 74 轮的清理逻辑顺手删掉。
+
+**下一步验证**:设置 → 字体,列表应出现 276 个名字(含六个样式
+字体英文名);选 FZXiaoBS-SC 应立即生效且无"系统中不存在此字体"
+警告;切回系统样式字体( hf2183168533)主题字体应继续跟随。
+
+### 第 80 轮(2026-10-01):字体链路收官确认 + 选择器剔除符号/表情字体
+
+**用户确认**:系统样式跟随与选择器自选字体均生效,字体链路核心目标
+达成。遗留:部分字体(HM Symbol、HMOS Color Emoji Flags 等)仍提示
+"系统中不存在此字体"。
+
+**根因(测宽探测的固有盲区,非桥接失败)**:Obsidian 的探测样本
+`Wne="abcdefghijklmnopqrstuvwxyz0123456789"`(纯拉丁+数字,app.js 反解
+确认)。符号/表情字体不含任何拉丁字形,样本文本逐字回退后备字体,
+宽度与基线恒等 → 探测必然报"不存在"。这类字体对界面文本毫无用处,
+选了也只有警告。
+
+**修复(渲染层,按用户要求"不能用的就不展示")**:
+- 过滤口径与 Obsidian 探测完全同源(同样本、同测宽法):探测不过的
+  家族从选择器列表剔除——凡是列表里能选到的,选了必然不再报警告;
+- `__ohsidianSystemFontsRaw`(全量)+ `__ohsidianFontUsable`(逐族
+  判定)+ `recompute()` 组合:列表随判定结果实时收敛;
+- /system 字体:原生可见,探测一次即缓存,不再为其加载 FontFace
+  (探测不过=无拉丁覆盖,加载也无意义);沙箱拷贝字体:照旧无条件
+  加载,加载后再探测定列表可见性;
+- 样本即 Obsidian 的 Wne,保证"列表里能选到的=探测必过的"。
+
+**说明**:被剔除的字体本身仍可用(HM Symbol 的图标字形在原生渲染
+下正常),只是不再作为界面字体候选出现;中文名缺失与双条目外观
+问题维持第 79 轮观察,不阻塞。
+
+**验证要点**:新包选择器列表应减少十余条(HM Symbol、HMOS Color
+Emoji* 等消失),其余不变;任选列表内字体不应再出现"系统中不存在
+此字体";样式字体(FZXiaoBS-SC 等)与系统主题字体跟随不受影响。
+
+### 第 81 轮(2026-10-01):字体链路收官(真机全绿)
+
+**用户确认**:①系统切样式字体 → 应用界面跟随 ✓;②Obsidian 设置 →
+字体选择器选系统字体(含样式字体)→ 立即生效、无"系统中不存在此
+字体" ✓;③选择器不再出现符号/表情字体(HM Symbol、HMOS Color
+Emoji Flags 等)✓。
+
+**最终形态**(第 67-80 轮的完整链路):
+- **主题字体跟随**:onFontIdUpdated → /data/themes/a|b/app manifest
+  探测(尺寸门槛拒绝默认样式 stub)→ 沙箱拷贝(按字体命名)→
+  渲染层 FontFace("OhosThemeFont")→ `:root,body{--font-default:...
+  !important}`(关键根因:Obsidian 在 body 上原生定义
+  --font-default,:root 级声明被遮蔽);
+- **选择器桥接**:publishSystemFonts(getSystemFontList,空列表回退
+  text 引擎 ALL 枚举 + 2s×5 重试防启动竞态)→ getFontByName +
+  STYLISH/ALL 描述符补齐 family→文件映射(276 条)→ 非 /system
+  字体沙箱拷贝 → 渲染层无条件 FontFace 加载 → 与 Obsidian 同源
+  测宽探测过滤(符号/表情字体不出现在列表)→ 全部失败路径可观测;
+- **优先级**:用户自选(--font-interface-override)> 系统样式字体
+  (--font-default 栈首 OhosThemeFont)> HarmonyOS Sans。

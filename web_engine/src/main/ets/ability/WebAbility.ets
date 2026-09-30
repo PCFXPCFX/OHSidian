@@ -88,6 +88,11 @@ export class WebAbility extends WebBaseAbility {
   // (no engine binding queries it), so publish it through the mode file and
   // let the renderer scale --font-text-size. 1.0 = default.
   private fontScale: number = 1.0;
+  // Sandbox font copies performed in this ability instance (launch); bounds
+  // publishSystemFonts' copy fan-out (see sandboxFontCopy).
+  private sandboxCopyCount: number = 0;
+  // publishSystemFonts retry counter for the early-startup empty-list race.
+  private systemFontRetries: number = 0;
   private mainWindow: window.Window | undefined = undefined;
 
   // Display-mode state machine (docs/window-state-machine.md is the spec;
@@ -552,7 +557,55 @@ export class WebAbility extends WebBaseAbility {
   // they configured in 系统设置 → 显示与字体 → 字体样式 (or any installed
   // font) to Obsidian's interface/text. The list can be long; cap it and
   // only refresh when it actually changes.
-  private publishSystemFonts(): void {
+  // Fonts outside /system/fonts (style fonts under /sys_prod, runtime theme
+  // fonts) are invisible to the web engine's static font config AND their
+  // raw directories are not guaranteed readable from the web renderer's
+  // Node fs - the sandbox copy is the mechanism that DOES work end to end
+  // (the theme font renders through exactly this path, round 76). /system
+  // fonts resolve natively, so they pass through untouched. Skips the copy
+  // when a same-size copy already exists (startup runs this every launch).
+  private sandboxFontCopy(family: string, sourcePath: string): string {
+    if (sourcePath.startsWith('/system/fonts')) {
+      return sourcePath;
+    }
+    // Only copy the KNOWN Skia-invisible locations (style fonts, theme
+    // store); anything else passes through raw - mass-copying unknown dirs
+    // would be unbounded.
+    const copyable: boolean = sourcePath.startsWith('/sys_prod') || sourcePath.startsWith('/data/');
+    if (!copyable) {
+      return sourcePath;
+    }
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const destDir: string = filesDir + '/fonts';
+      if (!fileIo.accessSync(destDir)) {
+        fileIo.mkdirSync(destDir);
+      }
+      const safe: string = family.replace(/[^0-9A-Za-z.\-\u4e00-\u9fa5]/g, '_');
+      const dest: string = destDir + '/font-' + safe + '.ttf';
+      try {
+        if (fileIo.accessSync(dest) &&
+          fileIo.statSync(sourcePath).size === fileIo.statSync(dest).size) {
+          return dest;
+        }
+      } catch (e) {
+        // stat failed - fall through to copy
+      }
+      if (this.sandboxCopyCount >= 24) {
+        LogUtil.warn(TAG, 'sandbox font copy cap reached, passing raw path: ' + family);
+        return sourcePath;
+      }
+      fileIo.copyFileSync(sourcePath, dest);
+      this.sandboxCopyCount++;
+      LogUtil.info(TAG, 'font copied to sandbox: ' + family + ': ' + sourcePath + ' -> ' + dest);
+      return dest;
+    } catch (e) {
+      LogUtil.warn(TAG, 'sandbox font copy failed (' + family + '): ' + JSON.stringify(e));
+      return sourcePath;
+    }
+  }
+
+  private async publishSystemFonts(): Promise<void> {
     let families: Array<string> = [];
     try {
       const list = font.getSystemFontList();
@@ -561,26 +614,89 @@ export class WebAbility extends WebBaseAbility {
       }
     } catch (exception) {
       LogUtil.warn(TAG, 'getSystemFontList failed: ' + JSON.stringify(exception));
-      return;
     }
     if (families.length === 0) {
+      // Early-startup race: the font service may not be ready when the
+      // window stage is created - getSystemFontList then returns [] and the
+      // whole publish silently never happened (the round 75/76 picker data
+      // stayed stale for exactly this reason: no log, no write). Fall back
+      // to the text engine's ALL enumeration (proven on device: 154 names)
+      // and schedule retries on top.
+      try {
+        const all = await this.withTimeout<Array<string>>(
+          text.getSystemFontFullNamesByType(text.SystemFontType.ALL), 5000, []);
+        if (Array.isArray(all)) {
+          families = all;
+          LogUtil.info(TAG, 'getSystemFontList empty, text engine fallback: ' +
+            families.length + ' names');
+        }
+      } catch (e) {
+        LogUtil.warn(TAG, 'text engine fallback failed: ' + JSON.stringify(e));
+      }
+    }
+    if (families.length === 0) {
+      LogUtil.warn(TAG, 'publishSystemFonts: no font names available (attempt ' +
+        (this.systemFontRetries + 1) + ')');
+      if (this.systemFontRetries < 5) {
+        this.systemFontRetries++;
+        setTimeout(() => {
+          this.publishSystemFonts();
+        }, 2000);
+      } else {
+        LogUtil.error(TAG, 'publishSystemFonts: giving up after retries');
+      }
       return;
     }
+    this.systemFontRetries = 0;
+    LogUtil.info(TAG, 'publishSystemFonts: begin, families=' + families.length);
     // Family-name -> file-path map so the renderer can FontFace-load the
     // families the web engine's Skia manager cannot resolve (the names come
     // from the ArkTS/TexGine side; /sys_prod and custom fonts are invisible
-    // to Skia's static config).
+    // to Skia's static config). font.getFontByName resolves the static
+    // /system fonts only - the style fonts (e.g. 正方小标宋-简 under
+    // /sys_prod) and runtime theme fonts are invisible to it too (same
+    // reason round 69's getFontByName('OhosThemeFont') failed), so fill the
+    // gaps with text-engine descriptor lookups.
     const fontFiles: Array<Record<string, string>> = [];
+    const seen = new Set<string>();
     for (const family of families) {
       try {
         const info = font.getFontByName(family);
         if (info && info.path && info.path.length > 0) {
-          fontFiles.push({ 'f': family, 'p': info.path });
+          fontFiles.push({ 'f': family, 'p': this.sandboxFontCopy(family, info.path) });
+          seen.add(family);
         }
       } catch (e) {
-        // family without a resolvable file - skip
+        // family without a resolvable file - the descriptor pass retries it
       }
     }
+    LogUtil.info(TAG, 'publishSystemFonts: static pass done, mappings=' + fontFiles.length);
+    await this.appendDescriptorFontFiles(fontFiles, seen, text.SystemFontType.STYLISH);
+    await this.appendDescriptorFontFiles(fontFiles, seen, text.SystemFontType.ALL);
+    LogUtil.info(TAG, 'publishSystemFonts: descriptor passes done');
+    // The picker must only offer names the renderer can actually bridge: a
+    // name without a file mapping can never render (Obsidian probes every
+    // entry with the same canvas-width technique as the bridge and warns
+    // 系统中不存在此字体 when it fails). Keep list order for names that
+    // resolved; descriptor-only names (style fonts) append after.
+    const withPath = new Set<string>();
+    for (const f of fontFiles) {
+      withPath.add(f['f']);
+    }
+    const pickable: Array<string> = [];
+    for (const fam of families) {
+      if (withPath.has(fam)) {
+        pickable.push(fam);
+      }
+    }
+    for (const f of fontFiles) {
+      if (pickable.indexOf(f['f']) < 0) {
+        pickable.push(f['f']);
+      }
+    }
+    families = pickable;
+    LogUtil.info(TAG, 'font mappings: ' + fontFiles.length + ' entries, pickable names: ' +
+      families.length);
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
       const filePath: string = filesDir + '/ohsidian-mode.json';
@@ -595,13 +711,18 @@ export class WebAbility extends WebBaseAbility {
       } catch (e) {
         cfg = {};
       }
-      const prev = cfg['systemFonts'] as string | undefined;
-      const nextJson: string = JSON.stringify(families);
-      if (prev !== undefined && prev === nextJson) {
+      const prevFonts = cfg['systemFonts'] as string | undefined;
+      const prevFiles = cfg['fontFiles'] as string | undefined;
+      const nextFontsJson: string = JSON.stringify(families);
+      const nextFilesJson: string = JSON.stringify(fontFiles);
+      // Compare BOTH keys: the list is static while the path map improves
+      // (first run of a build with a better resolver must still publish).
+      if (prevFonts !== undefined && prevFonts === nextFontsJson &&
+        prevFiles !== undefined && prevFiles === nextFilesJson) {
         return;
       }
-      cfg['systemFonts'] = nextJson;
-      cfg['fontFiles'] = JSON.stringify(fontFiles);
+      cfg['systemFonts'] = nextFontsJson;
+      cfg['fontFiles'] = nextFilesJson;
       const file = fileIo.openSync(filePath,
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
       try {
@@ -609,24 +730,255 @@ export class WebAbility extends WebBaseAbility {
       } finally {
         fileIo.closeSync(file);
       }
-      LogUtil.info(TAG, 'system fonts published: ' + families.length + ' families');
+      LogUtil.info(TAG, 'system fonts published: ' + families.length + ' families, ' +
+        fontFiles.length + ' file mappings');
     } catch (err) {
       LogUtil.error(TAG, 'failed to write systemFonts to mode file: ' + JSON.stringify(err));
     }
   }
 
-  // Publishes the theme font's FILE PATH (cfg.themeFontPath). The style
-  // font selected in 系统设置 is registered by ArkUI's TexGine under the
-  // family name "OhosThemeFont" at runtime and is invisible to the web
-  // engine's Skia font manager - but font.getFontByName can hand us the
-  // underlying file, which the renderer loads as a FontFace (same uid
-  // loaded it, so Node fs can read it too).
+  // Bounds a native font-API promise so a hung call cannot stall the whole
+  // publish chain (getSystemFontFullNamesByType(STYLISH) is unproven on
+  // device - if it never settles, the mode file would never be written and
+  // every later stage would silently not happen).
+  private async withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+    return Promise.race<T>([
+      promise,
+      new Promise<T>((resolve: (v: T) => void) => {
+        setTimeout(() => resolve(fallback), ms);
+      }),
+    ]);
+  }
+
+  // Resolves family-name -> file-path entries the static font.getFontByName
+  // query cannot see, via the text engine's descriptor API (the same source
+  // that DID return the /sys_prod style font paths in round 70). Maps both
+  // fontFamily and fullName so either form used by the picker matches.
+  private async appendDescriptorFontFiles(fontFiles: Array<Record<string, string>>,
+    seen: Set<string>, fontType: text.SystemFontType): Promise<void> {
+    let names: Array<string> = [];
+    try {
+      const resolved = await this.withTimeout<Array<string>>(
+        text.getSystemFontFullNamesByType(fontType), 5000, []);
+      if (Array.isArray(resolved)) {
+        names = resolved;
+      }
+    } catch (e) {
+      LogUtil.warn(TAG, 'descriptor names failed (' + fontType + '): ' + JSON.stringify(e));
+      return;
+    }
+    if (names.length === 0) {
+      LogUtil.warn(TAG, 'descriptor names empty or timed out (' + fontType + ')');
+      return;
+    }
+    const lookups: Array<Promise<text.FontDescriptor | null>> = [];
+    for (const nm of names) {
+      lookups.push(text.getFontDescriptorByFullName(nm, fontType)
+        .then((d: text.FontDescriptor): text.FontDescriptor | null => d)
+        .catch((err: BusinessError): text.FontDescriptor | null => null));
+    }
+    let descs: Array<text.FontDescriptor | null> = [];
+    try {
+      descs = await this.withTimeout<Array<text.FontDescriptor | null>>(
+        Promise.all(lookups), 8000, []);
+    } catch (e) {
+      LogUtil.warn(TAG, 'descriptor batch failed (' + fontType + '): ' + JSON.stringify(e));
+      return;
+    }
+    let added: number = 0;
+    for (const d of descs) {
+      if (!d || !d.path || d.path.length === 0) {
+        continue;
+      }
+      const lower: string = d.path.toLowerCase();
+      if (!lower.endsWith('.ttf') && !lower.endsWith('.otf')) {
+        continue;
+      }
+      const resolvedPath: string = this.sandboxFontCopy(d.fontFamily ?? '', d.path);
+      const keys: Array<string> = [d.fontFamily ?? '', d.fullName ?? ''];
+      for (const key of keys) {
+        if (key && key.length > 0 && !seen.has(key)) {
+          seen.add(key);
+          fontFiles.push({ 'f': key, 'p': resolvedPath });
+          added++;
+        }
+      }
+      if (fontType === text.SystemFontType.STYLISH) {
+        LogUtil.info(TAG, 'stylish mapping: "' + (d.fontFamily ?? '') + '" / "' + (d.fullName ?? '') +
+          '" -> ' + resolvedPath);
+      }
+    }
+    LogUtil.info(TAG, 'descriptor font files (' + fontType + '): +' + added +
+      ' (total ' + fontFiles.length + ')');
+  }
+
+  // Mirrors ArkUI's AceContainer::CheckAndSetFontFamily (ace_engine
+  // adapter/ohos/entrance/ace_container.cpp): the theme service publishes
+  // the ACTIVE system theme under /data/themes/a/app or /data/themes/b/app
+  // (A/B slots) - each holds a "flag" marker, a "fonts/" dir and
+  // fonts/manifest.json listing "ttfFileSrc" plus "ttfFileSrcExt". ArkUI
+  // reads them with plain POSIX IO from the app uid (the device run for the
+  // font switch shows exactly this: "font path exist" then
+  // "LoadThemeFont:<file>" in OUR process) and registers the ttf as family
+  // "OhosThemeFont". The public enumeration APIs do NOT expose this file
+  // (device logs: CUSTOMIZED=[], STYLISH=six built-ins, ALL=154 static
+  // families), so read the same manifest ArkUI itself renders with.
+  private probeThemeManifestFont(): string {
+    let slot: string = '';
+    try {
+      if (fileIo.accessSync('/data/themes/a/app/flag') && fileIo.accessSync('/data/themes/a/app/fonts')) {
+        slot = '/data/themes/a/app';
+      }
+    } catch (e) {
+      slot = '';
+    }
+    if (!slot) {
+      try {
+        if (fileIo.accessSync('/data/themes/b/app/flag') && fileIo.accessSync('/data/themes/b/app/fonts')) {
+          slot = '/data/themes/b/app';
+        }
+      } catch (e) {
+        slot = '';
+      }
+    }
+    if (!slot) {
+      LogUtil.info(TAG, 'no active theme slot in /data/themes (a/b both absent)');
+      return '';
+    }
+    const fontsDir: string = slot + '/fonts';
+    try {
+      const manifestPath: string = fontsDir + '/manifest.json';
+      if (!fileIo.accessSync(manifestPath)) {
+        LogUtil.warn(TAG, 'active theme slot has no manifest: ' + manifestPath);
+        return '';
+      }
+      const manifest = JSON.parse(fileIo.readTextSync(manifestPath)) as Record<string, Object>;
+      const entries: Array<string> = [];
+      const mainSrc = manifest['ttfFileSrc'];
+      if (typeof mainSrc === 'string' && (mainSrc as string).length > 0) {
+        entries.push(mainSrc as string);
+      }
+      const extSrcs = manifest['ttfFileSrcExt'];
+      if (Array.isArray(extSrcs)) {
+        for (const item of extSrcs as Array<Object>) {
+          if (typeof item === 'string' && (item as string).length > 0) {
+            entries.push(item as string);
+          }
+        }
+      }
+      LogUtil.info(TAG, 'theme manifest fonts (' + slot + '): ' + JSON.stringify(entries));
+      for (const entry of entries) {
+        // ArkUI joins the manifest entry's BASENAME with the fonts dir.
+        const sep: number = Math.max(entry.lastIndexOf('/'), entry.lastIndexOf('\\'));
+        const name: string = sep >= 0 ? entry.substring(sep + 1) : entry;
+        const lower: string = name.toLowerCase();
+        if (!lower.endsWith('.ttf') && !lower.endsWith('.otf')) {
+          continue;
+        }
+        const candidate: string = fontsDir + '/' + name;
+        try {
+          if (fileIo.accessSync(candidate) && fileIo.statSync(candidate).size >= 8192) {
+            return candidate;
+          }
+        } catch (e) {
+          // not resolvable under the slot (or a stub) - fall through
+        }
+        // Device logs show manifest entries may be ABSOLUTE paths into the
+        // download store (/data/themes/s/online/download/font/<fontId>/...);
+        // try the entry as-is when the basename join did not resolve.
+        if (entry !== candidate) {
+          try {
+            if (fileIo.accessSync(entry) && fileIo.statSync(entry).size >= 8192) {
+              return entry;
+            }
+          } catch (e) {
+            // try the next entry
+          }
+        }
+      }
+      LogUtil.warn(TAG, 'theme manifest lists no readable ttf under ' + fontsDir);
+    } catch (e) {
+      LogUtil.warn(TAG, 'theme manifest read failed (' + slot + '): ' + JSON.stringify(e));
+    }
+    return '';
+  }
+
+  // The style font selected in 系统设置 is registered by ArkUI's TexGine
+  // under the family name "OhosThemeFont" and is invisible to the web
+  // engine's Skia font manager. The renderer loads the file we publish
+  // here as a FontFace with that exact family name, so the CSS stack
+  // ("OhosThemeFont" first) resolves. The renderer reads app-sandbox files
+  // (it already reads ohsidian-mode.json from filesDir), while readability
+  // of /data/themes from the web process is not guaranteed - so publish a
+  // COPY of the font, falling back to the source path if the copy fails.
+  // The copy name is DERIVED FROM THE FONT: the renderer only reloads when
+  // the published PATH STRING changes, so a second font copied over one
+  // fixed name would keep rendering as the previous font (the round-73
+  // device log showed writeThemeFontPath early-returning on the constant
+  // theme-font.ttf name). Stale copies of other fonts are cleaned up.
+  private publishThemeFont(sourcePath: string): void {
+    try {
+      const st = fileIo.statSync(sourcePath);
+      if (!st || st.size < 8192) {
+        // The DEFAULT style "font" (font_01/default.ttf) is a STUB: the
+        // device log shows even Ace fails to load it (ashmem mmap EINVAL on
+        // empty data). Publishing it would leave the renderer retrying a
+        // dead file forever - treat as "no theme font" so the mode file
+        // resets and the UI falls back to HarmonyOS Sans (what the system
+        // itself shows for the default style).
+        LogUtil.warn(TAG, 'theme font is a stub (' + (st ? st.size : -1) +
+          ' bytes), resetting: ' + sourcePath);
+        this.writeThemeFontPath('');
+        return;
+      }
+    } catch (e) {
+      LogUtil.warn(TAG, 'theme font stat failed, publishing anyway: ' + JSON.stringify(e));
+    }
+    let published: string = sourcePath;
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const destDir: string = filesDir + '/fonts';
+      if (!fileIo.accessSync(destDir)) {
+        fileIo.mkdirSync(destDir);
+      }
+      const sep: number = Math.max(sourcePath.lastIndexOf('/'), sourcePath.lastIndexOf('\\'));
+      const base: string = sep >= 0 ? sourcePath.substring(sep + 1) : sourcePath;
+      const dot: number = base.lastIndexOf('.');
+      const stem: string = dot > 0 ? base.substring(0, dot) : base;
+      const dest: string = destDir + '/theme-font-' + stem + (dot > 0 ? base.substring(dot) : '.ttf');
+      fileIo.copyFileSync(sourcePath, dest);
+      published = dest;
+      LogUtil.info(TAG, 'theme font copied: ' + sourcePath + ' -> ' + dest);
+      try {
+        const names: Array<string> = fileIo.listFileSync(destDir);
+        for (const nm of names) {
+          if (nm.startsWith('theme-font') && destDir + '/' + nm !== dest) {
+            try {
+              fileIo.unlinkSync(destDir + '/' + nm);
+            } catch (e) {
+              // stale copy busy or gone - harmless, skip it
+            }
+          }
+        }
+      } catch (e) {
+        // listing unavailable - keep the stale copies
+      }
+    } catch (err) {
+      LogUtil.warn(TAG, 'theme font copy failed, publishing source path: ' + JSON.stringify(err));
+    }
+    this.writeThemeFontPath(published);
+  }
+
   private publishThemeFontPath(): void {
+    // Priority: 1) /data/themes manifest (what ArkUI itself reads);
+    // 2) CUSTOMIZED paths; 3) ALL descriptors minus the static system dirs.
+    const manifestFont: string = this.probeThemeManifestFont();
+    if (manifestFont) {
+      this.publishThemeFont(manifestFont);
+      return;
+    }
+    LogUtil.info(TAG, 'no font from /data/themes manifest, trying font APIs');
     let fontPath: string = '';
-    // Priority: 1) CUSTOMIZED paths; 2) ALL descriptors minus the static
-    // system dirs. Device logs: CUSTOMIZED returns [] and STYLISH only
-    // has the six built-in /sys_prod fonts - the user's theme font is
-    // neither, but ALL covers "user-installed font type" per SDK docs.
     try {
       const custom = text.getFontPathsByType(text.SystemFontType.CUSTOMIZED);
       LogUtil.info(TAG, 'CUSTOMIZED font paths: ' + JSON.stringify(custom));
@@ -642,7 +994,7 @@ export class WebAbility extends WebBaseAbility {
       LogUtil.warn(TAG, 'getFontPathsByType(CUSTOMIZED) failed: ' + JSON.stringify(exception));
     }
     if (fontPath) {
-      this.writeThemeFontPath(fontPath);
+      this.publishThemeFont(fontPath);
       return;
     }
     try {
@@ -653,11 +1005,15 @@ export class WebAbility extends WebBaseAbility {
             pth.startsWith('/system/fonts') || pth.startsWith('/sys_prod');
           const pick = (idx: number): void => {
             if (fontPath) {
-              this.writeThemeFontPath(fontPath);
+              this.publishThemeFont(fontPath);
               return;
             }
             if (idx >= names.length) {
               LogUtil.warn(TAG, 'no non-static font path found via ALL descriptors');
+              // A fontId update fired but no font was found anywhere: reset
+              // the published path so the renderer drops a stale FontFace
+              // and falls back to HarmonyOS Sans (style restored to default).
+              this.writeThemeFontPath('');
               return;
             }
             text.getFontDescriptorByFullName(names[idx], text.SystemFontType.ALL)
@@ -834,6 +1190,9 @@ export class WebAbility extends WebBaseAbility {
       appContext.onSystemConfigurationUpdated({
         onFontIdUpdated: (fontId: string) => {
           LogUtil.info(TAG, 'onFontIdUpdated: ' + fontId);
+          // The font system is provably ready here - a safe moment to
+          // (re)publish the picker data if the early-startup attempt raced.
+          this.publishSystemFonts();
           this.publishFontId(fontId);
           this.publishStyleFonts();
           this.publishThemeFontPath();
