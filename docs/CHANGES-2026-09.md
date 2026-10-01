@@ -2891,3 +2891,40 @@ Emoji Flags 等)✓。
   测宽探测过滤(符号/表情字体不出现在列表)→ 全部失败路径可观测;
 - **优先级**:用户自选(--font-interface-override)> 系统样式字体
   (--font-default 栈首 OhosThemeFont)> HarmonyOS Sans。
+
+### 第 82 轮(2026-10-01):字体日志降噪——发布链每进程一次 + 默认样式跳过枚举
+
+**背景**:功能收官后用户问"显示没问题为什么初始化日志还有错"。判读
+结论:系统模块的 E(Text/2DGraphics/WMS)是"可选路径尝试失败→回退"
+的如实记录,改不了也不必改;但其中两股噪音是**我们自己的代码放大**
+的,可修(不动任何功能):
+
+1. **每次 fontId 更新都完整重跑 154 静态查询 + 154 描述符查询**——
+   每次都触发引擎逐字体加载,即 `not variable font!` 刷屏的放大器,
+   而结果永远相同(系统字体列表运行期不变)。
+   修复:publishSystemFonts 拆为守卫层 + Inner;成功发布一次后
+   (systemFontsPublished)本进程内直接跳过;fontIdUpdated 的补发
+   只为兜启动竞态,竞态不存在时即纯噪音;另加 in-flight 守卫防并发
+   重跑(重试定时器与 onFontIdUpdated 撞车场景)。
+
+2. **默认样式下每轮启动白跑枚举兜底**:manifest 已明确是 stub
+   (default.ttf,连 Ace 都加载不了),CUSTOMIZED/ALL 三条枚举注定
+   空手,却要跑 1-2s 并打误导性 WARN("lists no readable ttf")。
+   修复:probeThemeManifestFont 识别"槽位在、清单解析成功、但全部
+   条目未过尺寸门槛"(manifestFontIsStub),publishThemeFontPath
+   在该场景直接 writeThemeFontPath('') 重置——manifest 是 ArkUI
+   自己渲染所用的权威来源,此时跳过枚举比让陈旧的已安装字体胜出
+   **更正确**;日志改为明确的
+   `theme style is default (stub font), resetting theme font path`。
+
+**不动的东西**(按用户要求,feature 不动):符号/表情字体探测过滤、
+静态 pass(getFontByName,作为描述符失败时的同步兜底保留,代价是
+启动时一次性 ~154 条 not variable font 噪音——每进程仅一次)、
+系统模块自身的 E(Ace/WMS/Text 的回退记录,非我们可控)。
+
+**验证要点**:默认样式下冷启动应看到
+`theme manifest fonts all fail the size gate (default-style stub)`
+→ `theme style is default (stub font), resetting theme font path`,
+且**不再**出现 `ALL font names`/`no non-static font path found`;
+真实主题字体下切换样式仅首次启动跑全量发布链,后续 fontId 更新只见
+`publishSystemFonts: already published this launch, skipping`。

@@ -605,7 +605,39 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
+  // publishSystemFonts completed successfully in this ability instance.
+  private systemFontsPublished: boolean = false;
+  // publishSystemFonts run currently in flight (guards concurrent callers).
+  private systemFontsPublishing: boolean = false;
+  // probeThemeManifestFont outcome: the active theme slot exists and its
+  // manifest parsed, but NO listed font passed the size gate - i.e. the
+  // DEFAULT style, whose font is an empty stub (even Ace cannot load it).
+  private manifestFontIsStub: boolean = false;
+
   private async publishSystemFonts(): Promise<void> {
+    if (this.systemFontsPublished) {
+      // One successful publish per process: the system font list cannot
+      // change while we run, and re-running the static + descriptor passes
+      // re-loads every typeface (the engine logs 'not variable font!' for
+      // each static font) to arrive at an identical mode file. The
+      // onFontIdUpdated re-publish only exists to catch the early-startup
+      // race; once published it is pure noise.
+      LogUtil.info(TAG, 'publishSystemFonts: already published this launch, skipping');
+      return;
+    }
+    if (this.systemFontsPublishing) {
+      LogUtil.info(TAG, 'publishSystemFonts: run already in progress, skipping');
+      return;
+    }
+    this.systemFontsPublishing = true;
+    try {
+      await this.publishSystemFontsInner();
+    } finally {
+      this.systemFontsPublishing = false;
+    }
+  }
+
+  private async publishSystemFontsInner(): Promise<void> {
     let families: Array<string> = [];
     try {
       const list = font.getSystemFontList();
@@ -719,6 +751,7 @@ export class WebAbility extends WebBaseAbility {
       // (first run of a build with a better resolver must still publish).
       if (prevFonts !== undefined && prevFonts === nextFontsJson &&
         prevFiles !== undefined && prevFiles === nextFilesJson) {
+        this.systemFontsPublished = true;
         return;
       }
       cfg['systemFonts'] = nextFontsJson;
@@ -730,6 +763,7 @@ export class WebAbility extends WebBaseAbility {
       } finally {
         fileIo.closeSync(file);
       }
+      this.systemFontsPublished = true;
       LogUtil.info(TAG, 'system fonts published: ' + families.length + ' families, ' +
         fontFiles.length + ' file mappings');
     } catch (err) {
@@ -824,6 +858,7 @@ export class WebAbility extends WebBaseAbility {
   // (device logs: CUSTOMIZED=[], STYLISH=six built-ins, ALL=154 static
   // families), so read the same manifest ArkUI itself renders with.
   private probeThemeManifestFont(): string {
+    this.manifestFontIsStub = false;
     let slot: string = '';
     try {
       if (fileIo.accessSync('/data/themes/a/app/flag') && fileIo.accessSync('/data/themes/a/app/fonts')) {
@@ -896,7 +931,11 @@ export class WebAbility extends WebBaseAbility {
           }
         }
       }
-      LogUtil.warn(TAG, 'theme manifest lists no readable ttf under ' + fontsDir);
+      // Every listed font failed the size gate: the active style is the
+      // DEFAULT one, whose font is an empty stub (device-verified: even
+      // Ace's own LoadThemeFont fails on it with ashmem EINVAL).
+      this.manifestFontIsStub = true;
+      LogUtil.info(TAG, 'theme manifest fonts all fail the size gate (default-style stub)');
     } catch (e) {
       LogUtil.warn(TAG, 'theme manifest read failed (' + slot + '): ' + JSON.stringify(e));
     }
@@ -975,6 +1014,18 @@ export class WebAbility extends WebBaseAbility {
     const manifestFont: string = this.probeThemeManifestFont();
     if (manifestFont) {
       this.publishThemeFont(manifestFont);
+      return;
+    }
+    if (this.manifestFontIsStub) {
+      // DEFAULT style: no theme font exists at all. The enumeration APIs
+      // provably return nothing for theme fonts on this device (CUSTOMIZED
+      // is [], ALL is static-only), so reset straight to HarmonyOS Sans
+      // instead of burning a 154-descriptor sweep (and its 'not variable
+      // font!' log spam) on every launch. The manifest is what ArkUI
+      // itself renders with, so trusting it here is MORE correct than
+      // letting a stale user-installed font win.
+      LogUtil.info(TAG, 'theme style is default (stub font), resetting theme font path');
+      this.writeThemeFontPath('');
       return;
     }
     LogUtil.info(TAG, 'no font from /data/themes manifest, trying font APIs');
