@@ -88,7 +88,9 @@ This fork ([PCFXPCFX/OHSidian][fork]) builds on the upstream repository ([Hanver
 
 ### Data Safety and Power
 
-- In-app deletions are forced into the vault's `.trash` folder (the engine's trash bridge behaves unpredictably on HarmonyOS and may delete files permanently).
+- In-app deletions always go to the trash and are never permanently deleted outright. HarmonyOS exposes no system recycle-bin API to third-party apps and the engine's trash bridge behaves unpredictably, so deletion is rewritten as a local move.
+- The trash destination is redirected to `Documents/OHSidianTrash/<vault>/`, which the Files app can see. The vault-internal `.trash` is a dot-folder that file managers hide, leaving deleted files unreachable.
+- 60 seconds after every startup the trash is auto-purged: files older than 30 days are deleted and empty directories pruned.
 - New command-palette action "Migrate vault to a location visible in Files": copies the vault (including `.trash`) to a directory authorized via the system folder picker, so the Files app and a connected PC can access it directly (the sandbox directory itself cannot be exposed — this is a HarmonyOS constraint).
 - Auto-update is disabled; HarmonyOS distribution goes through this repository's Releases. The in-engine update path (checking `obsidian-{version}.asar` update packages, RSA verification, hot-loading) is retained but never triggers, avoiding pointless network probing. To upgrade, download the new Release package and install it over the existing app.
 - Removed useless cloud-sync polling, the shared single-subscription GNSS listener, screen-on foreground guards, and log truncation — less battery drain.
@@ -109,7 +111,7 @@ This fork ([PCFXPCFX/OHSidian][fork]) builds on the upstream repository ([Hanver
 
 **Layer breakdown** (top to bottom):
 
-- **Obsidian layer**: the official obsidian-1.13.7.asar signed artifact (SHA-256 and official RSA-SHA256 verified at download time), with runtime compatibility patches injected by the `scripts/update-obsidian.mjs` pipeline (IPC guard, `obsidian://` deep-link bridge, touch-mode adaptation, default-vault redirect, auto-update disable); the note-editing core is untouched. Obsidian is proprietary software copyrighted by its owners; this repository is unaffiliated with them.
+- **Obsidian layer**: the official obsidian-1.13.7.asar signed artifact (SHA-256 and official RSA-SHA256 verified at download time), with runtime compatibility patches injected by the `scripts/update-obsidian.mjs` pipeline (IPC guard, `obsidian://` deep-link bridge, touch-mode adaptation, default-vault redirect, trash relocation with 30-day purge, CLI server socket redirect, auto-update disable); the note-editing core is untouched. Obsidian is proprietary software copyrighted by its owners; this repository is unaffiliated with them.
 - **Electron compatibility layer**: `@electron/remote` provides the remote module API; `main.js` loads the asar and manages updates.
 - **JSBind bridge layer**: connects the JS runtime to the ArkTS native layer, forwarding Electron API calls to the matching adapters.
 - **C++ native library**: `libadapter.so` provides core system-level API bindings.
@@ -139,6 +141,27 @@ This fork ([PCFXPCFX/OHSidian][fork]) builds on the upstream repository ([Hanver
 
 - Touch mode following the system switch, free-window clamping, keyboard avoidance, and more.
 - Each feature has a text-and-video walkthrough in the [Tablet Feature Demo][tablet-demo] (in Chinese).
+
+### File Deletion and Trash
+
+When a note is deleted, the file is moved to `Documents/OHSidianTrash/<vault>/`, preserving its path relative to the vault root. The directory is a sibling of the vaults: Obsidian neither indexes nor syncs it, and the Files app shows it directly.
+
+60 seconds after every startup, the app scans `Documents/OHSidianTrash/` and every vault's `.trash`, deletes files older than 30 days (by modification time), and prunes empty directories.
+
+| Action | How |
+|------|------|
+| Restore | In the Files app, move the file back to its original path in the vault; Obsidian re-indexes it automatically |
+| Permanently delete | Delete manually in the Files app; there is no second-level trash |
+| Duplicate names | Deleting a same-named file again appends a sequence number, e.g. `Note (2).md` |
+
+Notes:
+
+- Deletion only replaces the file move; Obsidian's index and delete-dialog logic are untouched. If the move fails, it falls back to the vault-internal `.trash`.
+- The trash directory appears after the first deleted file.
+- Do not open `OHSidianTrash` as a vault. If opened by mistake, exit the vault and delete the `.obsidian` folder inside it.
+- Legacy files in a vault-internal `.trash` are aged by their content modification time, so the first purge removes anything older than 30 days; newly deleted files are aged from the moment of deletion.
+
+The implementation lives in `scripts/update-obsidian.mjs`: the renderer patch replaces the move target of `adapter.trashLocal`, and the main-process patch runs the scheduled purge.
 
 ### Ecosystem Integration
 
