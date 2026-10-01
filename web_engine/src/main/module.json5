@@ -58,6 +58,7 @@
         "reason": "$string:download_dir",
         "usedScene": {
           "abilities": [
+            "EntryAbility",
             "FormAbility"
           ],
           "when":"always"
@@ -68,6 +69,7 @@
         "reason": "$string:documents_dir",
         "usedScene": {
           "abilities": [
+            "EntryAbility",
             "FormAbility"
           ],
           "when":"always"
@@ -78,6 +80,7 @@
         "reason": "$string:desktop_dir",
         "usedScene": {
           "abilities": [
+            "EntryAbility",
             "FormAbility"
           ],
           "when":"always"

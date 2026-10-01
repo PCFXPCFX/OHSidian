@@ -50,7 +50,7 @@ import { CommandType, ConfigData } from '../common/Constants';
 import { PermissionManagerAdapter } from '../adapter/PermissionManagerAdapter';
 import { RunningLockAdapter } from '../adapter/RunningLockAdapter';
 import lazy { DragDropAdapter } from '../adapter/DragDropAdapter';
-import { ConfigurationConstant } from '@kit.AbilityKit';
+import { ConfigurationConstant, common } from '@kit.AbilityKit';
 // NOTE: the wantConstant re-exported by @kit.AbilityKit (@ohos.app.ability.
 // wantConstant) only knows ACTION_SEND_TO_DATA; the share actions live in
 // the legacy @ohos.ability.wantConstant namespace.
@@ -1405,7 +1405,11 @@ export class WebAbility extends WebBaseAbility {
         }
       };
       dirRequests.forEach((permType: string) => {
-        Inject.get(PermissionManagerAdapter).requestPermissions(permType,
+        // The ability context directly: requestPermissions() resolves it via
+        // ContextAdapter.getActiveContext(), which is only set once the
+        // renderer calls setActiveWindow - too late for startup requests.
+        Inject.get(PermissionManagerAdapter).requestPermissionsForContext(
+          this.context, permType,
           (granted: number) => {
             if (granted === 0) {
               LogUtil.info(TAG, 'startup permission granted: ' + permType);
@@ -1418,7 +1422,7 @@ export class WebAbility extends WebBaseAbility {
       });
     }
     // Diagnostic: dump the device shape - the mode branches below gate on it.
-    LogUtil.error(TAG, 'diagnostic: deviceType=' + deviceInfo.deviceType +
+    LogUtil.info(TAG, 'diagnostic: deviceType=' + deviceInfo.deviceType +
       ', sdkApiVersion=' + deviceInfo.sdkApiVersion);
     // Layout fullscreen BEFORE loadContent (official immersive step 1), for
     // the TOUCH form factor only. API 24 tablets reject the call ("device

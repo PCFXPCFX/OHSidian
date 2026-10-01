@@ -41,7 +41,7 @@ import { fileShare } from '@kit.CoreFileKit';
 import preferences from '@ohos.data.preferences';
 import prompt from '@ohos.promptAction'
 import { promptAction } from '@kit.ArkUI';
-import { Want } from '@kit.AbilityKit';
+import { Want, common } from '@kit.AbilityKit';
 
 const CONFIRM: number = 0;
 const ERROR: number = -1;
@@ -132,9 +132,26 @@ export class PermissionManagerAdapter extends BaseAdapter {
       callback(REQUEST_PERMISSION_FAIL);
       return;
     }
+    this.requestPermissionsForContext(activeContext as common.UIAbilityContext,
+      permissionType, callback);
+  }
+
+  // Startup requests fire before the renderer registers the active window -
+  // ContextAdapter.getActiveContext() stays unset until setActiveWindow, so
+  // the JSBind-bound requestPermissions above always fails with code=-2
+  // during onWindowStageCreate. Those requests must carry the ability
+  // context explicitly (this method is ArkTS-only, not exposed to JS).
+  requestPermissionsForContext(context: common.UIAbilityContext,
+    permissionType: string, callback: (granted: number) => void) {
+    const permissions = this.needPermissions.get(permissionType);
+    if (!permissions) {
+      LogUtil.error(TAG, 'unsupported permission:' + permissionType);
+      callback(REQUEST_PERMISSION_FAIL);
+      return;
+    }
 
     try {
-      this.atManager.requestPermissionsFromUser(activeContext, permissions || [])
+      this.atManager.requestPermissionsFromUser(context, permissions || [])
         .then((data) => {
           let grantStatus: Array<number> = data.authResults;
           for (let i = 0; i < grantStatus.length; i++) {
@@ -146,13 +163,13 @@ export class PermissionManagerAdapter extends BaseAdapter {
           }
           callback(REQUEST_PERMISSION_SUCCESS);
         }).catch((err: BusinessError) => {
-        LogUtil.error(TAG, 'Request permissions is failed, type:' + permissionType + 
+        LogUtil.error(TAG, 'Request permissions is failed, type:' + permissionType +
         ', err:BusinessError: ' + JSON.stringify(err));
         callback(REQUEST_PERMISSION_FAIL);
       });
     } catch (err) {
-      LogUtil.error(TAG, 'Request permissions is failed, type:' + permissionType + 
-        ', err:' + JSON.stringify(err));
+      LogUtil.error(TAG, 'Request permissions is failed, type:' + permissionType +
+      ', err:' + JSON.stringify(err));
       callback(REQUEST_PERMISSION_FAIL);
     }
   }

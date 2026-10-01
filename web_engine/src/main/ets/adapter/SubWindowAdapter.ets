@@ -361,6 +361,9 @@ export class SubWindowAdapter extends BaseAdapter {
       }
       // Engine updates can arrive with missing geometry ({}); NaN arithmetic
       // would make WMS reject the calls. Only apply fields that are present.
+      // isNaN cannot detect missing fields - ArkTS isNaN does NOT coerce
+      // (Number.isNaN semantics), undefined passes it - so the position
+      // check compares against 0 like the createSubWindow guard above.
       if (r && r.width > 0 && r.height > 0) {
         windowClass?.resize(r.width, r.height, (err) => {
           if (err.code) {
@@ -369,7 +372,7 @@ export class SubWindowAdapter extends BaseAdapter {
           }
         });
       }
-      if (r && !isNaN(r.left) && !isNaN(r.top)) {
+      if (r && r.left >= 0 && r.top >= 0) {
         windowClass?.moveWindowTo(r.left, r.top, (err) => {
           if (err.code) {
             LogUtil.error(TAG, 'Failed to move the subwindow. Cause:' + JSON.stringify(err));

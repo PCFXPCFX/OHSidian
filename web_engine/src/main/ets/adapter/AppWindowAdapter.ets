@@ -357,6 +357,15 @@ export class AppWindowAdapter extends BaseAdapter {
     context?.showAbility().then(() => {
       LogUtil.info(TAG, `showAbility success`);
     }).catch((err: BusinessError) => {
+      // This WMS build rejects showAbility's internally-attached StartOptions
+      // with 16000067 (the same quirk the LaunchHelper retry ladder works
+      // around, docs/CHANGES-2026-09.md rounds 22/31). At startup the
+      // ability is already foreground, so the rejected call is a no-op -
+      // expected, not an error.
+      if (err.code === 16000067) {
+        LogUtil.info(TAG, 'showAbility rejected by WMS (16000067), window left as-is');
+        return;
+      }
       LogUtil.error(TAG, `showAbility fail, err: ${JSON.stringify(err)}`);
     });
   }
@@ -447,15 +456,20 @@ export class AppWindowAdapter extends BaseAdapter {
     // moving/resizing with NaN gets rejected by the system (1300010). Treat
     // missing width/height as "keep the current rect" and fill missing
     // position fields from the current rect.
-    if (isNaN(bounds.width) || isNaN(bounds.height)) {
-      LogUtil.error(TAG, 'setBounds without geometry, keeping current rect');
+    // isNaN cannot detect those missing fields: ArkTS isNaN does NOT coerce
+    // (Number.isNaN semantics), so isNaN(undefined) is false and {} used to
+    // reach moveWindowToAsync and die with 1300010. Comparisons do catch
+    // undefined (undefined > 0 is false), same idiom as the
+    // SubWindowAdapter.createSubWindow guard.
+    if (!(bounds.width > 0) || !(bounds.height > 0)) {
+      LogUtil.error(TAG, 'setBounds without usable geometry, keeping current rect');
       callback && callback();
       return;
     }
-    if (isNaN(bounds.left)) {
+    if (!(bounds.left >= 0)) {
       bounds.left = windowProp?.windowRect.left || 0;
     }
-    if (isNaN(bounds.top)) {
+    if (!(bounds.top >= 0)) {
       bounds.top = windowProp?.windowRect.top || 0;
     }
 

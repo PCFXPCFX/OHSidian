@@ -174,7 +174,7 @@ export class ElectronAppAdapter extends BaseAdapter {
       return;
     }
     displayClass.getAvailableArea().then((availArea) => {
-      LogUtil.error(TAG, 'getAvailableArea success. Area: ' + JSON.stringify(availArea));
+      LogUtil.info(TAG, 'getAvailableArea success. Area: ' + JSON.stringify(availArea));
       callback(availArea);
     }).catch((err: BusinessError) => {
       LogUtil.error(TAG, 'getAvailableArea failed. Cause: ' + JSON.stringify(err));
