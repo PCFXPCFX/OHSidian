@@ -100,7 +100,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: scripts/.tmp-update
-          key: obsidian-asar-${{ steps.obsidian.outputs.version }}
+          # S-N10: the cert hash is part of the key - a rotated/changed
+          # pinned cert must not reuse a cached download verified by the
+          # OLD cert.
+          key: obsidian-asar-${{ steps.obsidian.outputs.version }}-${{ hashFiles('scripts/cert-obsidian.pem') }}
+
+      # S-N11: fail loudly if the pinned cert was ever swapped in a PR.
+      # Rotation is a deliberate, documented act: update CERT_SHA256 below
+      # in the same commit as the new scripts/cert-obsidian.pem.
+      - name: Verify pinned cert hash
+        env:
+          CERT_SHA256: 'f38d398e140113c116da69753eace2824774b5524b76e8aad09513fd3c583b8a'
+        run: echo "$CERT_SHA256  scripts/cert-obsidian.pem" | sha256sum -c -
 
       - name: Install scripts dependencies
         run: npm ci --prefix scripts
@@ -136,18 +147,31 @@ jobs:
           URL_PATH="${URL_FULL%%\?*}"
           case "$URL_PATH" in
             *.tar.gz|*.tgz)
-              curl -fL --retry 3 -o "$RUNNER_TEMP/ctl.tar.gz" "$URL_FULL"
-              tar -xzf "$RUNNER_TEMP/ctl.tar.gz" -C "$RUNNER_TEMP/ctl"
+              ARCHIVE="$RUNNER_TEMP/ctl.tar.gz"
+              curl -fL --retry 3 -o "$ARCHIVE" "$URL_FULL"
+              tar -xzf "$ARCHIVE" -C "$RUNNER_TEMP/ctl"
               ;;
             *.zip)
-              curl -fL --retry 3 -o "$RUNNER_TEMP/ctl.zip" "$URL_FULL"
-              unzip -q "$RUNNER_TEMP/ctl.zip" -d "$RUNNER_TEMP/ctl"
+              ARCHIVE="$RUNNER_TEMP/ctl.zip"
+              curl -fL --retry 3 -o "$ARCHIVE" "$URL_FULL"
+              unzip -q "$ARCHIVE" -d "$RUNNER_TEMP/ctl"
               ;;
             *)
               echo "::error::Cannot detect archive type from HARMONYOS_CLI_URL path: $URL_PATH (expected .tar.gz or .zip)"
               exit 1
               ;;
           esac
+          # S-N12: the CLI tools execute arbitrary build code, and the URL
+          # is plain HTTPS (a compromised CDN/DNS is enough). Pin the
+          # archive's sha256 once in the repository variable
+          # HARMONYOS_CLI_SHA256 (Settings > Variables); CI then fails on
+          # any mismatch. Unset = warned, not enforced.
+          CLI_SHA256="${{ vars.HARMONYOS_CLI_SHA256 }}"
+          if [ -n "$CLI_SHA256" ]; then
+            echo "$CLI_SHA256  $ARCHIVE" | sha256sum -c -
+          else
+            echo "::warning::HARMONYOS_CLI_SHA256 is not set - the command-line-tools download is UNVERIFIED (DNS/CDN hijack would run arbitrary code in CI). Compute 'sha256sum' of the archive once and set the repository variable to enforce it."
+          fi
           # Anchor on the SDK itself: hvigor validates DEVECO_SDK_HOME
           # against the real SDK directory, so locate it directly instead
           # of guessing from the hvigorw path (layout differs per version).

@@ -141,7 +141,7 @@ function isVersionLess(a, b) {
  *    migration, system fonts).
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
-if(window.__ohsidianTouchPatch==="13")return;window.__ohsidianTouchPatch="13";
+if(window.__ohsidianTouchPatch==="14")return;window.__ohsidianTouchPatch="14";
 /* Keep the renderer's view of the Electron major consistent with the main
    process shim: app.js requires >= 28.2.3 (Iie) before it stops showing the
    "manual update" notice. Replace the whole versions object - mutating the
@@ -166,6 +166,24 @@ function readMode(){
     var txt=require("fs").readFileSync(dir+MODE_FILE,"utf8");
     return JSON.parse(txt);
   }catch(e){return null}
+}
+/* Atomic mode-file publish (H1): writeFileSync truncates first, so a crash
+   (or a concurrent ArkTS reader) could observe an empty/partial file between
+   truncate and write. Write the temp file first, then rename over the
+   target - rename is atomic on the same filesystem, matching the ArkTS
+   side's publishModeFileAtomic. */
+function writeModeFileSync(cfg){
+  var fsMod=require("fs");
+  var dir=dataDir();if(!dir)return false;
+  var p=dir+MODE_FILE,tmp=p+".tmp";
+  try{
+    fsMod.writeFileSync(tmp,JSON.stringify(cfg,null,2),"utf8");
+    try{fsMod.renameSync(tmp,p)}catch(eR){
+      fsMod.writeFileSync(p,JSON.stringify(cfg,null,2),"utf8");
+      try{fsMod.unlinkSync(tmp)}catch(eU){}
+    }
+    return true;
+  }catch(e){return false}
 }
 /* Round 87 (B2): window geometry lives per window under cfg.windows[<OHOS
    window id>] - concurrent windows used to clobber each other's top-level
@@ -393,13 +411,23 @@ function styleFontFamilyFromCfg(cfg){
    named OhosThemeFont, which the CSS stack then resolves. Cached per path;
    an EMPTY path resets to the plain HarmonyOS Sans stack. */
 var themeFontLoadedPath=null,failedThemePaths={};
+/* F-N1: monotonically increasing request token. Two applyThemeFontFace runs
+   may overlap when the style font flips twice within one 200ms poll - the
+   first load's ok callback then fires AFTER the second request started and
+   add()ed a SECOND OhosThemeFont face (CSS resolves a family to the first
+   matching face, so the old font kept winning). The token invalidates the
+   stale callback. */
+var themeFontRequestSeq=0;
 function applyThemeFontFace(cfg){
   try{
     var p=cfg&&cfg.themeFontPath;
     if(!p){
       /* Empty path = the style font was reset to default. Drop the stale
          face so the default stack falls through to HarmonyOS Sans again
-         (previously the last theme font kept winning forever). */
+         (previously the last theme font kept winning forever). Bump the
+         request token too: a load still in flight would otherwise re-add
+         its face AFTER this reset (round-94 self-audit). */
+      themeFontRequestSeq++;
       if(themeFontLoadedPath){
         try{
           var stale=[];
@@ -441,8 +469,18 @@ function applyThemeFontFace(cfg){
     }
     if(!buf||!buf.length||typeof FontFace!=="function"){console.warn("[OHSidian] themeFontPath unreadable bytes:",p);failedThemePaths[p]=1;return}
     var ff=new FontFace("OhosThemeFont",buf.buffer.slice(buf.byteOffset,buf.byteOffset+buf.byteLength));
-    var ok=function(f){try{document.fonts.add(f)}catch(e){}themeFontLoadedPath=p;lastAppliedStack=null;applySystemFonts()};
-    var bad=function(err){console.warn("[OHSidian] theme FontFace load rejected:",p,String(err&&err.message||err));failedThemePaths[p]=1;themeFontLoadedPath=null};
+    var reqSeq=++themeFontRequestSeq;
+    var ok=function(f){
+      if(reqSeq!==themeFontRequestSeq)return; /* superseded by a newer request */
+      try{document.fonts.add(f)}catch(e){}
+      themeFontLoadedPath=p;lastAppliedStack=null;applySystemFonts();
+    };
+    var bad=function(err){
+      console.warn("[OHSidian] theme FontFace load rejected:",p,String(err&&err.message||err));
+      failedThemePaths[p]=1;
+      if(reqSeq!==themeFontRequestSeq)return; /* a newer request owns the state */
+      themeFontLoadedPath=null;
+    };
     var pr=ff.load();
     if(pr&&pr.then){pr.then(ok,bad)}else{ok(ff)}
   }catch(e){
@@ -646,7 +684,24 @@ function hookTrash(){
           name=String(name).replace(/[\\\/:*?\"<>|]/g,"_").replace(/^\.+$/,"_")||"vault";
           var src=pathMod.join(base,rel);
           if(!fsMod.existsSync(src))return origLocal.call(ad,rel);
-          var destDir=pathMod.join(docs,"OHSidianTrash",name,pathMod.dirname(rel));
+          /* S2: canonicalize and confine. rel comes from vault.trash
+             (normalized), but a plugin can call adapter.trashLocal directly
+             with ".." segments; unchecked, pathMod.join would resolve them
+             OUTSIDE the trash root and scatter files across Documents. The
+             containment check anchors on trashRoot/<vault> (NOT trashRoot):
+             rel=".." would resolve to exactly trashRoot and pass a
+             root-anchored check, while src=join(base,"..") renamed the
+             vault's PARENT directory into the trash. Strict containment
+             also rejects rel="." (degenerate) - both fall back to the
+             stock trashLocal. */
+          var trashRoot=pathMod.resolve(docs,"OHSidianTrash");
+          var targetRoot=pathMod.resolve(trashRoot,name);
+          var resolvedTrash=pathMod.resolve(targetRoot,rel);
+          if(resolvedTrash.indexOf(targetRoot+pathMod.sep)!==0){
+            try{console.warn("[OHSidian] trash relocate refused escaping path, local fallback:",rel)}catch(eW){}
+            return origLocal.call(ad,rel);
+          }
+          var destDir=pathMod.join(targetRoot,pathMod.dirname(rel));
           fsMod.mkdirSync(destDir,{recursive:true});
           var ext=pathMod.extname(src);
           var stem=pathMod.basename(src,ext);
@@ -656,8 +711,16 @@ function hookTrash(){
           }
           fsMod.renameSync(src,dest);
           /* Stamp deletion time: rename keeps the old mtime, and the purge
-             measures age in the trash by mtime. */
-          try{var now=new Date();fsMod.utimesSync(dest,now,now)}catch(eU){}
+             measures age in the trash by mtime. F2: when utimesSync fails
+             (readonly FS, SELinux denial) the moved file keeps its ORIGINAL
+             mtime - a years-old note deleted today would be purged on the
+             next startup, losing the 30-day recovery window. Record the
+             deletion time in a sidecar the purge prefers over mtime. */
+          try{var now=new Date();fsMod.utimesSync(dest,now,now)}
+          catch(eU){
+            try{console.warn("[OHSidian] utimesSync failed, writing trash meta:",eU&&eU.message||eU)}catch(eW2){}
+            try{fsMod.writeFileSync(dest+".ohsidian-trash-meta.json",JSON.stringify({deletedAt:Date.now()}),"utf8")}catch(eM){}
+          }
           return Promise.resolve();
         }catch(e){
           try{console.warn("[OHSidian] trash relocate failed, local fallback:",e&&e.message||e)}catch(e2){}
@@ -698,7 +761,15 @@ function syncActiveFileToTargetLayout(on,done){
   var settled=false;
   var settle=function(){if(!settled){settled=true;if(done)done()}};
   var awaitWrite=function(w){
-    if(w&&typeof w.then==="function"){w.then(settle,function(){settle()})}
+    /* H18: a rejected write (disk full, EACCES) still settles - the reload
+       keeps the mode-switch UX - but the failure is logged instead of being
+       swallowed: the reload then reopens the stale layout's active file. */
+    if(w&&typeof w.then==="function"){
+      w.then(settle,function(e){
+        try{console.warn("[OHSidian] target layout write failed, reloading anyway:",e&&e.message||e)}catch(e2){}
+        settle();
+      });
+    }
     else{settle()}
   };
   try{
@@ -1097,10 +1168,9 @@ var install=function(app){
         var cur=cfg.override||"auto";
         var next=cur==="auto"?"touch":(cur==="touch"?"desktop":"auto");
         cfg.override=next;
-        var saved=true;
-        try{require("fs").writeFileSync(dataDir()+MODE_FILE,JSON.stringify(cfg,null,2),"utf8")}catch(e){saved=false}
         var want=resolveWant(cfg);
         var label=next==="auto"?(("系统当前: "+(want?"触摸":"桌面"))):(next==="touch"?"始终触摸":"始终桌面");
+        var saved=writeModeFileSync(cfg);
         try{new Notice("OHSidian 触屏模式 → "+label+(saved?"":"(写入失败,重启后失效)"))}catch(e){}
         if(want!==null){lastWant=want;applyMobile(want,"手动切换")}
       }});
@@ -1122,7 +1192,7 @@ var install=function(app){
         idx=(idx+1)%FONT_STEPS.length;
         var next=FONT_STEPS[idx];
         if(next==="auto")delete cfg.fontScaleOverride;else cfg.fontScaleOverride=next;
-        try{require("fs").writeFileSync(dataDir()+MODE_FILE,JSON.stringify(cfg,null,2),"utf8")}catch(e){}
+        writeModeFileSync(cfg);
         var eff=next==="auto"?(cfg.fontScale||1):next;
         lastFontScale=-1;
         applyFontScale();
@@ -1360,17 +1430,21 @@ var __ohDvRegister=function(){
 };
 if(__ohDvApp.isReady()){__ohDvRegister()}else{__ohDvApp.on("ready",__ohDvRegister)}
 }catch(e){}})();
-/* Trash purge: 60s after startup, unlink trash entries older than 30 days
-   (by mtime; the renderer trash relocation stamps deletion time onto moved
-   files, so in-vault .trash entries from BEFORE that patch age by their
-   last content edit). Roots: the relocated Documents trash plus every
+/* Trash purge: 60s after startup (and once more on will-quit, F-N16 - a
+   session shorter than 60s or a multi-day background session used to miss
+   the pass entirely), unlink trash entries older than 30 days. Age base:
+   the <file>.ohsidian-trash-meta.json sidecar's deletedAt when present
+   (F2 - written when the relocation could not utimesSync the moved file,
+   whose ORIGINAL mtime would otherwise purge it immediately), else the
+   entry's own mtime. Roots: the relocated Documents trash plus every
    registered vault's in-vault .trash (covers pre-relocation leftovers and
    sandbox vaults). Empty dirs are pruned, symlinks skipped, failures are
    per-entry and silent - a purge hiccup must never block startup. */
 ;(function(){try{
 if(globalThis.__ohsidianTrashPurge)return;globalThis.__ohsidianTrashPurge=true;
 var __ohTrashMaxAge=30*24*60*60*1000;
-setTimeout(function(){try{
+var __ohTrashMetaSuffix=".ohsidian-trash-meta.json";
+var __ohTrashPurgeOnce=function(){try{
   var el=require("electron"),fsMod=require("fs"),pathMod=require("path");
   var ud=el.app.getPath("userData");
   var roots=[];
@@ -1398,14 +1472,27 @@ setTimeout(function(){try{
         if(en.isDirectory()){walk(fp,depth+1);try{fsMod.rmdirSync(fp)}catch(eE){}}
         else if(en.isFile()){
           var st=fsMod.statSync(fp);
-          if(now-st.mtimeMs>__ohTrashMaxAge){fsMod.unlinkSync(fp);purged++}
+          var ageBase=st.mtimeMs;
+          /* F2: prefer the recorded deletion time over the file's own mtime
+             (which is the ORIGINAL content mtime when utimesSync failed). */
+          if(fp.slice(-__ohTrashMetaSuffix.length)!==__ohTrashMetaSuffix){
+            try{
+              var mc=JSON.parse(fsMod.readFileSync(fp+__ohTrashMetaSuffix,"utf8"));
+              if(mc&&typeof mc.deletedAt==="number"&&mc.deletedAt>0)ageBase=mc.deletedAt;
+            }catch(eM){}
+          }
+          if(now-ageBase>__ohTrashMaxAge){fsMod.unlinkSync(fp);purged++}
         }
       }catch(eE){}
     }
   };
   for(var i=0;i<roots.length;i++)walk(roots[i],0);
   try{console.log("[OHSidian] trash purge: roots="+roots.length+", removed="+purged)}catch(e){}
-}catch(e){}},60000);
+}catch(e){}};
+setTimeout(__ohTrashPurgeOnce,60000);
+/* F-N16: best-effort second pass at quit - covers sessions shorter than
+   60s and long-running background sessions that never restart. */
+try{require("electron").app.on("will-quit",function(){try{__ohTrashPurgeOnce()}catch(e){}})}catch(e){}
 }catch(e){}})();/*OHSIDIAN-IPC-GUARD-END*/
 `;
 

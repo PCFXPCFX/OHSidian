@@ -25,7 +25,10 @@ try {
     process.exit(1);
   }
   const checks = {
-    'app touch patch v13': app.includes('__ohsidianTouchPatch==="13"'),
+    'app touch patch v14': app.includes('__ohsidianTouchPatch==="14"'),
+    'app atomic mode-file write (H1)': app.includes('writeModeFileSync'),
+    'app trash meta sidecar (F2)': app.includes('.ohsidian-trash-meta.json'),
+    'main trash purge will-quit pass (F-N16)': main.includes('__ohTrashPurgeOnce'),
     'main frame default unset=native (round 93e)': main.includes('D.frame==null'),
     'app per-window geometry match (round 87 B2)': app.includes('resolveGeometry'),
     'app event-driven keyboard (modePollMs=200)': app.includes('modePollMs=200'),

@@ -60,4 +60,14 @@ if (patch.status !== 0 || !existsSync(ASAR_PATH)) {
   console.error('[asar-ensure] Run manually:  npm ci --prefix scripts && node scripts/update-obsidian.mjs --repatch');
   process.exit(1);
 }
+// S-N13: verify what we just built, same as CI does. Without this a broken
+// or unpatched asar silently went into the local HAP (CI catches it, local
+// builds did not).
+const verify = spawnSync(process.execPath, [path.join(SCRIPTS_DIR, 'verify-asar.cjs')],
+  { stdio: 'inherit', cwd: ROOT });
+if (verify.status !== 0) {
+  console.error('[asar-ensure] verify-asar FAILED - the generated asar is broken or');
+  console.error('[asar-ensure] missing patch markers. Do not distribute this build.');
+  process.exit(1);
+}
 console.log('[asar-ensure] obsidian.asar ready');

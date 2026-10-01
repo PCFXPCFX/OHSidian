@@ -80,11 +80,21 @@ DragDropAdapter.ingestExternalContent(xComponentId?, fileUris, text, html)
 `WebAbility` 已接入（`onNewWant` 热启动 / `onCreate`+延迟派发 冷启动）：
 - 解析优先级：裸 `file://` want.uri → Share Kit 官方接收 API
   `systemShare.getSharedData(want)`（`@kit.ShareKit`，逐条读
-  `SharedRecord.uri`/`SharedRecord.content`，**不依赖任何发送方私有键名**）
-  → 参数启发式兜底（已知键 `uris` / `uriList` /
-  `ability.want.params.uris` / `ability.want.params.uriList` / `fileUris`、
-  文本键 `text` / `content` / `ability.want.params.text`，最后扫描全部
-  parameters 里 path-like 的值，未知发送方也能接）；
+  `SharedRecord.uri`/`SharedRecord.content`，**不依赖任何发送方私有键名**，
+  系统中介、免检）→ 参数启发式兜底（仅**标准分享键** `uris` / `uriList` /
+  `ability.want.params.uris` / `ability.want.params.uriList` / `fileUris`，
+  文本键 `text` / `content` / `ability.want.params.text`）；
+- **发送方控制的 URI 一律过安全门（S1，2026-10-02 审计修复）**：
+  1. 只接受 `file://` 协议——裸 `/data/...`、`/storage/...` 路径背后没有
+     URI 权限概念，本进程"能读"不代表发送方有权分享（曾经的
+     "全参数扫描 + accessSync 透传"组合 = 任意应用可把**本应用沙箱内文件**
+     （含 OAuth 回调文件、笔记）诱导成附件插入仓库并随同步外传，已移除
+     全参数扫描并禁止裸路径）；
+  2. 平铺路径形态 `file:///...` 在本进程命名空间内解析，凡指向**自身沙箱**
+     （filesDir 去掉 `/files` 叶子的基目录、以及 `/data/storage/` 沙箱挂载
+     前缀）一律拒绝——跨应用授权是 authority 形态
+     `file://<bundle>/data/storage/...`，不受影响；
+  3. `getSharedData` 返回的 record 由系统中介，不过此门。
 - 冷启动（应用未运行时分享）：`onCreate` 暂存 want，`onWindowStageCreate`
   之后延迟 15 秒一次性派发（引擎与编辑器需要启动时间；尽力而为，若届时
   编辑器仍未挂载内容会丢失并留日志）。热启动分享即时插入，无此窗口。

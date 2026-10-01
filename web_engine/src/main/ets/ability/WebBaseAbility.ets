@@ -44,6 +44,15 @@ const TAG: string = 'WebBaseAbility';
 
 export class WebBaseAbility extends UIAbility implements WebProxy {
   protected xcomponentId: string = '';
+  // True when this instance is the cold-started PRIMARY window: it had to
+  // allocate its own xcomponentId because the launch want carried none.
+  // Engine-spawned secondary windows ALWAYS receive an xcomponentId
+  // parameter (AppWindowAdapter.createWindow / StatelessAbility launches),
+  // so parameter presence - not the widget id value - is the reliable
+  // main-window test. The old check compared xcomponentId against the
+  // 'browser1' literal, which breaks whenever kGetWidget hands the primary
+  // window an id other than 1 (e.g. a crash relaunch into a live engine).
+  protected isMainAppWindow: boolean = false;
   protected startUri: string = '';
   protected windowStage: window.WindowStage | undefined = undefined;
   protected nativeContext: NativeContext =
@@ -115,6 +124,9 @@ export class WebBaseAbility extends UIAbility implements WebProxy {
       LogUtil.info(TAG, 'onCreate, Allocate xcomponent id');
       let widgetId = this.nativeContext.ExecuteCommand(CommandType.kGetWidget, {}).widget_Id;
       this.xcomponentId = ConfigData.WINDOW_PREFIX + widgetId;
+      // No xcomponentId in the launch want = this is the primary window
+      // (see the field comment for why the id VALUE is not the test).
+      this.isMainAppWindow = true;
     }
   }
 

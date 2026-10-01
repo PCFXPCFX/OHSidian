@@ -46,7 +46,7 @@ import CheckEmptyUtils from '../utils/CheckEmptyUtils';
 import { WebBaseAbility } from './WebBaseAbility';
 import lazy { GlobalThisHelper } from '../utils/GlobalThisHelper';
 import { WindowStyle, IStyleData, IUpdateStyle } from '../common/WindowStyle';
-import { CommandType, ConfigData } from '../common/Constants';
+import { CommandType } from '../common/Constants';
 import { PermissionManagerAdapter } from '../adapter/PermissionManagerAdapter';
 import { RunningLockAdapter } from '../adapter/RunningLockAdapter';
 import lazy { DragDropAdapter } from '../adapter/DragDropAdapter';
@@ -159,7 +159,20 @@ export class WebAbility extends WebBaseAbility {
       if (avail !== undefined && avail.height > 0) {
         return rect.width >= avail.width && rect.height >= avail.height;
       }
-      return false;
+      // Cache not landed yet (H2): the first asynchronous getAvailableArea
+      // is still in flight. Returning false published 0/0 insets for the
+      // whole latency window - on an available-area maximize (cold start in
+      // window mode, or maximize right after a mode switch) the nav
+      // indicator then covered the content until the next convergence
+      // event. Fall back to a conservative shape test instead: full width
+      // plus >=85% display height covers every available-area maximize
+      // (this device: 1753/1840 = 95%) while honest floating windows
+      // (half/two-thirds height) stay out. A genuinely floating
+      // near-maximize window receives bar insets for the residual latency
+      // only; refreshAvailAreaCache re-publishes as soon as the real area
+      // lands.
+      return rect.width >= displayClass.width &&
+        rect.height >= Math.round(displayClass.height * 0.85);
     } catch (exception) {
       return false;
     }
@@ -220,12 +233,70 @@ export class WebAbility extends WebBaseAbility {
   // A2 reconciliation converges within a second.
   private availAreaCache: AvailableAreaRect | undefined = undefined;
   private availAreaAtMs: number = 0;
+  // First updateWindowPcmodeSwitchStatus call of this instance (H4): the
+  // boot-time read must always apply the full side-effect set; later
+  // observer fires with an UNCHANGED value skip them.
+  private pcModeObserved: boolean = false;
+  // True while a setWindowSystemBarEnable call is in flight (H8): the 1s
+  // bar watcher re-runs applySystemBarVisibility and would otherwise issue
+  // a duplicate WMS call because barsHidden still holds the previous value.
+  private barsPending: boolean = false;
+  // mtime+size-keyed cache for desktopLayoutWanted (H12/H16): the 1s
+  // watcher and every geometry event re-read the mode file otherwise. The
+  // size component covers second-resolution mtime platforms (OpenHarmony
+  // Stat.mtime is seconds), where a same-second rewrite would otherwise
+  // hit the cache - and the fields that matter (systemMode/override)
+  // always change the file length, so mtime+size collisions are not
+  // practically reachable. An insets-only same-length rewrite still
+  // refreshes mtime and does not change the verdict it caches.
+  private layoutWantCacheMtimeMs: number = -1;
+  private layoutWantCacheSize: number = -1;
+  private layoutWantCacheValue: boolean = false;
+
+  // Atomic publish for the mode/protocol JSON files (H1): write a temp file
+  // in the same directory, then rename over the target. The previous
+  // openSync(TRUNC) + writeSync sequence left the target EMPTY between
+  // truncate and write - a crash in that window zeroed ohsidian-mode.json,
+  // and concurrent readers (renderer 200ms poll, sibling windows) saw the
+  // torn content. rename() is atomic on the same filesystem, so every
+  // reader observes either the complete old or the complete new file.
+  private publishModeFileAtomic(filePath: string, cfg: Record<string, Object>): void {
+    const tmpPath: string = filePath + '.tmp';
+    const tmp = fileIo.openSync(tmpPath,
+      fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+    try {
+      fileIo.writeSync(tmp.fd, JSON.stringify(cfg));
+    } finally {
+      fileIo.closeSync(tmp);
+    }
+    try {
+      fileIo.renameSync(tmpPath, filePath);
+    } catch (renameException) {
+      // Rename rejected (non-POSIX volume?): fall back to the direct
+      // write - the old non-atomic behavior - and clean the temp file.
+      const direct = fileIo.openSync(filePath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      try {
+        fileIo.writeSync(direct.fd, JSON.stringify(cfg));
+      } finally {
+        fileIo.closeSync(direct);
+      }
+      try {
+        fileIo.unlinkSync(tmpPath);
+      } catch (unlinkException) {
+        // temp file left behind - harmless, overwritten next publish
+      }
+    }
+  }
 
   // Fire-and-forget available-area refresh, rate-limited to one request
   // per 500ms (the geometry handlers call this on every event).
   private refreshAvailAreaCache(): void {
     const nowMs: number = Date.now();
-    if (nowMs - this.availAreaAtMs < 500) {
+    // No rate limit while the cache has never landed (H2): an event burst
+    // before the first result must not suppress the very fetch that would
+    // end the empty-window period.
+    if (this.availAreaCache !== undefined && nowMs - this.availAreaAtMs < 500) {
       return;
     }
     this.availAreaAtMs = nowMs;
@@ -263,17 +334,41 @@ export class WebAbility extends WebBaseAbility {
       const filesDir: string = this.context.getApplicationContext().filesDir;
       const filePath: string = filesDir + '/ohsidian-mode.json';
       if (fileIo.accessSync(filePath)) {
+        // H12/H16: the 1s watcher plus every geometry event used to pay a
+        // full read+parse here. Cache the verdict keyed on mtime + size -
+        // any writer (this process, sibling windows, the renderer command)
+        // changes them (see the field comment for the precision analysis).
+        let mtimeMs: number = 0;
+        let sizeBytes: number = -1;
+        try {
+          const st = fileIo.statSync(filePath);
+          mtimeMs = st.mtime < 100000000000 ? st.mtime * 1000 : st.mtime;
+          sizeBytes = st.size;
+        } catch (statException) {
+          mtimeMs = 0;
+        }
+        if (mtimeMs >= 100000000000 && mtimeMs === this.layoutWantCacheMtimeMs &&
+          sizeBytes === this.layoutWantCacheSize) {
+          return this.layoutWantCacheValue;
+        }
         const cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+        let wanted: boolean = false;
         if (cfg) {
           const o = cfg['override'];
           if (o === 'desktop') {
-            return true;
+            wanted = true;
+          } else if (o === 'touch') {
+            wanted = false;
+          } else {
+            wanted = cfg['systemMode'] === 'desktop';
           }
-          if (o === 'touch') {
-            return false;
-          }
-          return cfg['systemMode'] === 'desktop';
         }
+        if (mtimeMs >= 100000000000) {
+          this.layoutWantCacheMtimeMs = mtimeMs;
+          this.layoutWantCacheSize = sizeBytes;
+          this.layoutWantCacheValue = wanted;
+        }
+        return wanted;
       }
     } catch (e) {
       // fall through: conservative default keeps the bars visible
@@ -309,14 +404,20 @@ export class WebAbility extends WebBaseAbility {
       return;
     }
     const wantHidden: boolean = fullscreenLike && this.desktopLayoutWanted();
-    if (wantHidden === this.barsHidden) {
+    if (wantHidden === this.barsHidden || this.barsPending) {
+      // barsPending (H8): a call is still in flight - the 1s watcher would
+      // otherwise read the stale barsHidden and re-issue the same WMS call.
+      // The .then/.catch below re-publishes insets on completion, which
+      // re-runs this check with fresh state.
       return;
     }
+    this.barsPending = true;
     try {
       const names: Array<'status' | 'navigation'> =
         wantHidden ? [] : ['status', 'navigation'];
       winObj.setWindowSystemBarEnable(names)
         .then(() => {
+          this.barsPending = false;
           this.barsHidden = wantHidden;
           // Re-publish: insets collapse to 0 while hidden (the renderer
           // un-pads), real bar heights return when shown.
@@ -325,10 +426,12 @@ export class WebAbility extends WebBaseAbility {
             ' for desktop layout');
         })
         .catch((err: BusinessError) => {
+          this.barsPending = false;
           LogUtil.warn(TAG, 'setWindowSystemBarEnable rejected: ' + JSON.stringify(err) +
             ' - CSS pad fallback stays active');
         });
     } catch (exception) {
+      this.barsPending = false;
       LogUtil.warn(TAG, 'setWindowSystemBarEnable threw: ' + JSON.stringify(exception));
     }
   }
@@ -514,7 +617,7 @@ export class WebAbility extends WebBaseAbility {
           winId = -1;
         }
       }
-      const isMain: boolean = this.xcomponentId === ConfigData.DEFAULT_WINDOW_ID;
+      const isMain: boolean = this.isMainAppWindow;
       // windowSizeChange fires continuously during drag-resizes; skip the
       // file write when nothing actually changed (own entry + legacy mirror).
       let windows: Record<string, Object> = {};
@@ -587,13 +690,7 @@ export class WebAbility extends WebBaseAbility {
         cfg['keyboard'] = keyboardCss;
         cfg['viewportAvoidsBars'] = false;
       }
-      const file = fileIo.openSync(filePath,
-        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      try {
-        fileIo.writeSync(file.fd, JSON.stringify(cfg));
-      } finally {
-        fileIo.closeSync(file);
-      }
+      this.publishModeFileAtomic(filePath, cfg);
       LogUtil.info(TAG, 'safe-area insets updated: win=' + winId +
         ', top=' + topCss + ', bottom=' + bottomCss + ', decor=' + decor);
     } catch (err) {
@@ -642,13 +739,7 @@ export class WebAbility extends WebBaseAbility {
         }
       }
       cfg['windows'] = next;
-      const file = fileIo.openSync(filePath,
-        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      try {
-        fileIo.writeSync(file.fd, JSON.stringify(cfg));
-      } finally {
-        fileIo.closeSync(file);
-      }
+      this.publishModeFileAtomic(filePath, cfg);
       LogUtil.info(TAG, 'window geometry entry removed: ' + key);
     } catch (err) {
       LogUtil.warn(TAG, 'failed to remove window geometry entry: ' + JSON.stringify(err));
@@ -661,7 +752,7 @@ export class WebAbility extends WebBaseAbility {
   // with stale insets. Runs before this session's windows write their own
   // entries again, so nothing live is lost.
   private clearStaleWindowEntries(): void {
-    if (this.xcomponentId !== ConfigData.DEFAULT_WINDOW_ID) {
+    if (!this.isMainAppWindow) {
       return;
     }
     try {
@@ -690,13 +781,7 @@ export class WebAbility extends WebBaseAbility {
           next[k] = cfg[k];
         }
       }
-      const file = fileIo.openSync(filePath,
-        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      try {
-        fileIo.writeSync(file.fd, JSON.stringify(next));
-      } finally {
-        fileIo.closeSync(file);
-      }
+      this.publishModeFileAtomic(filePath, next);
       LogUtil.info(TAG, 'stale window geometry entries cleared');
     } catch (err) {
       LogUtil.warn(TAG, 'failed to clear stale window entries: ' + JSON.stringify(err));
@@ -710,7 +795,7 @@ export class WebAbility extends WebBaseAbility {
   // shrink them to a comfortable size (80%, centered). Main window only;
   // PC mode only.
   private clampWindowToWorkArea(): void {
-    if (this.xcomponentId !== ConfigData.DEFAULT_WINDOW_ID) {
+    if (!this.isMainAppWindow) {
       return;
     }
     const winObj = this.mainWindow;
@@ -809,7 +894,7 @@ export class WebAbility extends WebBaseAbility {
   // (WMS "MoveToAsync Layout timeout"): the window shows but is unresponsive
   // - creation looks broken and the title-bar X does nothing.
   private forceFullscreenWindow(): void {
-    if (this.xcomponentId !== ConfigData.DEFAULT_WINDOW_ID) {
+    if (!this.isMainAppWindow) {
       return;
     }
     const winObj = this.mainWindow;
@@ -833,6 +918,10 @@ export class WebAbility extends WebBaseAbility {
         .then(() => {
           LogUtil.info(TAG, 'forced fullscreen rect: ' + displayClass.width + 'x' +
             displayClass.height + ' @ (0,0)');
+          // H5: publish the insets for the NEW rect even when the WMS
+          // swallows the trailing windowSizeChange - the mode-switch caller
+          // pushed insets for the PRE-resize rect.
+          this.pushSafeAreaInsets();
         })
         .catch((err: BusinessError) => {
           LogUtil.warn(TAG, 'force fullscreen (rect) failed: ' + JSON.stringify(err));
@@ -882,13 +971,7 @@ export class WebAbility extends WebBaseAbility {
         return;
       }
       cfg['fontScale'] = scale;
-      const file = fileIo.openSync(filePath,
-        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      try {
-        fileIo.writeSync(file.fd, JSON.stringify(cfg));
-      } finally {
-        fileIo.closeSync(file);
-      }
+      this.publishModeFileAtomic(filePath, cfg);
       LogUtil.info(TAG, 'font scale updated: ' + scale);
     } catch (err) {
       LogUtil.error(TAG, 'failed to write font scale to mode file: ' + JSON.stringify(err));
@@ -930,13 +1013,7 @@ export class WebAbility extends WebBaseAbility {
         return;
       }
       cfg['documentsDir'] = documentsDir;
-      const file = fileIo.openSync(filePath,
-        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      try {
-        fileIo.writeSync(file.fd, JSON.stringify(cfg));
-      } finally {
-        fileIo.closeSync(file);
-      }
+      this.publishModeFileAtomic(filePath, cfg);
       LogUtil.info(TAG, 'documents dir published: ' + documentsDir);
     } catch (err) {
       LogUtil.error(TAG, 'failed to write documentsDir to mode file: ' + JSON.stringify(err));
@@ -999,6 +1076,10 @@ export class WebAbility extends WebBaseAbility {
 
   // publishSystemFonts completed successfully in this ability instance.
   private systemFontsPublished: boolean = false;
+  // Family count at the successful publish (F-N3): onFontIdUpdated compares
+  // the current system list against it and resets the one-shot lock when a
+  // runtime font-package install changed the list size.
+  private publishedFontFamilyCount: number = -1;
   // publishSystemFonts run currently in flight (guards concurrent callers).
   private systemFontsPublishing: boolean = false;
   // probeThemeManifestFont outcome: the active theme slot exists and its
@@ -1144,18 +1225,14 @@ export class WebAbility extends WebBaseAbility {
       if (prevFonts !== undefined && prevFonts === nextFontsJson &&
         prevFiles !== undefined && prevFiles === nextFilesJson) {
         this.systemFontsPublished = true;
+        this.publishedFontFamilyCount = families.length;
         return;
       }
       cfg['systemFonts'] = nextFontsJson;
       cfg['fontFiles'] = nextFilesJson;
-      const file = fileIo.openSync(filePath,
-        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      try {
-        fileIo.writeSync(file.fd, JSON.stringify(cfg));
-      } finally {
-        fileIo.closeSync(file);
-      }
+      this.publishModeFileAtomic(filePath, cfg);
       this.systemFontsPublished = true;
+      this.publishedFontFamilyCount = families.length;
       LogUtil.info(TAG, 'system fonts published: ' + families.length + ' families, ' +
         fontFiles.length + ' file mappings');
     } catch (err) {
@@ -1311,9 +1388,11 @@ export class WebAbility extends WebBaseAbility {
           // not resolvable under the slot (or a stub) - fall through
         }
         // Device logs show manifest entries may be ABSOLUTE paths into the
-        // download store (/data/themes/s/online/download/font/<fontId>/...);
-        // try the entry as-is when the basename join did not resolve.
-        if (entry !== candidate) {
+        // theme download store (/data/themes/s/online/download/font/<fontId>/...);
+        // try the entry as-is when the basename join did not resolve - but
+        // ONLY under the theme tree (F-N5/S8): a manifest naming an
+        // arbitrary absolute path outside /data/themes is never legitimate.
+        if (entry !== candidate && entry.startsWith('/data/themes/')) {
           try {
             if (fileIo.accessSync(entry) && fileIo.statSync(entry).size >= 8192) {
               return entry;
@@ -1499,13 +1578,7 @@ export class WebAbility extends WebBaseAbility {
         return;
       }
       cfg['themeFontPath'] = fontPath;
-      const file = fileIo.openSync(filePath,
-        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      try {
-        fileIo.writeSync(file.fd, JSON.stringify(cfg));
-      } finally {
-        fileIo.closeSync(file);
-      }
+      this.publishModeFileAtomic(filePath, cfg);
       LogUtil.info(TAG, 'theme font path published: ' + fontPath);
     } catch (err) {
       LogUtil.error(TAG, 'failed to write themeFontPath: ' + JSON.stringify(err));
@@ -1542,13 +1615,7 @@ export class WebAbility extends WebBaseAbility {
         return;
       }
       cfg['fontId'] = fontId;
-      const file = fileIo.openSync(filePath,
-        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      try {
-        fileIo.writeSync(file.fd, JSON.stringify(cfg));
-      } finally {
-        fileIo.closeSync(file);
-      }
+      this.publishModeFileAtomic(filePath, cfg);
       LogUtil.info(TAG, 'font id published: ' + fontId);
     } catch (err) {
       LogUtil.error(TAG, 'failed to write fontId to mode file: ' + JSON.stringify(err));
@@ -1604,13 +1671,7 @@ export class WebAbility extends WebBaseAbility {
                 return;
               }
               cfg['styleFonts'] = nextJson;
-              const file = fileIo.openSync(filePath,
-                fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-              try {
-                fileIo.writeSync(file.fd, JSON.stringify(cfg));
-              } finally {
-                fileIo.closeSync(file);
-              }
+              this.publishModeFileAtomic(filePath, cfg);
               LogUtil.info(TAG, 'style fonts published: ' + entries.length + ' entries');
             } catch (err) {
               LogUtil.error(TAG, 'failed to write styleFonts: ' + JSON.stringify(err));
@@ -1633,6 +1694,21 @@ export class WebAbility extends WebBaseAbility {
       appContext.onSystemConfigurationUpdated({
         onFontIdUpdated: (fontId: string) => {
           LogUtil.info(TAG, 'onFontIdUpdated: ' + fontId);
+          // F-N3: a runtime font-package install changes the system font
+          // list but fires no other callback - the publish-once lock would
+          // keep the picker stale until the next cold start. Reset the lock
+          // when the list size moved so the republish below refreshes it.
+          try {
+            const list = font.getSystemFontList();
+            if (Array.isArray(list) && this.publishedFontFamilyCount >= 0 &&
+              list.length !== this.publishedFontFamilyCount) {
+              LogUtil.info(TAG, 'font list size changed (' + this.publishedFontFamilyCount +
+                ' -> ' + list.length + '), republishing font picker data');
+              this.systemFontsPublished = false;
+            }
+          } catch (e) {
+            // list unavailable - keep the lock state as-is
+          }
           // The font system is provably ready here - a safe moment to
           // (re)publish the picker data if the early-startup attempt raced.
           this.publishSystemFonts();
@@ -1780,7 +1856,7 @@ export class WebAbility extends WebBaseAbility {
     this.publishStyleFonts();
     this.publishThemeFontPath();
     this.registerSystemConfigListener();
-    if (this.xcomponentId === ConfigData.DEFAULT_WINDOW_ID) {
+    if (this.isMainAppWindow) {
       // Startup-time user_grant permissions (main window only). 0 ==
       // REQUEST_PERMISSION_SUCCESS (module-private constant there).
       //  - directory_document: uninstall-safe vault root (Documents);
@@ -2079,7 +2155,15 @@ export class WebAbility extends WebBaseAbility {
         this.nativeContext.RegisterWindowEventFilter(mainWin.getWindowProperties().id);
       }
 
-      if(deviceInfo.deviceType == 'tablet') {
+      // H15: 2in1 registers the observer too - without it a 2in1 device
+      // never followed the system touch-mode switch (the else branch below
+      // kept systemMode pinned to desktop forever). Only the TABLET runs
+      // the boot-time read: on 2in1 the setting is not guaranteed to exist
+      // and getValueSync would default 'false', flipping the historical
+      // desktop boot default to touch; resolveWant treats a missing
+      // systemMode as desktop, so skipping the boot write is the 2in1
+      // no-op. Runtime switches arrive through the observer for both.
+      if(deviceInfo.deviceType == 'tablet' || deviceInfo.deviceType == '2in1') {
         const context: Context = getContext(this);
         let res: boolean = settings.registerKeyObserver(context,
           'window_pcmode_switch_status', settings.domainName.USER_PROPERTY, () => {
@@ -2090,7 +2174,9 @@ export class WebAbility extends WebBaseAbility {
         // read once: a tablet already in PC mode at launch needs the right
         // mode, and the first read applies layout-fullscreen + window-rect
         // corrections for the current form factor.
-        this.updateWindowPcmodeSwitchStatus(context);
+        if (deviceInfo.deviceType == 'tablet') {
+          this.updateWindowPcmodeSwitchStatus(context);
+        }
       } else {
         this.writeTouchModeFile(false);
       }
@@ -2137,6 +2223,7 @@ export class WebAbility extends WebBaseAbility {
             LogUtil.warn(TAG, 'restore system bars on destroy failed: ' + JSON.stringify(err));
           });
         this.barsHidden = false;
+        this.barsPending = false;
       } catch (exception) {
         LogUtil.warn(TAG, 'restore system bars on destroy threw: ' + JSON.stringify(exception));
       }
@@ -2159,6 +2246,9 @@ export class WebAbility extends WebBaseAbility {
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     let uriNotNull = want["uri"] !== undefined && want["uri"] !== '';
     if(want!== undefined && want !== null) {
+      // S4: log parameter KEYS only - want.parameters carries the shared
+      // content's locations (and sometimes query strings with tokens); a
+      // full JSON.stringify put all of it into the hilog buffer.
       LogUtil.info(TAG, 'onNewWant begin, want: ' +
         'bundleName: ' + JSON.stringify(want.bundleName) +
         ', abilityName: ' + JSON.stringify(want.abilityName) +
@@ -2167,7 +2257,7 @@ export class WebAbility extends WebBaseAbility {
         ', type: ' + JSON.stringify(want.type) +
         ', flags: ' + JSON.stringify(want.flags) +
         ', action: ' + JSON.stringify(want.action) +
-        ', parameters: ' + JSON.stringify(want.parameters) +
+        ', parameterKeys: ' + (want.parameters ? Object.keys(want.parameters).join(',') : 'undefined') +
         ', entities: ' + JSON.stringify(want.entities) +
         ', moduleName: ' + JSON.stringify(want.moduleName) +
         ', LaunchParam: ' + JSON.stringify(launchParam));
@@ -2193,11 +2283,22 @@ export class WebAbility extends WebBaseAbility {
   // sanitized pipeline system drags use. See docs/DRAG-DROP-INBOUND.md.
   // Priority: bare file:// want.uri (directUris) > Share Kit parse
   // (getSharedData, the official receiver API - no key names involved) >
-  // parameter heuristics (known keys + generic file:// scan).
+  // parameter heuristics (STANDARD share keys only, file:// URIs only).
   private ingestSharedWant(want: Want, directUris: Array<string>): void {
     if (directUris.length > 0) {
-      let text = WebAbility.wantSharedText(want);
-      Inject.getOrCreate(DragDropAdapter).ingestExternalContent('', directUris, text, '');
+      const sandboxBase: string = this.ownSandboxBase();
+      let accepted: Array<string> = [];
+      for (let i = 0; i < directUris.length; i++) {
+        if (WebAbility.isAcceptableSharedUri(directUris[i], sandboxBase)) {
+          accepted.push(directUris[i]);
+        } else {
+          LogUtil.warn(TAG, 'share uri rejected (own sandbox): index=' + i);
+        }
+      }
+      if (accepted.length > 0) {
+        let text = WebAbility.wantSharedText(want);
+        Inject.getOrCreate(DragDropAdapter).ingestExternalContent('', accepted, text, '');
+      }
       return;
     }
     if (WebAbility.isShareKitWant(want)) {
@@ -2235,11 +2336,56 @@ export class WebAbility extends WebBaseAbility {
   }
 
   private ingestSharedWantHeuristics(want: Want): void {
-    let uris = WebAbility.wantSharedFileUris(want);
+    const sandboxBase: string = this.ownSandboxBase();
+    let uris = WebAbility.wantSharedFileUris(want, sandboxBase);
     let text = WebAbility.wantSharedText(want);
     if (uris.length > 0 || text.length > 0) {
       Inject.getOrCreate(DragDropAdapter).ingestExternalContent('', uris, text, '');
     }
+  }
+
+  // The mount root of THIS app's own sandbox (filesDir minus its /files
+  // leaf). Anything under it is our private data - readable by us no matter
+  // who sends the want, so a sender-supplied URI pointing here can only be
+  // a private-file exfil attempt, never legitimate share content.
+  private ownSandboxBase(): string {
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const idx: number = filesDir.lastIndexOf('/files');
+      return idx > 0 ? filesDir.substring(0, idx) : filesDir;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  // S1: URI acceptance gate for SENDER-controlled values (want.uri and the
+  // standard parameter keys). Rules:
+  //  1. Only the file:// scheme - raw /data/... or /storage/... paths have
+  //     no permission concept behind them, and every path OUR process can
+  //     access includes our own sandbox (the exfil vector).
+  //  2. Plain-path file URIs (file:///...) resolve inside OUR mount
+  //     namespace; reject those under our own sandbox base (and the generic
+  //     /data/storage/ sandbox mount). Cross-app grants arrive in the
+  //     authority form (file://<bundle>/data/storage/...), which passes.
+  // Share Kit getSharedData records are system-mediated and skip this gate.
+  private static isAcceptableSharedUri(value: string, sandboxBase: string): boolean {
+    if (!value) {
+      return false;
+    }
+    const uri = value.trim();
+    if (!uri.startsWith('file://')) {
+      return false;
+    }
+    const path: string = uri.substring('file://'.length);
+    if (uri.startsWith('file:///')) {
+      if (path.startsWith('/data/storage/')) {
+        return false;
+      }
+      if (sandboxBase && (path === sandboxBase || path.startsWith(sandboxBase + '/'))) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private static isShareKitWant(want: Want): boolean {
@@ -2251,7 +2397,13 @@ export class WebAbility extends WebBaseAbility {
       || action === wantConstant.Action.ACTION_SEND_MULTIPLE_DATA;
   }
 
-  private static wantSharedFileUris(want: Want): Array<string> {
+  // Standard share-parameter keys only (S1): the previous last-resort scan
+  // over EVERY parameter accepted any path-shaped value a sender chose,
+  // which - combined with the readability passthrough in DragParamManager -
+  // turned an arbitrary parameter into a private-file exfil channel
+  // (any app: "share" a want with our sandbox path hidden in a parameter;
+  // the user picks OHSidian; the file lands in the vault and syncs out).
+  private static wantSharedFileUris(want: Want, sandboxBase: string): Array<string> {
     let uris: Array<string> = [];
     if (!want || !want.parameters) {
       return uris;
@@ -2262,48 +2414,21 @@ export class WebAbility extends WebBaseAbility {
       if (Array.isArray(value)) {
         let list = value as Array<Object>;
         for (let j = 0; j < list.length; j++) {
-          if (typeof list[j] === 'string' && (list[j] as string).length > 0) {
+          if (typeof list[j] === 'string' &&
+            WebAbility.isAcceptableSharedUri(list[j] as string, sandboxBase)) {
             uris.push(list[j] as string);
           }
         }
         if (uris.length > 0) {
           return uris;
         }
-      } else if (typeof value === 'string' && (value as string).length > 0) {
+      } else if (typeof value === 'string' &&
+        WebAbility.isAcceptableSharedUri(value as string, sandboxBase)) {
         uris.push(value as string);
         return uris;
       }
     }
-    // Last resort: scan every parameter for path-shaped values, so an
-    // unknown sender (碰一碰 variants, future share sources) still works
-    // without hard-coding its key name. The path filter keeps unrelated
-    // parameters (instance keys, urls, ...) out.
-    const scanKeys: Array<string> = Object.keys(want.parameters);
-    for (let k = 0; k < scanKeys.length; k++) {
-      let scan: Object | undefined = want.parameters[scanKeys[k]];
-      if (typeof scan === 'string' && WebAbility.isPathLikeUri(scan as string)) {
-        uris.push(scan as string);
-        return uris;
-      }
-      if (Array.isArray(scan)) {
-        let list = scan as Array<Object>;
-        for (let j = 0; j < list.length; j++) {
-          if (typeof list[j] === 'string' && WebAbility.isPathLikeUri(list[j] as string)) {
-            uris.push(list[j] as string);
-          }
-        }
-        if (uris.length > 0) {
-          return uris;
-        }
-      }
-    }
     return uris;
-  }
-
-  private static isPathLikeUri(value: string): boolean {
-    return !!value && (value.startsWith('file://')
-      || value.startsWith('/storage/')
-      || value.startsWith('/data/'));
   }
 
   private static wantSharedText(want: Want): string {
@@ -2340,6 +2465,17 @@ export class WebAbility extends WebBaseAbility {
     // of being opened as a new window.
     if (open_url.startsWith('obsidian://')) {
       this.writeProtocolUriFile(open_url);
+      return;
+    }
+    // S5: scheme whitelist. The entry skill matches ANY uri with the
+    // viewData action, so a malicious app can hand us arbitrary uri shapes;
+    // only web URLs are meaningful as a new browser window here. Everything
+    // else (javascript:, data:, unknown schemes) is dropped instead of being
+    // navigated to inside the app's web content.
+    const colon: number = open_url.indexOf(':');
+    const scheme: string = colon > 0 ? open_url.substring(0, colon).toLowerCase() : '';
+    if (scheme !== 'http' && scheme !== 'https') {
+      LogUtil.warn(TAG, 'openNewWindow rejected non-http(s) uri, scheme=' + scheme);
       return;
     }
     this.nativeContext.ExecuteCommand(CommandType.kNewWindow, { url: open_url });
@@ -2385,13 +2521,7 @@ export class WebAbility extends WebBaseAbility {
       }
       cfg['items'] = items;
       cfg['seq'] = seq;
-      const file = fileIo.openSync(filePath,
-        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      try {
-        fileIo.writeSync(file.fd, JSON.stringify(cfg));
-      } finally {
-        fileIo.closeSync(file);
-      }
+      this.publishModeFileAtomic(filePath, cfg);
       // Log without the query string: OAuth callbacks may carry tokens/codes.
       const queryIndex = uri.indexOf('?');
       const logSafe = queryIndex > 0 ? uri.substring(0, queryIndex) + '?…' : uri;
@@ -2412,8 +2542,22 @@ export class WebAbility extends WebBaseAbility {
         newStatus = true;
       }
       const modeChanged: boolean = this.pcModeEnabled !== newStatus;
+      const firstSync: boolean = !this.pcModeObserved;
       this.pcModeEnabled = newStatus;
+      this.pcModeObserved = true;
+      // Cheap, idempotent state re-assert: kept on EVERY fire (round-94
+      // self-audit) - if the engine was not ready at the boot-time first
+      // sync it still picks the mode up here; only the expensive IO and
+      // window side effects below are skipped for unchanged values.
       this.nativeContext.UpdateWindowPcmodeSwitchStatusCB(newStatus);
+      if (!modeChanged && !firstSync) {
+        // H4/H21: an observer fire with an UNCHANGED value used to re-run
+        // the whole side-effect set (mode-file write, layout fullscreen,
+        // inset publish, clamp/force resize). Everything is already
+        // consistent - skip and leave a device-log trace.
+        LogUtil.info(TAG, 'pc mode unchanged (' + newStatus + '), side effects skipped');
+        return;
+      }
       this.writeTouchModeFile(newStatus);
       // Layout fullscreen belongs to the TOUCH form factor only. Leaving it
       // on in PC mode lets the web surface extend under the WMS caption and
@@ -2474,10 +2618,14 @@ export class WebAbility extends WebBaseAbility {
   // userData is the application files dir, same value the engine passes as
   // --user-data-dir, so this.context.getApplicationContext().filesDir matches.
   private writeTouchModeFile(pcModeEnabled: boolean) {
+    // systemMode follows the PC-mode switch on every touch-capable form
+    // factor. H9: the phone previously hard-coded 'touch' even with PC mode
+    // on (external keyboard/mouse); H15: 2in1 joins so an observer-driven
+    // touch-mode switch reaches the renderer. Non-touch types keep 'desktop'.
     let systemMode: string = 'desktop';
-    if (deviceInfo.deviceType === 'phone' ||
-      (deviceInfo.deviceType === 'tablet' && !pcModeEnabled)) {
-      systemMode = 'touch';
+    if (deviceInfo.deviceType === 'phone' || deviceInfo.deviceType === 'tablet' ||
+      deviceInfo.deviceType === '2in1') {
+      systemMode = pcModeEnabled ? 'desktop' : 'touch';
     }
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
@@ -2493,17 +2641,16 @@ export class WebAbility extends WebBaseAbility {
       } catch (e) {
         cfg = {};
       }
-      cfg['systemMode'] = systemMode;
       if (cfg['override'] === undefined) {
         cfg['override'] = 'auto';
       }
-      const file = fileIo.openSync(filePath,
-        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      try {
-        fileIo.writeSync(file.fd, JSON.stringify(cfg));
-      } finally {
-        fileIo.closeSync(file);
+      // Repeat fires (observer misfire, sibling window) skip the write when
+      // nothing moved - one small read, no IO storm on the shared file.
+      if (cfg['systemMode'] === systemMode) {
+        return;
       }
+      cfg['systemMode'] = systemMode;
+      this.publishModeFileAtomic(filePath, cfg);
       LogUtil.info(TAG, 'touch mode file updated: systemMode=' + systemMode +
         ', override=' + (cfg['override'] as string) +
         ', deviceType=' + deviceInfo.deviceType + ', pcMode=' + pcModeEnabled);

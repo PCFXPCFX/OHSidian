@@ -3309,6 +3309,217 @@ hidden/custom 保留原语义)。refresh-app-patch.mjs 同步登记该替换
 流程)。补丁 v12→v13;verify-asar 标记改为 main 侧。设置 UI 里
 未设置时仍显示"默认",但默认行为已是原生边框。
 
+### 第 94 轮(2026-10-02):外部综合审计复核与修复(S1/H1/H2 等 19 项)
+
+**动机**:外部综合审计报告(OHSidian-audit-2026-10-02.md,基线
+9950f59)列出 🔴×3 / 🟠×5+ / 🟡×5 / 🟢×5 共 20+ 项发现。本轮先逐项
+对照源码核实其真实性,再按核实结论修复。**核实结果:审计主体属实;
+H13 为误报**(`forceFullscreenWindow` 的已全屏早退检查早已存在,
+WebAbility.ets 的 `prop.windowRect.width >= displayClass.width` 分支);
+**H5 部分缓解**(`clampWindowToWorkArea` 的 .then 已重推 insets,残余
+缺口仅在 forceFullscreen 路径,本轮补齐)。
+
+**🔴 安全修复**:
+
+1. **S1 分享启发式参数扫描 = 文件外传通道(最严重项,属实)**。
+   `wantSharedFileUris` 的"最后兜底"会扫描 want.parameters 里**所有**
+   path-like 值(`file://`、`/storage/`、`/data/` 前缀),配合
+   DragParamManager 的 `fs.accessSync` 可读性透传——本进程"能读"的路径
+   包括自身沙箱,于是任意应用都能在分享参数里夹带
+   `file:///data/storage/el2/base/.../ohsidian-protocol.json`(OAuth
+   回调文件)等本应用私有文件,用户在分享面板选 OHSidian 后文件作为
+   附件插入笔记、随同步外传。修复:
+   - 删除全参数扫描与 `isPathLikeUri`;启发式只认**标准分享键**
+     (uris/uriList/ability.want.params.uris/uriList/fileUris);
+   - 新增 `isAcceptableSharedUri` 安全门:只收 `file://` 协议;平铺路径
+     形态 `file:///...` 指向自身沙箱基目录(filesDir 去 `/files` 叶子)
+     或 `/data/storage/` 沙箱挂载前缀的一律拒绝(跨应用授权是
+     authority 形态 `file://<bundle>/data/storage/...`,不受影响);
+   - `onNewWant` 的裸 `file://` want.uri(直连通路)同样过门(S6 的
+     实质缓解:sendData/viewData 形态都能夹带自身沙箱路径,统一靠
+     沙箱门拦截,避免按 action 区分误伤华为分享);
+   - `getSharedData` 记录为系统中介,不过门(S2 维持信息级)。
+   docs/DRAG-DROP-INBOUND.md 同步更新接收策略。
+2. **S4 onNewWant 全量 JSON.stringify(want.parameters) 进 hilog**:
+   改为只记参数键名(值不再落日志;protocol-uri 写入点本就脱敏查询串)。
+3. **S5 openNewWindow 无 scheme 白名单**:入口 skill 的 viewData 可匹配
+   任意 URI,`javascript:`/`data:` 等畸形 URI 会被送去开新窗口。现仅放行
+   http/https(obsidian:// 在此之前已分流到深链桥),其余记 scheme 后丢弃。
+4. **S-N11 pinned cert 无独立哈希固定**:CI 新增"Verify pinned cert hash"
+   步骤,sha256 与工作流内固定值比对(当前
+   f38d398e…3b8a),证书轮换必须同步改工作流,PR 偷换证书直接红。
+5. **S-N12 HarmonyOS CLI 下载无校验和**:下载后若设置了
+   `vars.HARMONYOS_CLI_SHA256` 则硬校验,未设置则 CI warning 提示固定
+   (维护者一次性记录归档哈希即可启用强制)。
+6. **S-N10 actions/cache key 未含 cert 哈希**:缓存键追加
+   `hashFiles('scripts/cert-obsidian.pem')`,换证书不再复用旧证书校验
+   过的下载缓存。
+
+**🔴/🟠 功能修复(ArkTS 侧)**:
+
+7. **H1 ohsidian-mode.json 非原子写(属实,11 处)**:所有写者都是
+   `openSync(TRUNC)+writeSync`,TRUNC 与 write 之间崩溃会留下空文件
+   (渲染层 200ms 轮询与 desktopLayoutWanted 读到空/半截 JSON)。新增
+   `publishModeFileAtomic`(tmp + renameSync,POSIX 原子替换,rename
+   失败回退直写)替换全部 11 处:writeInsetsToFile/
+   removeWindowGeometryEntry/clearStaleWindowEntries/writeFontScaleToFile/
+   publishDocumentsDir/publishSystemFontsInner/writeThemeFontPath/
+   publishFontId/publishStyleFonts/writeTouchModeFile/writeProtocolUriFile。
+   渲染层与主进程侧同步:新增 `writeModeFileSync`(tmp+rename),触屏
+   命令与字号命令两处 writeFileSync 改走该函数;补丁版本 v13→v14。
+   说明:审计建议的"写者 Promise 队列串行化"经核实**不必要**——同进程
+   全部写者都在 UI 线程同步块内,JS 单线程已天然串行;真正要防的是
+   崩溃撕裂与读者看到中间态,原子替换已覆盖。
+8. **H2 availAreaCache 未就绪返回 false(属实)**:首次异步
+   getAvailableArea 落地前,available-area 最大化被误判"不叠栏",
+   insets 发布 0/0,小白条遮挡至下一收敛事件。修复:缓存未就绪时回退
+   `width >= display.width && height >= display.height*0.85`(本设备
+   available-area 最大化 = 95% 高度,诚实浮窗 ≤2/3 高度不受影响;真实
+   面积落地后 refreshAvailAreaCache 的变更回调立即纠偏);同时去掉
+   缓存未就绪时的 500ms 限速,事件突发不得抑制第一次取数。
+9. **H4 modeChanged=false 仍跑全套副作用(属实)**:该标志只进了日志。
+   现以 `pcModeObserved` 区分首次同步与 observer 误触发,值未变化时
+   跳过 native 回调/mode 文件写/布局全屏/insets 发布/clamp-force 全部
+   副作用并留 "pc mode unchanged" 日志(H21 一并满足);首次同步
+   (开机读值)永远执行完整链路,不改变平板开机行为。配套
+   writeTouchModeFile 增加未变化早退,重复触发只剩一次小文件读。
+10. **H15 2in1 不注册 pcmode observer(属实)**:`deviceType=='tablet'`
+    扩为 `tablet || 2in1`;但**开机首读仍仅 tablet**——2in1 的该设置项
+    不保证存在,getValueSync 缺省 'false' 会把 2in1 历史桌面开机默认
+    错误翻成 touch;2in1 开机不写 systemMode(resolveWant 视缺失为
+    desktop,行为不变),运行时切换由 observer 接管。
+11. **H9 phone 硬编码 'touch'(属实)**:writeTouchModeFile 的触摸分支
+    改为 `phone || tablet || 2in1` 且统一 `pcMode ? 'desktop' : 'touch'`,
+    为未来 phone+外接键鼠预留正确语义(phone 当前不在 deviceTypes,
+    行为不变)。
+12. **H6/H10 主窗口识别靠 'browser1' 魔法字符串(属实)**:
+    widgetId 来自原生 kGetWidget,崩溃重启进活跃引擎时主窗口可能拿到
+    非 1 的 id,全部守卫失效。WebBaseAbility 新增 `isMainAppWindow`:
+    **launch want 未携带 xcomponentId 参数(即自己分配 id)的冷启实例
+    才是主窗口**(引擎拉起的二级窗口一律带参,AppWindowAdapter.
+    createWindow 实锤),WebAbility 5 处守卫(writeInsetsToFile 的
+    顶层镜像、clearStaleWindowEntries、clamp、forceFullscreen、启动
+    权限块)全部换用该标志。
+13. **H8 barWatchTimer 与 setWindowSystemBarEnable 竞态(属实)**:1s
+    监视器在上一调用 pending 时读到旧 barsHidden 会重复发 WMS 调用。
+    新增 `barsPending` 标志,pending 期间早退;then/catch/throw 三路
+    均复位,onWindowStageDestroy 的恢复路径同步清理。
+14. **H5 异步未等待(部分属实)**:forceFullscreenWindow 的 resize 链
+    末尾补 `pushSafeAreaInsets()`——切换回调此前发布的是**改窗前**
+    矩形的 insets,若 WMS 吞掉尾部 windowSizeChange 则一直陈旧。完整
+    async/await 重构不做:该链路的事件驱动收敛(注释与 window-state-
+    machine §3 明确"无定时补偿")是 88 轮真机回归的设计结论,不宜推翻。
+15. **H12/H16 desktopLayoutWanted 每秒同步读(属实,性能)**:新增
+    mtime 键控单条缓存;仅 ms 级 mtime 参与缓存(秒级粒度 stat 会
+    命中 1s 陈旧窗),任何写者(本进程/兄弟窗口/渲染层命令)改文件
+    即失效。
+16. **F-N3 systemFontsPublished 单次锁错过运行时字体包(属实)**:
+    onFontIdUpdated 里比对 `font.getSystemFontList()` 长度与发布时
+    计数(publishedFontFamilyCount),变化则解锁重发布(仅在真实安装
+    字体包时付一次全量重载代价)。
+17. **F-N5/S8 probeThemeManifestFont 接受 manifest 任意绝对路径
+    (属实,需 root 才可利用)**:manifest 绝对路径条目仅在接受
+    `/data/themes/` 前缀时按原样尝试(真机日志里的下载库路径均在
+    主题树内),主题树外的条目只走 basename 拼接。
+
+**🟡/🟢 渲染层与主进程补丁修复**:
+
+18. **S2/S7 hookTrash 无路径规范化(属实)**:插件绕过 vault 规范化直调
+    `adapter.trashLocal("../x")` 时,`pathMod.join` 会把文件散落到
+    OHSidianTrash 之外。新增 resolve + 严格包含守卫(锚定
+    `trashRoot/<仓库名>`,见下方复核 R94-A 对锚点的修正),越界路径
+    回退原 trashLocal(行为同插件直接调用,不吞内容)。
+19. **F2/S-N16 utimesSync 失败 → 30 天契约破坏(属实)**:搬迁失败
+    utimes 时(只读 FS/SELinux),文件保留**原内容 mtime**, years 旧的
+    笔记今天删除、下次启动 60s 即被清理。修复:失败时 warn 并写旁车
+    `<dest>.ohsidian-trash-meta.json`(deletedAt);清理遍历优先读旁车
+    年龄,旁车缺失回退 mtime(旁车自身按 mtime 老化,无需特判)。
+20. **F-N16 清理一次性 60s(属实)**:purge 主体抽为
+    `__ohTrashPurgeOnce`,60s 定时外再挂 `will-quit` 一次 best-effort
+    补跑(覆盖 <60s 短会话与长期后台会话)。
+21. **F-N1 主题字体快速切换留孤立 FontFace(属实)**:A→B 两次切换
+    <200ms 时 A 的 load 回调晚于 B 的请求启动,两个 OhosThemeFont face
+    都 add 进 document.fonts,CSS 解析到先插入的 A。新增
+    `themeFontRequestSeq` 请求令牌:ok/bad 回调仅在自己仍是最新请求时
+    才改全局状态;bad 的 failedThemePaths 标记仍执行(路径级事实)。
+22. **H18 syncActiveFileToTargetLayout 写失败仍静默 reload(属实)**:
+    awaitWrite 的 reject 分支补 console.warn(保留 reload 的切模式 UX)。
+23. **S-N13 本地构建不跑 verify-asar(属实)**:ensure-obsidian-asar.mjs
+    在 update-obsidian 成功后以独立进程跑 `verify-asar.cjs`,失败即
+    构建失败(此前本地 DevEco 可把坏 asar 打进 HAP)。
+24. verify-asar.cjs:touch patch 标记 v13→v14,新增原子写
+    (writeModeFileSync)/meta 旁车/will-quit purge 三个 marker。
+
+**核实后不修(附理由)**:
+
+- **H13(误报)**:forceFullscreenWindow 已有"已是全屏矩形早退"
+  (窗口 ≥ 显示宽高即 return,WMS 1300002 防护注释在案),审计所指
+  "无条件 resize"与代码不符;
+- **H11**:300ms 单发对账 + windowRectChange(reason=MAXIMIZE)双保险,
+  审计自己也判定非 bug;
+- **F-N2 多 CUSTOMIZED 字体取第一个**:鸿蒙无 fontId→路径反查 API,
+  manifest 探测优先已是当前最优;维持文档化限制;
+- **F-N4 sandboxFontCopy 24 上限**:超限时**有** warn 日志(审计称
+  "静默"不准确),渲染层对读不到的字体统一标记不可用,自降级成立;
+- **F-N9 清理对时钟跳变敏感/F-N15 walk 深度与符号链接**:符号链接
+  本就不跟随(readdirSync withFileTypes 的 isFile() 对 symlink 为
+  false,跳过而非穿透),时钟跳变属低概率场景且 meta 旁车(本轮
+  F2 修复)已把删除时间与内容 mtime 解耦,暂不引入单调时钟复杂度;
+- **S3 bundleScopedUri 任意 bundle 段**:仅在直接 open 失败后作为
+  第二次尝试,open 本身仍受内核 URI 权限约束,未授权即失败;
+- **S-N14 npm 供应链/S-N15 verify 仅字符串包含**:标准风险,PR review
+  为主防线,维持现状。
+
+**验证**:TOUCH_MODE_PATCH/MAIN_PROCESS_PATCH 模板串语法通过
+(node vm.Script);ensure-obsidian-asar.mjs/verify-asar.cjs
+node --check 通过;build-release.yml 无 tab、缩进检查通过;
+ArkTS 改动待 DevEco 编译 + 真机回归(见下)。
+
+**真机回归清单(下轮部署前)**:①分享面板:图库/文件管理器分享图片、
+文本到 OHSidian 仍正常插入(S1 门不得误伤);②命令面板触屏切换
+(override 写入走原子路径)与字号命令;③触摸↔窗口模式切换各 3 次
+(观察 "pc mode unchanged" 日志只在误触发时出现,切换本身不受早退
+影响);④PC 模式下最大化 → 底部无小白条残留(H2);⑤系统字体样式
+切换 A→B 快速连续切换,界面字体始终随最后一次(F-N1);⑥删除文件 →
+文档/OHSidianTrash 落位,`utimesSync failed` 场景(如可构造)删除
+时间以 meta 为准(F2);⑦崩溃/强杀后重启,mode 文件无空文件残留(H1)。
+
+**第 94 轮复核(自查审计,与本登记表同等标准)**:按五维(正确性/安全/
+功能影响/边界/可编译)对本轮全部 diff 逐段复查,发现并当场修复 4 项:
+
+1. **R94-A(高,S2 守卫锚点错误)**:初版 hookTrash 的包含检查锚在
+   `trashRoot` 且带 `!== trashRoot` 逃生门——`rel=".."` 时
+   `resolve(trashRoot,name,"..")` 恰好等于 trashRoot,通过检查后
+   `src=join(base,"..")`(仓库父目录)会被 rename 进回收站根。修正:
+   锚点改为 `targetRoot=resolve(trashRoot,name)` 且要求严格包含
+   (`indexOf(targetRoot+sep)===0`),恶意输入矩阵(rel 正常路径/
+   `..`/`.`/绝对路径/多重 `..`)node 实测全部符合预期:正常放行、
+   逃逸全拒。
+2. **R94-B(中,H12 缓存精度门失效)**:初版注释声称"仅缓存 ms 级
+   mtime",但 OpenHarmony `Stat.mtime` 是**秒**,秒×1000(≈1.7e12)
+   同样通过 `≥1e11` 门——同秒内重写可能命中 ≤1s 的陈旧缓存判定。
+   修正:缓存键加入文件 size(mtime+size);mode 文件中被读取的
+   systemMode/override 取值长度必变('touch'5/'desktop'7、
+   'auto'4/'touch'5/'desktop'7),同秒同尺寸碰撞实际不可达;仅
+   insets 等值变化的同长度重写会刷新 mtime 且不改变所缓存判定。
+3. **R94-C(加固,H4)**:`UpdateWindowPcmodeSwitchStatusCB` 从早退
+   分支挪回无条件执行——它是廉价幂等的状态重申,保留可覆盖"开机
+   首调时引擎尚未就绪、后续误触发又全部早退导致引擎永远收不到
+   现值"的理论窗口;被跳过的只剩 IO 与窗口副作用。
+4. **R94-D(加固,F-N1)**:`applyThemeFontFace` 空路径重置分支补
+   `themeFontRequestSeq++`——否则仍在途的旧加载回调会在重置之后
+   把 face 重新 add 进 document.fonts(下一轮 200ms 轮询会自愈,
+   补令牌后彻底封闭)。
+
+复核同时确认无问题的项:publishModeFileAtomic 的 rename 失败回退
+路径(直写+清理 tmp)、barsPending 三路复位与 destroy 清理、
+isAcceptableSharedUri 对 authority 形态(file://<bundle>/...)的放行、
+writeTouchModeFile 未变化早退对首次写 override='auto' 的保留、2in1
+开机不写 systemMode 时 resolveWant/desktopLayoutWanted 的缺失值语义
+(均等价于 'desktop')、will-quit 补跑的同步性(app.on will-quit 内
+同步遍历,不阻塞退出)、CI 中 ARCHIVE 变量在 set -u 下先赋值后引用
+的顺序、verify-asar 全部 marker 与补丁源串一致。
+
 ---
 
 ## 窗口专题总览(第 87-93 轮,2026-10-01)
