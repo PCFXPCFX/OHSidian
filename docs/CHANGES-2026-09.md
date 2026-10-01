@@ -2928,3 +2928,88 @@ Emoji Flags 等)✓。
 且**不再**出现 `ALL font names`/`no non-static font path found`;
 真实主题字体下切换样式仅首次启动跑全量发布链,后续 fontId 更新只见
 `publishSystemFonts: already published this launch, skipping`。
+
+### 第 83 轮(2026-10-01):启动日志判读——三处必现错误的根因修复
+
+**日志实锤**(10:24 冷启动):①`setBounds(1,false,{},undefined)` ×4 →
+`Failed to set the window bounds. Cause:{"code":1300010}`;②
+`requestPermissions, no active context` ×2 → `startup permission NOT
+granted: directory_document/directory_download code=-2`;③`showWindow(1)`
+→ `failed 2097232` → `showAbility fail, err:{"code":16000067}`。
+
+**根因与修复**:
+
+1. **setBounds 空对象保护失效(1300010)**:引擎移动端模拟流程发送
+   `{}`;既有守卫 `isNaN(bounds.width)` 对 undefined 判 false——ArkTS
+   的 isNaN 是 Number.isNaN 语义、不做强制转换(编译缓存 10:23:43 实锤
+   运行的就是含守卫的最新构建),undefined/NaN 直达
+   moveWindowToAsync/resizeAsync 被系统拒绝。项目内早有正确先例
+   (SubWindowAdapter.createSubWindow 先判 `!(width > 0)`),唯独此处
+   漏改。修复:setBounds 四个字段全改比较式判断(`> 0`/`>= 0`),
+   同步修 SubWindowAdapter.setSubWindowBounds 的 `!isNaN(r.left)` 同源
+   缺陷(undefined 通过检查 → moveWindowTo(undefined) 被拒)。
+2. **启动权限请求时序性必败**:onWindowStageCreate 末尾请求
+   directory_document/directory_download,走 requestPermissions →
+   ContextAdapter.getActiveContext(),而 active window 要等渲染进程
+   `setActiveWindow("browser1")`(日志 01.119)才设置——请求在 00.993,
+   时序上永远赶不上,该特性上线以来一次都没成功过。修复:
+   PermissionManagerAdapter 新增 requestPermissionsForContext(context,
+   type, cb)(ArkTS 专用,不进 JSBind 白名单,JS 契约不变),原入口
+   复用它;WebAbility 启动块直接传 this.context。首装将在启动时正确弹
+   Documents/Downloads 授权框,授权后静默;拒绝走既有 NOT granted 分支。
+3. **showAbility 16000067 降噪**:主窗口启动期 win.show() →
+   showAbility 内部带 StartOptions 走 startAbility,被本 WMS 构建以
+   16000067(StartOptions 校验失败,第 22/31 轮已记录的同源怪癖)拒绝;
+   窗口本就在前台,调用是 no-op,失败无实际影响。修复:catch 识别
+   16000067 降级 info,其余错误仍 E 级。
+4. **杂项**:getAvailableArea success、diagnostic deviceType 两处
+   E → info;module.json5 三个 directory 权限 usedScene.abilities 补
+   EntryAbility(原模板填料只写 FormAbility,运行时不校验,语义修正)。
+
+**验证**:web_engine assembleHar BUILD SUCCESSFUL;编译产物含新字符串
+(`without usable geometry`/`requestPermissionsForContext`)且旧字符串
+(`setBounds without geometry`)已消失。
+
+### 第 84 轮(2026-10-01):CLI server socket EPERM——重定向到应用可写目录
+
+**日志实锤**:`Electron E CLI server error: Error: listen EPERM:
+operation not permitted /storage/Users/currentUser/.obsidian-cli.sock`。
+
+**根因**:Obsidian 1.13+ 自带 CLI server,socket 路径取
+`$XDG_RUNTIME_DIR || homedir()`;设备上 homedir 为
+/storage/Users/currentUser,应用沙箱对其无写权限 → 每次启动 bind
+EPERM,CLI 服务死。
+
+**修复**:MAIN_PROCESS_PATCH 最前部新增 shim——XDG_RUNTIME_DIR 未设置
+时置为 `app.getPath("userData")`(深链桥已在写该目录,可写性已证),
+先于 main.js 计算 socket 路径执行;失败静默回退原路径(仅恢复原 EPERM
+噪音,无回归)。`--repatch` 每次从官方原始 main.js 重打,无重复注入。
+
+### 第 85 轮(2026-10-01):回收站重定向 文档/OHSidianTrash + 30 天自动清理
+
+**动机**:删除安全网(第 14 轮)把删除统一改本地 `.trash`,但 `.trash`
+是以点号开头的隐藏文件夹,文件管理不显示,已删除文件触达不了;顺带
+回答"删除的东西在哪、会不会与 Documents 里的仓库打架"(不会:
+OHSidianTrash 与各仓库平级,Obsidian 不索引不同步)。
+
+**实现**(均在 scripts/update-obsidian.mjs;已核对 app.js 内
+trashLocal(e) 为仓库相对路径 + getFullPath + queue 序列化语义):
+
+1. **渲染端**:hookTrash 在保留 v.trash 强制 local 分支的基础上,替换
+   adapter.trashLocal 的搬移目标——`<cfg.documentsDir>/OHSidianTrash/
+   <仓库名>/<相对路径>`(重名追加序号),utimesSync 盖删除时刻(rename
+   保留旧 mtime,而清理按 mtime 计龄);索引更新仍由 vault.trash 完成,
+   任何失败回退原 trashLocal。documentsDir 复用渲染端现成 readMode()。
+2. **主进程**:启动 60s 后扫描 `<documentsDir>/OHSidianTrash` 与
+   `<userData>/obsidian.json` 注册的各仓库 `.trash`(main.js 的仓库
+   注册表,失效路径会被其自清),mtime 超 30 天 unlink,空目录
+   rmdirSync 剪除,符号链接跳过,逐条容错、绝不阻塞启动。
+3. **旧文件口径**:存量 `.trash` 无删除时间,按内容 mtime 计龄,首次
+   清理即清"30 天未动"者;此后新删除按删除时刻计。
+
+**文档**:README/README_EN 新增"文件删除与回收站"小节,数据安全条目
+与架构补丁清单同步重写。
+
+**部署**:设备 asar 经用户批准的离线替换(旧前导码逐字比对 → 换新 →
+重打包 → 新进程 13 项复核全 PASS)已生效,内容与管线源码一致;有网时
+`--repatch` 产出等价。
