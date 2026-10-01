@@ -79,8 +79,9 @@ build-profile.json5
 local.properties
 
 # OHSidian build/update tooling
+# (package-lock.json IS committed: npm ci in CI and the hvigor auto-ensure
+#  hook both require it for reproducible installs)
 scripts/node_modules/
-scripts/package-lock.json
 scripts/.tmp-update/
 scripts/.tmp-refresh/
 
