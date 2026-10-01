@@ -101,6 +101,22 @@ for (const [file, patch, marker] of [
       }
     }
   }
+  if (file === 'main.js') {
+    // Round 93 (93e), kept in sync with update-obsidian.mjs main(): reverse
+    // the window-frame default - an unset global frame value counts as
+    // native; explicit "hidden"/"custom" keep their stock frameless
+    // semantics. Idempotent via the patched form check.
+    const fsrc = 'let Ae=D.frame==="native",Ue=Ae?"default":"hidden"';
+    const fdst = 'let Ae=D.frame==="native"||D.frame==null,Ue=Ae?"default":"hidden"';
+    if (src.includes(fdst)) {
+      console.log('[refresh] body patch already applied: frame default unset=native');
+    } else if (src.includes(fsrc)) {
+      src = src.replace(fsrc, fdst);
+      console.log('[refresh] body patch applied: frame default unset=native');
+    } else {
+      console.log('[refresh] WARNING: frame default site missing - windows keep the hidden-frameless default');
+    }
+  }
   fs.writeFileSync(full, patch + src);
   console.log('[refresh] ' + file + ': new patch prepended (len ' + patch.length + ')');
 }

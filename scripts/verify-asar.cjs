@@ -25,7 +25,9 @@ try {
     process.exit(1);
   }
   const checks = {
-    'app touch patch v7': app.includes('__ohsidianTouchPatch==="7"'),
+    'app touch patch v13': app.includes('__ohsidianTouchPatch==="13"'),
+    'main frame default unset=native (round 93e)': main.includes('D.frame==null'),
+    'app per-window geometry match (round 87 B2)': app.includes('resolveGeometry'),
     'app event-driven keyboard (modePollMs=200)': app.includes('modePollMs=200'),
     'app system fonts style': app.includes('ohsidian-system-fonts'),
     'app restore-fonts command': app.includes('restoreSystemFonts'),
@@ -38,6 +40,8 @@ try {
     'app migration self-copy guard': app.includes('目标目录在当前仓库内'),
     'app font family cycle command': app.includes('ohsidian-font-family'),
     'app desktop safe-pad (viewportAware)': app.includes('viewportAvoidsBars'),
+    'app round-88 body pad (titlebar avoidance)': app.includes('data-ohsidian-pad'),
+    'app round-88 float-root pad': app.includes('.suggestion-bg{padding-top'),
     'main documents vault default': main.includes('__ohDvResolve'),
     'app font picker list injection': app.includes('window.__ohsidianSystemFonts||[]'),
     'app theme font face bridge': app.includes('applyThemeFontFace'),

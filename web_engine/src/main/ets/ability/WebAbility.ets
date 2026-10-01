@@ -59,6 +59,16 @@ import { systemShare } from '@kit.ShareKit';
 
 const TAG: string = 'WebAbility';
 
+// Minimal shape of display.getAvailableArea()'s resolved Rect (round 92).
+// Declared locally: this SDK's display namespace does not export the type
+// directly, and ArkTS forbids the implicit any a missing type would cause.
+interface AvailableAreaRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
 export class WebAbility extends WebBaseAbility {
   private static WINDOW_CLOSE: number = 1000;
   // Share / 碰一碰 cold-start handoff: the share want arrives in onCreate,
@@ -74,15 +84,22 @@ export class WebAbility extends WebBaseAbility {
   // onWindowStageCreate. Drives the forced-maximize policy and the touch-mode
   // file.
   private pcModeEnabled: boolean = false;
-  // Free-window caption strip height in CSS px (1 vp == 1 css px), tracked
-  // from windowTitleButtonRectChange and published through the mode file so
-  // the web content can avoid the strip. 0 = fullscreen / no caption.
-  private captionCss: number = 0;
   // IME height in CSS px, from keyboardHeightChange; published through the
   // mode file: Obsidian's mobile formatting toolbar positions itself with
   // top: calc(100vh - var(--keyboard-height) - toolbar-height) and nothing
   // in the engine sets that variable.
   private keyboardCss: number = 0;
+  // One-shot post-status-change reconciliation timer (round 87 A2, revised
+  // round 88: NO value-compare dedup on the engine push channel - the
+  // engine consumes every windowSizeChange/windowRectChange event, including
+  // same-value ones, e.g. the WINDOW_SHOWN re-assert; skipping them broke
+  // maximize/restore and drag-resize on device); -1 = idle.
+  private viewportRecheckTimer: number = -1;
+  // Throttle for geometry-only mode-file writes (round 88): drag-resize
+  // fires windowSizeChange per frame and the rect is part of the per-window
+  // entry; without the throttle every tick rewrites the file on the UI
+  // thread. Payload changes (insets/decor/keyboard) always write.
+  private lastGeomWriteMs: number = 0;
   // System font-size scale (settings.fontSizeScale, followSystem). The
   // engine applies it to native fp text but the WEB content never sees it
   // (no engine binding queries it), so publish it through the mode file and
@@ -106,28 +123,63 @@ export class WebAbility extends WebBaseAbility {
   //    Layout fullscreen is explicitly RESET to false: leaving it enabled
   //    makes the web surface extend under the WMS caption strip and eat its
   //    drag hot zone - the "system title bar cannot move the window" bug.
-  //    Insets are 0 (floating windows never overlap the bars).
+  //    Floating windows get 0 insets; a MAXIMIZED free window overlaps the
+  //    bars and gets the real ones, and (round 87, B1) the engine viewport
+  //    NO LONGER subtracts the bars - the renderer CSS-avoids them via the
+  //    desktop-safe-pad, exactly like the touch regime, so the maximized
+  //    bottom edge blends into the UI instead of leaving a dead background
+  //    strip.
   //  - phone                       -> same as touch.
   // There are NO timed settle/re-push compensations in this file: the engine
   // starts the browser only after the XComponent surface reports a stable
   // size (utils/SurfaceReady.ets), so every push below reacts to a real
-  // window-geometry event.
+  // window-geometry event. The single exception is the one-shot
+  // reconciliation after a window-status transition (round 87 A2, kept
+  // unconditional in round 88 - docs/window-state-machine.md §3). Engine
+  // pushes are NEVER deduped: the engine consumes each event, including
+  // same-value ones (the WINDOW_SHOWN re-assert, reason-tagged rect events);
+  // value-compare skipping broke maximize/restore and drag-resize on device.
+
+  // True when the window rect covers everything below the status bar or
+  // the whole display (round 92). The old check compared against the full
+  // display only - but THIS device maximizes free windows to the AVAILABLE
+  // area, [0,87,2800,1753] against a 2800x1840 display (device log), so
+  // "maximized" never registered: insets stayed 0/0, the stale caption
+  // stayed visible and the nav-indicator strip kept covering content.
+  // A window spanning the available area overlaps the bars just as much
+  // as an edge-to-edge one (the status bar is ABOVE its top edge; the nav
+  // strip is INSIDE it).
+  private coversDisplayArea(rect: window.Rect): boolean {
+    try {
+      const displayClass = display.getDefaultDisplaySync();
+      if (rect.width >= displayClass.width && rect.height >= displayClass.height) {
+        return true;
+      }
+      const avail = this.availAreaCache;
+      if (avail !== undefined && avail.height > 0) {
+        return rect.width >= avail.width && rect.height >= avail.height;
+      }
+      return false;
+    } catch (exception) {
+      return false;
+    }
+  }
 
   // Synthesizes the engine viewport from window properties. Two regimes:
   //  - Touch mode (full = true): the window IS the display; the real bar
   //    insets are published separately and the web content avoids them.
-  //  - PC mode / free windows: the viewport is the window rect minus the
-  //    REAL avoid areas (status bar / nav indicator) and the caption strip.
-  //    Using drawableRect here is NOT enough: when a freeform window is
-  //    maximized on a tablet the system reports drawableRect covering the
-  //    nav-indicator strip (the window extends edge-to-edge while the
-  //    indicator floats on top) - the stale viewport left the bottom strip
-  //    of content hidden behind the navigation bar. Subtract the avoid
-  //    areas explicitly so maximized and restored states both converge.
+  //  - PC mode / free windows: the viewport is the drawable rect (window
+  //    rect minus the caption strip; 0 when no caption).
+  //    Round 87 (B1): maximized free windows NO LONGER subtract the
+  //    system-bar avoid areas here. The old explicit deduction (rounds
+  //    56/63) cropped the web Surface above the nav indicator, leaving a
+  //    strip of dead window background that was neither web content nor a
+  //    system bar - the reported "maximized bottom cannot blend into the
+  //    UI". The viewport is now the full edge-to-edge rect and the renderer
+  //    avoids the bars with CSS - one avoidance path for every form factor.
   private computeViewportBound(prop: window.WindowProperties): WindowBound {
-    const winObj = this.mainWindow;
     const full = !this.pcModeEnabled;
-    if (full || !winObj) {
+    if (full || !this.mainWindow) {
       return {
         left: prop.windowRect.left,
         top: prop.windowRect.top,
@@ -135,37 +187,150 @@ export class WebAbility extends WebBaseAbility {
         height: prop.windowRect.height,
       };
     }
-    // PC mode / free window: start from the window rect, subtract the
-    // caption (decor) area reported by drawableRect.top (0 when no caption)
-    // and any system-bar avoid areas that overlap the window.
-    let leftPx: number = prop.drawableRect.left;
-    let topPx: number = prop.drawableRect.top;
-    let widthPx: number = prop.drawableRect.width;
-    let heightPx: number = prop.drawableRect.height;
-    try {
-      const displayClass = display.getDefaultDisplaySync();
-      const rect = prop.windowRect;
-      const fullscreenLike: boolean = rect.width >= displayClass.width &&
-        rect.height >= displayClass.height;
-      if (fullscreenLike) {
-        // Maximized free window: drawableRect ignores the bars that float
-        // on top of the edge-to-edge window - subtract them explicitly.
-        const sysAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
-        const navAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
-        const bottomPx: number = Math.max(navAvoid.bottomRect.height, sysAvoid.bottomRect.height);
-        heightPx = Math.max(0, heightPx - bottomPx);
-        widthPx = Math.max(0, widthPx - Math.max(0,
-          Math.max(sysAvoid.leftRect.width, sysAvoid.rightRect.width)));
-      }
-    } catch (exception) {
-      LogUtil.warn(TAG, 'viewport avoid-area adjust failed: ' + JSON.stringify(exception));
-    }
     return {
-      left: prop.windowRect.left + leftPx,
-      top: prop.windowRect.top + topPx,
-      width: widthPx,
-      height: heightPx,
+      left: prop.windowRect.left + prop.drawableRect.left,
+      top: prop.windowRect.top + prop.drawableRect.top,
+      width: prop.drawableRect.width,
+      height: prop.drawableRect.height,
     };
+  }
+
+  // True while this window has the system bars hidden (round 89). While
+  // hidden, pushSafeAreaInsets publishes 0/0 and the web content fills the
+  // window edge to edge; the renderer's CSS pad stays as the fallback for
+  // the case where setWindowSystemBarEnable is rejected by the WMS.
+  private barsHidden: boolean = false;
+  // 1s watcher that re-evaluates bar visibility (round 89): the layout
+  // override is written by the RENDERER (in-app command) with no window
+  // geometry event attached, so event-driven evaluation alone would leave
+  // the bars up until the next resize. The tick only reads the small mode
+  // file; applySystemBarVisibility early-returns when nothing changed.
+  private barWatchTimer: number = -1;
+  // Last decor visibility this window pushed (round 91): true = free-window
+  // caption shown, false = hidden (maximized/fullscreen). Transition-guard
+  // for the per-geometry-event decor calls.
+  private decorVisibleLast: boolean | undefined = undefined;
+  // Available-area cache (round 92): Display.getAvailableArea() is
+  // ASYNCHRONOUS, but the coversDisplayArea checks run on synchronous
+  // geometry-event paths. Refreshed fire-and-forget from the status-change
+  // handler, the 1s bar watcher and startup; the sync checks use the last
+  // known value. Until the first result lands the cache is undefined and
+  // the check falls back to display-size only (false for this device's
+  // available-area maximize) - the next status event / watcher tick /
+  // A2 reconciliation converges within a second.
+  private availAreaCache: AvailableAreaRect | undefined = undefined;
+  private availAreaAtMs: number = 0;
+
+  // Fire-and-forget available-area refresh, rate-limited to one request
+  // per 500ms (the geometry handlers call this on every event).
+  private refreshAvailAreaCache(): void {
+    const nowMs: number = Date.now();
+    if (nowMs - this.availAreaAtMs < 500) {
+      return;
+    }
+    this.availAreaAtMs = nowMs;
+    try {
+      display.getDefaultDisplaySync().getAvailableArea()
+        .then((area) => {
+          const prev = this.availAreaCache;
+          const next: AvailableAreaRect = {
+            left: area.left,
+            top: area.top,
+            width: area.width,
+            height: area.height,
+          };
+          this.availAreaCache = next;
+          if (prev === undefined || prev.height !== next.height ||
+            prev.width !== next.width) {
+            // The cached area changed - judgments may flip; re-run the
+            // inset publication (its unchanged check makes a no-op free).
+            this.pushSafeAreaInsets();
+          }
+        })
+        .catch(() => {
+        });
+    } catch (exception) {
+      // cache stays stale; the display-size branch still applies
+    }
+  }
+
+  // Mirrors the renderer's resolveWant: does the user want the DESKTOP
+  // layout? cfg.override (written by the in-app command) wins; 'auto'
+  // follows cfg.systemMode, which this process writes on every PC-mode
+  // switch (touch form factor -> 'touch', PC mode / 2in1 -> 'desktop').
+  private desktopLayoutWanted(): boolean {
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const filePath: string = filesDir + '/ohsidian-mode.json';
+      if (fileIo.accessSync(filePath)) {
+        const cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+        if (cfg) {
+          const o = cfg['override'];
+          if (o === 'desktop') {
+            return true;
+          }
+          if (o === 'touch') {
+            return false;
+          }
+          return cfg['systemMode'] === 'desktop';
+        }
+      }
+    } catch (e) {
+      // fall through: conservative default keeps the bars visible
+    }
+    return false;
+  }
+
+  // Round 89: in the DESKTOP layout a fullscreen-like window hides the
+  // system bars entirely. Round 88's body padding approach lost on device:
+  // the status bar / three-key nav strip kept covering Obsidian's top and
+  // bottom bars regardless of the CSS avoidance. The bars and the content
+  // cannot both own that strip, so - authorized by the user - the bars
+  // yield: hidden for touch-on-desktop-layout and maximized PC windows,
+  // kept for the mobile layout (which consumes the inset vars fine) and
+  // for floating windows (which never overlap the bars). Edge-swipe still
+  // summons the bars temporarily (system behavior). If the WMS rejects the
+  // call the flag stays false and the round-88 CSS pad remains the
+  // fallback, so this degrades to round 88 behavior, not worse.
+  private applySystemBarVisibility(): void {
+    if (deviceInfo.deviceType !== 'tablet' && deviceInfo.deviceType !== 'phone') {
+      return;
+    }
+    const winObj = this.mainWindow;
+    if (!winObj) {
+      return;
+    }
+    let fullscreenLike: boolean = false;
+    try {
+      // Round 92: available-area comparison included (maximized free
+      // window on this device = available area, not the full display).
+      fullscreenLike = this.coversDisplayArea(winObj.getWindowProperties().windowRect);
+    } catch (exception) {
+      return;
+    }
+    const wantHidden: boolean = fullscreenLike && this.desktopLayoutWanted();
+    if (wantHidden === this.barsHidden) {
+      return;
+    }
+    try {
+      const names: Array<'status' | 'navigation'> =
+        wantHidden ? [] : ['status', 'navigation'];
+      winObj.setWindowSystemBarEnable(names)
+        .then(() => {
+          this.barsHidden = wantHidden;
+          // Re-publish: insets collapse to 0 while hidden (the renderer
+          // un-pads), real bar heights return when shown.
+          this.pushSafeAreaInsets();
+          LogUtil.info(TAG, 'system bars ' + (wantHidden ? 'hidden' : 'shown') +
+            ' for desktop layout');
+        })
+        .catch((err: BusinessError) => {
+          LogUtil.warn(TAG, 'setWindowSystemBarEnable rejected: ' + JSON.stringify(err) +
+            ' - CSS pad fallback stays active');
+        });
+    } catch (exception) {
+      LogUtil.warn(TAG, 'setWindowSystemBarEnable threw: ' + JSON.stringify(exception));
+    }
   }
 
   // Publishes the real system-bar insets (CSS px) to the renderer through
@@ -173,30 +338,46 @@ export class WebAbility extends WebBaseAbility {
   // pattern: the background extends under the bars, while interactive
   // content avoids them using these values (Obsidian's mobile CSS consumes
   // --safe-area-inset-top/bottom, which otherwise fall back to a hardcoded
-  // simulated iPhone notch). Zero for PC-mode floating windows and for
-  // 2in1/PC, whose windows never overlap the bars.
+  // simulated iPhone notch). Zero whenever the window rect does not cover
+  // the display (floating windows, 2in1/PC) - those never overlap the bars.
+  // Round 89: in the DESKTOP layout a fullscreen-like window hides the
+  // system bars entirely (round 88 proved CSS avoidance cannot win the
+  // ownership fight for that strip on device); while hidden the published
+  // insets are 0 and the content fills the window edge to edge.
   private pushSafeAreaInsets(): void {
     let topPx: number = 0;
     let bottomPx: number = 0;
     const winObj = this.mainWindow;
+    this.applySystemBarVisibility();
     try {
       const handheld: boolean = deviceInfo.deviceType === 'tablet' ||
         deviceInfo.deviceType === 'phone';
       if (handheld && winObj) {
-        // Touch-mode windows ALWAYS overlap the bars. PC-mode free windows
-        // don't - EXCEPT when maximized: a maximized freeform window covers
-        // the whole display edge-to-edge with the nav indicator floating on
-        // top, so its avoid areas are real and must be published (the
-        // renderer pads the content bottom; round 61 fix for the missing
-        // bottom avoidance in maximized PC windows).
-        let overlapsBars: boolean = !this.pcModeEnabled;
-        if (!overlapsBars) {
-          const displayClass = display.getDefaultDisplaySync();
-          const rect = winObj.getWindowProperties().windowRect;
-          overlapsBars = rect.width >= displayClass.width &&
-            rect.height >= displayClass.height;
-        }
-        if (overlapsBars) {
+        // Bar overlap is a GEOMETRIC fact (does the window rect cover the
+        // display?), not a mode fact (round 87, C2): a maximized free
+        // window overlaps the bars, a floating window does not, and a
+        // touch-mode window whose forced-fullscreen resize was rejected
+        // sits as a floating rect too - the old unconditional
+        // !pcModeEnabled handed it real bar insets it never overlaps.
+        const rect = winObj.getWindowProperties().windowRect;
+        // Round 92: coversDisplayArea accepts the available-area-sized
+        // maximize this device produces (see the method comment).
+        const overlapsBars: boolean = this.coversDisplayArea(rect);
+        if (overlapsBars && this.barsHidden) {
+          // Round 90: setWindowSystemBarEnable([]) hides the STATUS bar but
+          // the tablet WMS keeps the gesture indicator (the little white
+          // pill) floating over the bottom edge - device-verified. Avoid it
+          // with a bottom-only inset: the renderer pads the content bottom
+          // (body padding, background extends under the pill) while the
+          // top stays flush.
+          const navAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+          const sysAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+          topPx = 0;
+          // Gesture indicator on gesture-nav devices; three-key nav reports
+          // through TYPE_SYSTEM (and is likewise NOT hidden by the API on
+          // some builds) - take whichever applies.
+          bottomPx = Math.max(navAvoid.bottomRect.height, sysAvoid.bottomRect.height);
+        } else if (overlapsBars) {
           const sysAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
           const navAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
           topPx = sysAvoid.topRect.height;
@@ -223,23 +404,38 @@ export class WebAbility extends WebBaseAbility {
     // Title-bar handling for free windows: the WMS caption strip (name +
     // minimize/maximize/close) is the only title bar that exists in EVERY
     // layout - the emulated-mobile web layout has none at all (hiding the
-    // system caption there left the window with no bar whatsoever). Keep it
-    // visible and let the web content avoid it via the published caption
-    // height. Fullscreen windows have no caption. Re-evaluated on every
-    // windowSizeChange: the caption only exists once the window becomes a
-    // free window.
+    // system caption there left the window with no bar whatsoever). Keep
+    // it visible; decor='system' tells the renderer to hide Obsidian's own
+    // .titlebar while the system strip is up.
+    // Round 92 revision of round 91: this device maximizes free windows to
+    // the AVAILABLE area (below the status bar), where the caption is
+    // LEGITIMATE UI - it carries the restore button, and drawableRect.top
+    // correctly carves the caption out of the viewport (that strip is
+    // caption, not dead background). So fullscreen-like windows no longer
+    // get the decor force-hidden; only truly edge-to-edge windows (touch
+    // mode, where there is no caption anyway) run without it.
     let decor: string = 'none';
     try {
-      const displayClass = display.getDefaultDisplaySync();
-      let fullscreenLike: boolean = false;
+      // Caption presence is a FULL-DISPLAY question, different from the
+      // insets question above: an available-area-maximized window (this
+      // device's maximize) still shows the caption with its restore button
+      // (device log hasDecor:1), and drawableRect.top correctly carves the
+      // caption out of the viewport - that strip is caption, not dead
+      // background. Only a window covering the WHOLE display is truly
+      // fullscreen and runs without a caption (touch mode).
+      let captionless: boolean = false;
       if (winObj !== undefined) {
         const rect = winObj.getWindowProperties().windowRect;
-        fullscreenLike = rect.width >= displayClass.width &&
+        const displayClass = display.getDefaultDisplaySync();
+        captionless = rect.width >= displayClass.width &&
           rect.height >= displayClass.height;
       }
-      if (winObj !== undefined && !fullscreenLike) {
+      if (winObj !== undefined && !captionless) {
         try {
-          winObj.setWindowDecorVisible(true);
+          if (this.decorVisibleLast !== true) {
+            winObj.setWindowDecorVisible(true);
+            this.decorVisibleLast = true;
+          }
           winObj.setWindowTitleButtonVisible(true, true, true);
           // Re-enable WMS title-bar dragging: the startup path called
           // setWindowTitleMoveEnabled(!hideTitleBar) with hideTitleBar=true
@@ -258,35 +454,23 @@ export class WebAbility extends WebBaseAbility {
     } catch (exception) {
       decor = 'none';
     }
-    this.writeInsetsToFile(topCss, bottomCss, decor, this.captionCss, this.keyboardCss,
-      this.viewportAvoidsBars());
+    this.writeInsetsToFile(topCss, bottomCss, decor, this.keyboardCss);
   }
 
-  // True when the ENGINE viewport bound is already reduced by the avoid
-  // areas (computeViewportBound subtracts them for fullscreen-like PC
-  // windows). The renderer uses this to skip its CSS-side bar padding:
-  // padding on top of the reduced surface would avoid the bars twice and
-  // leave a blank strip between the bar and the content.
-  private viewportAvoidsBars(): boolean {
-    if (!this.pcModeEnabled) {
-      return false;
-    }
-    const winObj = this.mainWindow;
-    if (!winObj) {
-      return false;
-    }
-    try {
-      const displayClass = display.getDefaultDisplaySync();
-      const rect = winObj.getWindowProperties().windowRect;
-      return rect.width >= displayClass.width && rect.height >= displayClass.height;
-    } catch (exception) {
-      return false;
-    }
-  }
-
-  // Read-modify-write for ohsidian-mode.json, preserving systemMode/override.
+  // Read-modify-write for ohsidian-mode.json. GLOBAL fields (systemMode,
+  // override, fonts, documentsDir, ...) stay top-level; WINDOW geometry
+  // goes under cfg.windows[<OHOS window id>] so concurrent Obsidian windows
+  // cannot clobber each other's insets anymore (round 87, B2 - the file
+  // used to be a single slot every EntryAbility overwrote within one 200ms
+  // renderer poll). The MAIN window additionally mirrors its own geometry
+  // into the legacy top-level fields: the main-process patch (default vault
+  // / trash purge) and the pre-B2 renderer read those, and a single-window
+  // session - the common case - is fully served by them.
+  // cfg.viewportAvoidsBars is retired (round 87, B1): always false now,
+  // kept only so a stale true written by an older build converges to false
+  // instead of suppressing the renderer's CSS avoidance forever.
   private writeInsetsToFile(topCss: number, bottomCss: number, decor: string,
-    captionCss: number, keyboardCss: number, viewportAvoidsBars: boolean): void {
+    keyboardCss: number): void {
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
       const filePath: string = filesDir + '/ohsidian-mode.json';
@@ -302,23 +486,107 @@ export class WebAbility extends WebBaseAbility {
         cfg = {};
       }
       const insets: Record<string, number> = { 'top': topCss, 'bottom': bottomCss };
+      // Window rect in CSS px (Chromium maps 1 css px to one density pixel);
+      // the renderer size-matches itself against it (no OHOS id there).
+      let winId: number = -1;
+      let rectLeft: number = 0;
+      let rectTop: number = 0;
+      let rectWidth: number = 0;
+      let rectHeight: number = 0;
+      if (this.mainWindow !== undefined) {
+        try {
+          winId = this.mainWindow.getWindowProperties().id;
+          const rect = this.mainWindow.getWindowProperties().windowRect;
+          let density: number = 1;
+          try {
+            density = display.getDefaultDisplaySync().densityPixels;
+          } catch (exception) {
+            density = 1;
+          }
+          if (!density || density <= 0) {
+            density = 1;
+          }
+          rectLeft = Math.round(rect.left / density);
+          rectTop = Math.round(rect.top / density);
+          rectWidth = Math.round(rect.width / density);
+          rectHeight = Math.round(rect.height / density);
+        } catch (exception) {
+          winId = -1;
+        }
+      }
+      const isMain: boolean = this.xcomponentId === ConfigData.DEFAULT_WINDOW_ID;
       // windowSizeChange fires continuously during drag-resizes; skip the
-      // file write when nothing actually changed.
-      const unchanged: boolean = cfg['windowDecor'] === decor &&
-        cfg['caption'] === captionCss &&
-        cfg['keyboard'] === keyboardCss &&
-        cfg['viewportAvoidsBars'] === viewportAvoidsBars &&
-        cfg['insets'] !== undefined &&
-        (cfg['insets'] as Record<string, number>)['top'] === topCss &&
-        (cfg['insets'] as Record<string, number>)['bottom'] === bottomCss;
+      // file write when nothing actually changed (own entry + legacy mirror).
+      let windows: Record<string, Object> = {};
+      const existingWindows = cfg['windows'];
+      if (existingWindows !== undefined && existingWindows !== null) {
+        windows = existingWindows as Record<string, Object>;
+      }
+      let unchanged: boolean = true;
+      // Round 88: geometry-only changes (rect moved, insets/decor/keyboard
+      // identical) are throttled to one write per 500ms - drag-resize fires
+      // per-frame and rewriting the file every tick on the UI thread wedged
+      // window adjustment on device. Payload changes bypass the throttle.
+      let geomOnly: boolean = true;
+      if (winId >= 0) {
+        const key: string = '' + winId;
+        const prevObj = windows[key];
+        if (prevObj !== undefined && prevObj !== null) {
+          const prev = prevObj as Record<string, Object>;
+          const sameGeom: boolean = prev['l'] === rectLeft && prev['t'] === rectTop &&
+            prev['w'] === rectWidth && prev['h'] === rectHeight;
+          const samePayload: boolean = prev['insetsTop'] === topCss &&
+            prev['insetsBottom'] === bottomCss && prev['decor'] === decor &&
+            prev['keyboard'] === keyboardCss;
+          unchanged = sameGeom && samePayload;
+          geomOnly = !sameGeom && samePayload;
+        } else {
+          unchanged = false;
+          geomOnly = false;
+        }
+      }
+      if (isMain) {
+        const mirrorSame: boolean = cfg['windowDecor'] === decor &&
+          cfg['keyboard'] === keyboardCss &&
+          cfg['insets'] !== undefined &&
+          (cfg['insets'] as Record<string, number>)['top'] === topCss &&
+          (cfg['insets'] as Record<string, number>)['bottom'] === bottomCss &&
+          cfg['viewportAvoidsBars'] === false;
+        unchanged = unchanged && mirrorSame;
+        geomOnly = geomOnly && mirrorSame;
+      }
       if (unchanged) {
         return;
       }
-      cfg['insets'] = insets;
-      cfg['windowDecor'] = decor;
-      cfg['caption'] = captionCss;
-      cfg['keyboard'] = keyboardCss;
-      cfg['viewportAvoidsBars'] = viewportAvoidsBars;
+      if (geomOnly) {
+        const nowMs: number = Date.now();
+        if (nowMs - this.lastGeomWriteMs < 500) {
+          return;
+        }
+        this.lastGeomWriteMs = nowMs;
+      } else {
+        this.lastGeomWriteMs = 0;
+      }
+      if (winId >= 0) {
+        const entry: Record<string, Object> = {
+          'l': rectLeft,
+          't': rectTop,
+          'w': rectWidth,
+          'h': rectHeight,
+          'insetsTop': topCss,
+          'insetsBottom': bottomCss,
+          'decor': decor,
+          'keyboard': keyboardCss,
+        };
+        windows['' + winId] = entry;
+        cfg['windows'] = windows;
+      }
+      if (isMain) {
+        cfg['insets'] = insets;
+        cfg['windowDecor'] = decor;
+        cfg['keyboard'] = keyboardCss;
+        cfg['viewportAvoidsBars'] = false;
+      }
       const file = fileIo.openSync(filePath,
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
       try {
@@ -326,9 +594,112 @@ export class WebAbility extends WebBaseAbility {
       } finally {
         fileIo.closeSync(file);
       }
-      LogUtil.info(TAG, 'safe-area insets updated: top=' + topCss + ', bottom=' + bottomCss);
+      LogUtil.info(TAG, 'safe-area insets updated: win=' + winId +
+        ', top=' + topCss + ', bottom=' + bottomCss + ', decor=' + decor);
     } catch (err) {
       LogUtil.error(TAG, 'failed to write insets to mode file: ' + JSON.stringify(err));
+    }
+  }
+
+  // Removes this window's geometry entry from ohsidian-mode.json (round 87,
+  // B2). Without cleanup a closed window's entry lingers forever and the
+  // renderer's size-match could pair a new window with dead geometry.
+  private removeWindowGeometryEntry(): void {
+    try {
+      if (this.mainWindow === undefined) {
+        return;
+      }
+      const winId: number = this.mainWindow.getWindowProperties().id;
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const filePath: string = filesDir + '/ohsidian-mode.json';
+      let cfg: Record<string, Object> = {};
+      try {
+        if (fileIo.accessSync(filePath)) {
+          cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+          if (!cfg) {
+            return;
+          }
+        } else {
+          return;
+        }
+      } catch (e) {
+        return;
+      }
+      const existingWindows = cfg['windows'];
+      if (existingWindows === undefined || existingWindows === null) {
+        return;
+      }
+      const windows = existingWindows as Record<string, Object>;
+      const key: string = '' + winId;
+      if (windows[key] === undefined) {
+        return;
+      }
+      const next: Record<string, Object> = {};
+      const keys: Array<string> = Object.keys(windows);
+      for (const k of keys) {
+        if (k !== key) {
+          next[k] = windows[k];
+        }
+      }
+      cfg['windows'] = next;
+      const file = fileIo.openSync(filePath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      try {
+        fileIo.writeSync(file.fd, JSON.stringify(cfg));
+      } finally {
+        fileIo.closeSync(file);
+      }
+      LogUtil.info(TAG, 'window geometry entry removed: ' + key);
+    } catch (err) {
+      LogUtil.warn(TAG, 'failed to remove window geometry entry: ' + JSON.stringify(err));
+    }
+  }
+
+  // Drops every per-window geometry entry (main window, startup only -
+  // round 88). Entries survive hard kills (no destroy callback) and OS
+  // upgrades, and the renderer's size-match could then pair a fresh window
+  // with stale insets. Runs before this session's windows write their own
+  // entries again, so nothing live is lost.
+  private clearStaleWindowEntries(): void {
+    if (this.xcomponentId !== ConfigData.DEFAULT_WINDOW_ID) {
+      return;
+    }
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const filePath: string = filesDir + '/ohsidian-mode.json';
+      let cfg: Record<string, Object> = {};
+      try {
+        if (fileIo.accessSync(filePath)) {
+          cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+          if (!cfg) {
+            return;
+          }
+        } else {
+          return;
+        }
+      } catch (e) {
+        return;
+      }
+      if (cfg['windows'] === undefined) {
+        return;
+      }
+      const next: Record<string, Object> = {};
+      const keys: Array<string> = Object.keys(cfg);
+      for (const k of keys) {
+        if (k !== 'windows') {
+          next[k] = cfg[k];
+        }
+      }
+      const file = fileIo.openSync(filePath,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      try {
+        fileIo.writeSync(file.fd, JSON.stringify(next));
+      } finally {
+        fileIo.closeSync(file);
+      }
+      LogUtil.info(TAG, 'stale window geometry entries cleared');
+    } catch (err) {
+      LogUtil.warn(TAG, 'failed to clear stale window entries: ' + JSON.stringify(err));
     }
   }
 
@@ -376,9 +747,30 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
+  // One-shot reconciliation after a window-status transition (round 87, A2;
+  // round 88: the push is UNCONDITIONAL): windowStatusChange can arrive
+  // BEFORE the maximize animation settles, and the trailing
+  // windowSizeChange that would correct the viewport may never come (the
+  // reason the handler re-pushes at all). Re-read the rect once and
+  // re-assert it - identical to the immediate push, just settled. Single-
+  // shot and rescheduled (never stacked) if another status change arrives
+  // first; NOT a settle ladder (docs/window-state-machine.md §3 - those
+  // pushed unconditionally on a TIMER and raced the WMS settle; this fires
+  // once, 300ms after the last status transition).
+  private scheduleViewportReconcile(): void {
+    if (this.viewportRecheckTimer !== -1) {
+      clearTimeout(this.viewportRecheckTimer);
+    }
+    this.viewportRecheckTimer = setTimeout(() => {
+      this.viewportRecheckTimer = -1;
+      this.repushViewportBounds();
+    }, 300);
+  }
+
   // Re-pushes the current window bounds to the engine. Called from real
-  // geometry events (avoidAreaChange, windowStatusChange); there are no
-  // timed re-pushes (docs/window-state-machine.md §3).
+  // geometry events (avoidAreaChange, windowStatusChange, the A2
+  // reconciliation). UNCONDITIONAL (round 88): the engine consumes every
+  // push, including same-value re-asserts.
   private repushViewportBounds(): void {
     try {
       const win = this.mainWindow;
@@ -1464,8 +1856,14 @@ export class WebAbility extends WebBaseAbility {
           if (status === window.WindowStatusType.MAXIMIZE ||
             status === window.WindowStatusType.FULL_SCREEN ||
             status === window.WindowStatusType.FLOATING) {
+            // Round 92: maximize may land on the available area (not the
+            // full display) - refresh the cache the sync checks consume.
+            this.refreshAvailAreaCache();
             this.pushSafeAreaInsets();
             this.repushViewportBounds();
+            // The status event can equally arrive BEFORE the animation
+            // settles - reconcile once it has (round 87, A2).
+            this.scheduleViewportReconcile();
           }
         })
       } catch (exception) {
@@ -1515,6 +1913,16 @@ export class WebAbility extends WebBaseAbility {
       try {
         data.on('windowEvent', (type) => {
           if (type == window.WindowEventType.WINDOW_SHOWN) {
+            // Round 87 (A1): WINDOW_SHOWN is in the state machine §2 list -
+            // re-publish the insets alongside the viewport. Switching back
+            // to the app can coincide with bar changes (gesture/nav-mode
+            // flip, rotation) that fired no event while the window was
+            // hidden; without this the renderer kept the stale inset and
+            // padded the wrong height. Round 88: the viewport push is
+            // UNCONDITIONAL - this same-value re-assert is an engine
+            // re-sync anchor after the hidden period; skipping it broke
+            // re-show geometry on device.
+            this.pushSafeAreaInsets();
             this.nativeContext.OnWindowRectChange(this.xcomponentId,
               this.computeViewportBound(data.getWindowProperties()), 0);
           }
@@ -1568,6 +1976,21 @@ export class WebAbility extends WebBaseAbility {
 
       let mainWin = windowStage.getMainWindowSync();
       this.mainWindow = mainWin;
+      // Round 88: purge per-window geometry left by previous sessions
+      // (hard-killed windows never ran the destroy cleanup) before any
+      // fresh entry is written below.
+      this.clearStaleWindowEntries();
+      // Round 92: seed the available-area cache the sync judgments consume.
+      this.refreshAvailAreaCache();
+      // Round 89: watch for layout-override changes (renderer writes them
+      // without any window geometry event) and for fullscreen-likeness
+      // transitions; hides/shows the system bars for the desktop layout.
+      if (this.barWatchTimer === -1) {
+        this.barWatchTimer = setInterval(() => {
+          this.refreshAvailAreaCache();
+          this.applySystemBarVisibility();
+        }, 1000);
+      }
       if (deviceInfo.deviceType === 'tablet') {
         // Publish the initial real insets once the window geometry exists;
         // avoidAreaChange keeps them fresh afterwards.
@@ -1584,6 +2007,7 @@ export class WebAbility extends WebBaseAbility {
       // hide title bar
       try {
         mainWin.setWindowDecorVisible(!this.hideTitleBar);
+        this.decorVisibleLast = !this.hideTitleBar;
       } catch (exception) {
         LogUtil.warn(TAG, 'Failed to set window decor visible: ' + JSON.stringify(exception));
       }
@@ -1646,15 +2070,6 @@ export class WebAbility extends WebBaseAbility {
             height: vp2px(titleButtonRect.height)
           };
           this.nativeContext.OnCaptionButtonRectChange(this.xcomponentId, rect);
-          // Track the caption strip height for the web content (1 vp == 1
-          // css px: the buttons sit inside the strip, so bottom-of-buttons
-          // approximates the strip height). Re-publish the mode file when it
-          // changes so the renderer can pad the content below the strip.
-          const caption: number = Math.round(titleButtonRect.top + titleButtonRect.height);
-          if (caption !== this.captionCss) {
-            this.captionCss = caption;
-            this.pushSafeAreaInsets();
-          }
         });
       } catch (exception) {
         LogUtil.error(TAG, 'Failed to register window title button change callback: ' + JSON.stringify(exception));
@@ -1704,6 +2119,31 @@ export class WebAbility extends WebBaseAbility {
     } catch (exception) {
       LogUtil.warn(TAG, 'unregister pcmode observer failed: ' + JSON.stringify(exception));
     }
+    // A2: a pending reconciliation must not fire against a dead window.
+    if (this.viewportRecheckTimer !== -1) {
+      clearTimeout(this.viewportRecheckTimer);
+      this.viewportRecheckTimer = -1;
+    }
+    // Round 89: stop the bar watcher; if this window hid the system bars,
+    // hand them back before the window dies.
+    if (this.barWatchTimer !== -1) {
+      clearInterval(this.barWatchTimer);
+      this.barWatchTimer = -1;
+    }
+    if (this.barsHidden && this.mainWindow !== undefined) {
+      try {
+        this.mainWindow.setWindowSystemBarEnable(['status', 'navigation'])
+          .catch((err: BusinessError) => {
+            LogUtil.warn(TAG, 'restore system bars on destroy failed: ' + JSON.stringify(err));
+          });
+        this.barsHidden = false;
+      } catch (exception) {
+        LogUtil.warn(TAG, 'restore system bars on destroy threw: ' + JSON.stringify(exception));
+      }
+    }
+    // B2: drop this window's geometry entry so closed windows stop answering
+    // the renderer's size-match with stale insets.
+    this.removeWindowGeometryEntry();
     if (CheckEmptyUtils.isEmpty(this.xcomponentId)) {
       LogUtil.warn(TAG, 'onWindowStageDestroy component is not instantiated');
       return;

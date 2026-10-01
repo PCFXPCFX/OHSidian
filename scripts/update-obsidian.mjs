@@ -84,20 +84,34 @@ function isVersionLess(a, b) {
 }
 
 /**
- * The touch-mode patch (v7):
+ * The touch-mode patch (v13):
  *  - Reads <userData>/ohsidian-mode.json (written by the ArkTS layer on tablet
  *    PC-mode switches): { systemMode: "touch"|"desktop", override: "auto"|"touch"|"desktop",
- *    insets: { top: cssPx, bottom: cssPx }, windowDecor: "app"|"system"|"none" }.
+ *    windows: { [<OHOS window id>]: { l,t,w,h, insetsTop, insetsBottom, decor, keyboard } },
+ *    insets: { top, bottom }, windowDecor: "system"|"none", keyboard: cssPx }.
+ *    Round 87 (B2): window geometry moved under cfg.windows - concurrent
+ *    windows used to clobber each other's top-level insets within one poll.
+ *    The renderer size-matches itself against the entries (outerWidth/
+ *    outerHeight +-2px; equal-size windows carry equal geometry) and falls
+ *    back to the legacy top-level fields, which the MAIN window keeps
+ *    mirroring for the main-process patch and single-window sessions.
  *  - "auto" follows systemMode; "touch"/"desktop" force Obsidian's mobile layout
  *    (EmulateMobile) on/off. Applied at boot and polled, reloading on change.
- *  - Applies the REAL system-bar insets (cfg.insets) as body inline CSS vars,
+ *  - Applies the REAL system-bar insets as body inline CSS vars,
  *    overriding Obsidian's simulated iPhone notch / desktop zeroing, guarded
  *    by a MutationObserver so later writes by Obsidian are corrected.
+ *  - Round 87 (B1): the CSS desktop-safe-pad is now THE avoidance path for
+ *    every desktop-layout window in a fullscreen-like rect - touch devices
+ *    switched in-app AND maximized PC windows alike (the engine viewport no
+ *    longer subtracts the bars, which left a dead background strip at the
+ *    bottom of maximized windows). cfg.viewportAvoidsBars still suppresses
+ *    it if a stale build ever writes true.
  *  - windowDecor controls the title-bar layout: "system" = free window, the
  *    SYSTEM caption strip (name + min/max/close) is the title bar - hide the
  *    web .titlebar entirely (the engine viewport already follows
  *    drawableRect below the strip, so no extra padding is applied);
- *    "none" = fullscreen, no caption involved.
+ *    "none" = fullscreen, no caption involved. (cfg.caption is gone -
+ *    round 87 C3: it never had a consumer.)
  *  - Routes every file deletion to Obsidian's own trash flow: HarmonyOS
  *    exposes no system recycle-bin API to third-party apps, so the engine's
  *    "system trash" bridge either fails or (worst case) unlinks permanently.
@@ -111,14 +125,14 @@ function isVersionLess(a, b) {
  *  - The main-process patch purges both the relocated trash and every
  *    registered vault's .trash 60s after startup: entries whose mtime is
  *    older than 30 days are unlinked (relocation stamps deletion time).
- *  - Publishes the IME height (cfg.keyboard) as --keyboard-height on
+ *  - Publishes the IME height as --keyboard-height on
  *    documentElement and dispatches keyboardWillShow/keyboardWillHide:
  *    Obsidian's mobile formatting toolbar positions itself with
  *    top: calc(100vh - var(--keyboard-height) - toolbar-height) and the
  *    engine never sets that variable. The renderer is purely push-driven:
- *    the ArkTS layer writes cfg.keyboard on every keyboardHeightChange and
- *    the changed-file poll (200ms, no-op when the file is unchanged) fans
- *    the new value out.
+ *    the ArkTS layer writes the per-window entry's keyboard on every
+ *    keyboardHeightChange and the changed-file poll (200ms, no-op when the
+ *    file is unchanged) fans the new value out.
  *  - Prefers HarmonyOS system fonts (HarmonyOS Sans) in the default font
  *    stacks - the engine's SkFontMgr_OHOS exposes /system/fonts, so they
  *    resolve; user-chosen fonts still override this. A command-palette
@@ -127,7 +141,7 @@ function isVersionLess(a, b) {
  *    migration, system fonts).
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
-if(window.__ohsidianTouchPatch==="7")return;window.__ohsidianTouchPatch="7";
+if(window.__ohsidianTouchPatch==="13")return;window.__ohsidianTouchPatch="13";
 /* Keep the renderer's view of the Electron major consistent with the main
    process shim: app.js requires >= 28.2.3 (Iie) before it stops showing the
    "manual update" notice. Replace the whole versions object - mutating the
@@ -153,6 +167,55 @@ function readMode(){
     return JSON.parse(txt);
   }catch(e){return null}
 }
+/* Round 87 (B2): window geometry lives per window under cfg.windows[<OHOS
+   window id>] - concurrent windows used to clobber each other's top-level
+   insets within one 200ms poll. The renderer has no OHOS window id (the
+   engine exposes no renderer-visible window identity), so it matches its
+   own window by SIZE (outerWidth/outerHeight, +-2px): the geometry payload
+   (insets/decor) is a pure function of fullscreen-likeness, which the rect
+   size encodes - windows of equal size carry equal geometry, so size
+   matching is unambiguous. Same-size windows differ only in keyboard
+   (follows the focused window), so those are disambiguated by position
+   (screenX/screenY) when the engine reports it non-zero. Fallbacks: the
+   first size match, the single entry of a one-window session, then the
+   main window's legacy top-level fields (pre-B2 shape, still mirrored by
+   the main window). Returns null when nothing matches (callers fall back
+   to the legacy fields). */
+function resolveGeometry(cfg){
+  try{
+    var wins=cfg&&cfg.windows;
+    if(wins&&typeof wins==="object"){
+      var keys=Object.keys(wins);
+      var entries=[];
+      for(var i=0;i<keys.length;i++){
+        var e=wins[keys[i]];
+        if(e&&typeof e==="object"&&e.w>0&&e.h>0)entries.push(e);
+      }
+      if(entries.length===1)return entries[0];
+      if(entries.length>1){
+        var ow=window.outerWidth||0,oh=window.outerHeight||0;
+        if(ow>0&&oh>0){
+          var bySize=entries.filter(function(q){
+            return Math.abs(q.w-ow)<=2&&Math.abs(q.h-oh)<=2;
+          });
+          if(bySize.length===1)return bySize[0];
+          if(bySize.length>1){
+            var sx=window.screenX||0,sy=window.screenY||0;
+            if(sx!==0||sy!==0){
+              var byPos=bySize.filter(function(q){
+                return Math.abs(q.l-sx)<=2&&Math.abs(q.t-sy)<=2;
+              });
+              if(byPos.length===1)return byPos[0];
+            }
+            return bySize[0];
+          }
+        }
+        return null;
+      }
+    }
+  }catch(e){}
+  return null;
+}
 function resolveWant(cfg){
   if(!cfg)return null;
   var o=cfg.override||"auto";
@@ -174,6 +237,10 @@ function resolveWant(cfg){
 function readInsets(){
   try{
     var cfg=readMode();
+    var g=resolveGeometry(cfg);
+    if(g){
+      return {top:+g.insetsTop||0,bottom:+g.insetsBottom||0};
+    }
     if(cfg&&cfg.insets){
       return {top:+cfg.insets.top||0,bottom:+cfg.insets.bottom||0};
     }
@@ -190,38 +257,67 @@ function applySafeArea(){
     for(var k in want){
       if(b.style.getPropertyValue(k)!==want[k]){b.style.setProperty(k,want[k])}
     }
-    /* NO body padding for the free-window caption strip: the engine's
-       viewport already follows drawableRect, which excludes the system
-       caption (that is the whole point of setWindowDecorVisible(true)).
-       Padding here would avoid the strip twice and leave a blank body
-       strip between the caption and the content.
-       DESKTOP LAYOUT IN A FULLSCREEN WINDOW (touch device, user switched
-       to desktop mode in-app): the desktop layout consumes NO safe-area
-       var, so the web content draws under the visible status bar / nav
-       indicator. Padding-top/bottom on body is the avoidance (option 2) -
-       keeping the system bars visible; hiding them (option 1) would fight
-       the system UI. Only apply when the window is fullscreen-like
-       (insets > 0) AND desktop layout is active; mobile layout consumes
-       the vars itself, and free windows get insets 0 so this is inert. */
+    /* NO padding when a system caption strip is up: the engine's viewport
+       already follows drawableRect, which excludes the strip (that is the
+       whole point of setWindowDecorVisible(true)). Padding here would
+       avoid the strip twice and leave a blank band between it and the
+       content.
+       Round 89: the PRIMARY avoidance for the desktop layout in a
+       fullscreen-like window is the ArkTS layer HIDING the system bars
+       (setWindowSystemBarEnable([]) - they kept covering content no matter
+       how the CSS avoided; bars hidden -> cfg insets are 0 -> this pad
+       un-injects and the content fills the window edge to edge). THIS PAD
+       IS THE FALLBACK for the case the WMS rejects the hide call: insets
+       stay real, and body padding pushes the whole flow (titlebar +
+       app-container) below/above the bars while the fixed full-viewport
+       float roots (.modal-container, .suggestion-bg) get their own box
+       padding. border-box keeps height:100% elements inside the padded
+       box. Only applied when the window is fullscreen-like (insets > 0)
+       AND desktop layout is active; mobile layout consumes the vars
+       itself, and floating windows get insets 0 so this is inert. */
     var cfg=readMode();
     var desktopLayout=!(function(){
       try{return !!(cfg&&resolveWant(cfg))}catch(e){return false}
     })();
-    /* viewportAvoidsBars: the ArkTS viewport push already subtracted the
-       bars from the surface (fullscreen-like PC window) - CSS padding
-       would avoid them twice (blank strip between bar and content). */
+    /* viewportAvoidsBars is retired (round 87, B1): the engine never
+       subtracts the bars anymore, so the ArkTS layer writes a constant
+       false. The field is still honored so a stale true left by an older
+       build converges (the ArkTS writer overwrites it) instead of
+       suppressing the pad forever. */
     var alreadyAvoids=!!(cfg&&cfg.viewportAvoidsBars);
-    var pad=ins.top>0&&desktopLayout&&!alreadyAvoids;
+    var pad=desktopLayout&&!alreadyAvoids&&(ins.top>0||ins.bottom>0);
     var SID="ohsidian-desktop-safe-pad";
     var el=document.getElementById(SID);
     if(pad&&!el&&document.head){
       el=document.createElement("style");
       el.id=SID;
-      el.textContent=".app-container{padding-top:var(--safe-area-inset-top)!important;"+
+      el.textContent=".modal-container{padding-top:var(--safe-area-inset-top)!important;"+
+        "padding-bottom:var(--safe-area-inset-bottom)!important;box-sizing:border-box}"+
+        ".suggestion-bg{padding-top:var(--safe-area-inset-top)!important;"+
         "padding-bottom:var(--safe-area-inset-bottom)!important;box-sizing:border-box}";
       document.head.appendChild(el);
     }else if(!pad&&el&&el.parentNode){
       el.parentNode.removeChild(el);
+    }
+    /* Only touch the body padding we set ourselves (dataset marker): the
+       MutationObserver re-runs this on every body style mutation, and
+       removing a padding Obsidian set would corrupt its layout. */
+    if(pad){
+      if(b.style.getPropertyValue("padding-top")!==ins.top+"px"){
+        b.style.setProperty("padding-top",ins.top+"px","important");
+      }
+      if(b.style.getPropertyValue("padding-bottom")!==ins.bottom+"px"){
+        b.style.setProperty("padding-bottom",ins.bottom+"px","important");
+      }
+      if(b.style.getPropertyValue("box-sizing")!=="border-box"){
+        b.style.setProperty("box-sizing","border-box","important");
+      }
+      b.setAttribute("data-ohsidian-pad","1");
+    }else if(b.getAttribute("data-ohsidian-pad")){
+      b.style.removeProperty("padding-top");
+      b.style.removeProperty("padding-bottom");
+      b.style.removeProperty("box-sizing");
+      b.removeAttribute("data-ohsidian-pad");
     }
   }catch(e){}
 }
@@ -236,15 +332,16 @@ function watchBodyStyles(){
 }
 /* Tablet PC mode / free windows: the system caption strip (name + window
    buttons) is the only title bar that exists in every web layout, so the
-   ArkTS layer keeps it visible and publishes its height (cfg.caption).
-   Obsidian's own desktop .titlebar would be a second bar under it, so hide
-   the whole web bar while the system one is up. Fullscreen publishes
-   windowDecor "none" - no caption, no hiding. */
+   ArkTS layer keeps it visible. Obsidian's own desktop .titlebar would be
+   a second bar under it, so hide the whole web bar while the system one
+   is up. Fullscreen publishes decor "none" - no caption, no hiding.
+   (cfg.caption is gone - round 87 C3: it never had a consumer.) */
 var DECOR_STYLE_ID="ohsidian-window-decor";
 function applyWindowDecor(){
   try{
     var cfg=readMode();
-    var system=!!(cfg&&cfg.windowDecor==="system");
+    var g=resolveGeometry(cfg);
+    var system=!!(g?(g.decor==="system"):(cfg&&cfg.windowDecor==="system"));
     var el=document.getElementById(DECOR_STYLE_ID);
     if(system&&!el&&document.head){
       el=document.createElement("style");
@@ -390,7 +487,10 @@ var lastKeyboard=-1;
 function applyKeyboard(){
   try{
     var cfg=readMode();
-    var kb=(cfg&&+cfg.keyboard)||0;
+    var g=resolveGeometry(cfg);
+    var kb=0;
+    if(g){kb=+g.keyboard||0}
+    else{kb=(cfg&&+cfg.keyboard)||0}
     if(kb===lastKeyboard)return;
     lastKeyboard=kb;
     var de=document.documentElement;
@@ -983,6 +1083,13 @@ function restoreSystemFonts(){
 }
 var install=function(app){
   if(!app||!app.commands||typeof app.commands.addCommand!=="function")return false;
+  /* Round 93 (93e): the frame default is enforced by the MAIN-PROCESS body
+     patch (update-obsidian.mjs main(): Ae=D.frame==="native" becomes
+     "unset counts as native"). The renderer-side migration (93b/93c/93d)
+     targeted the WRONG file - frame lives in the GLOBAL config
+     (<userData>/obsidian.json, the D object in main.js), NOT in the
+     vault's .obsidian/app.json; vault.setConfig never touched it and the
+     whole block was inert on device. Removed. */
   try{
     app.commands.addCommand({id:"ohsidian-touch-mode",name:"OHSidian: 切换触屏模式 (自动 → 触摸 → 桌面)",
       callback:function(){
@@ -1448,6 +1555,28 @@ async function main() {
       log('auto-updater force-disabled (updateDisabled latched true)');
     } else {
       log('WARNING: updater gate pattern not found - auto-update stays controllable from settings');
+    }
+    /* Round 93 (93e): default the window frame to NATIVE. Upstream reads
+       the GLOBAL config (D = <userData>/obsidian.json) once at startup:
+       `Ae=D.frame==="native"` -> every unset value (the stock "hidden"
+       frameless) creates frameless windows whose WMS min/max/close buttons
+       float over the content and collide with Obsidian's own top-right
+       controls on this device (hidden was unverifiable-by-settings too:
+       the frame UI and the window construction both key off D.frame, so
+       only the main-process default could fix it - renderer-side
+       migrations 93b/93d wrote the wrong file and were inert). Reversing
+       the default keeps explicit choices intact: "hidden"/"custom" still
+       produce frameless windows, an unset value now means native. */
+    const FRAME_DEFAULT_SRC = 'let Ae=D.frame==="native",Ue=Ae?"default":"hidden"';
+    const FRAME_DEFAULT_DST = 'let Ae=D.frame==="native"||D.frame==null,Ue=Ae?"default":"hidden"';
+    if (mainSrc.includes(FRAME_DEFAULT_DST)) {
+      log('frame default already patched (unset -> native)');
+    } else if (mainSrc.includes(FRAME_DEFAULT_SRC)) {
+      mainSrc = mainSrc.replace(FRAME_DEFAULT_SRC, FRAME_DEFAULT_DST);
+      log('frame default reversed: unset global frame value now means native');
+    } else {
+      log('WARNING: frame default pattern not found - windows keep the hidden-frameless default; ' +
+        'set 窗口边框样式 = 原生 manually in settings if the caption collides');
     }
     fs.writeFileSync(asarMainJs, MAIN_PROCESS_PATCH + mainSrc);
   }

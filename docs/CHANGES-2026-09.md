@@ -3034,3 +3034,306 @@ trashLocal(e) 为仓库相对路径 + getFullPath + queue 序列化语义):
 **部署**:设备 asar 经用户批准的离线替换已生效(旧 TOUCH 前导码逐字
 比对 → 换新 + 打入弹窗文本替换 → 重打包 → 新进程 6 项复核全 PASS);
 main.js 本轮未动。
+
+### 第 87 轮(2026-10-01):窗口几何审计落地(A1/A2/B1/B2/C1/C2/C3)
+
+**动机**:外部窗口审计(对照 f44e8d9)确认了七个窗口几何缺陷,本轮按
+其优先级路线全部修复:切回应用后 insets 不刷新(A1)、最大化落定竞态
+(A2)、最大化底部死区(B1)、mode 文件跨窗口互踩(B2)、safe-pad 只覆盖
+.app-container(C1)、栏重叠判定混用模式轴与几何轴(C2)、cfg.caption
+死数据(C3)。
+
+**实现**(先改 docs/window-state-machine.md §1/§2/§3/§7/新增 §9,再改码):
+
+1. **A1**:`WINDOW_SHOWN` 处理器补 `pushSafeAreaInsets()`(状态机 §2
+   本就要求,代码漏了)——切回应用时栏已变(手势/三键切换、旋转)而
+   无事件推送的窗口期不再保留旧 insets。
+2. **A2**:视口推送全部加值比对(`viewportBoundChanged`,与上次相同
+   则不推);`windowStatusChange`(MAXIMIZE/FULL_SCREEN/FLOATING)后
+   追加**单发对账**(`scheduleViewportReconcile`,300ms 后重读矩形,
+   值比对不过关不推送)——事件先于动画到达推了中间矩形、且无尾随
+   windowSizeChange 纠正时,对账把它收敛到落定值。非定时补推梯子:
+   单发、值比对、幂等。
+3. **B1**:反转第 56/63 轮的"最大化视口显式扣条"。`computeViewportBound`
+   不再扣除避让区(PC/自由窗口=drawableRect,触摸=windowRect),
+   `viewportAvoidsBars` 恒 false(保留字段只为把旧版本写入的 true
+   收敛掉);渲染层 desktop-safe-pad 成为所有桌面布局窗口的唯一避让
+   路径——底部不再有"既非内容也非系统栏"的死区,与触摸形态观感统一。
+4. **B2**:mode 文件窗口几何拆到 `cfg.windows[<OHOS 窗口 id>]`(各窗口
+   只写自己的键,销毁时 `removeWindowGeometryEntry` 清理);主窗口另
+   镜像旧顶层字段(主进程补丁与单窗口会话由它服务)。渲染层无窗口 id
+   通道(已核实 remote/ipc/mode 文件均无),按矩形**尺寸**匹配自身
+   (±2px;insets/decor 是整屏判定的纯函数,同尺寸必同值;同尺寸多窗
+   用 screenX/Y 消歧 keyboard),回退:唯一条目 → 顶层镜像。多窗口
+   最大化/浮窗互踩(200ms 内互相覆盖 insets)根治。
+5. **C1**:safe-pad 从 `.app-container` 扩展到 `.modal-container`/
+   `.prompt-container`(flex 居中 + border-box,居中内容拉回栏内);
+   光标锚定的 .menu/tooltip 无法用容器 padding 避让,待真机确认。
+6. **C2**:insets 的栏重叠判定从 `!pcModeEnabled`(模式轴)改为矩形
+   ≥ 整屏(几何轴)——forceFullscreen 被拒残留的浮窗不再拿到真实栏
+   insets(原"未定义象限")。
+7. **C3**:删除 `cfg.caption` 与 `captionCss` 跟踪(渲染层从未消费,
+   全屏后还不复位);引擎通道 `OnCaptionButtonRectChange` 保留。
+
+渲染层补丁 v7 → v8(版本标记/verify-asar.cjs 断言同步);写侧 unchanged
+检测改为"本窗口条目 + 顶层镜像"双比对。
+
+**验证**:update-obsidian.mjs 与提取出的 TOUCH_MODE_PATCH(v8)/
+MAIN_PROCESS_PATCH 均通过 node --check;ArkTS 与文件既有惯用法逐处
+人工核对(Record 类型、常量、无 delete/setWindowAttr);verify-asar.cjs
+清单同步(v8 + resolveGeometry 标记)。真机待验:B1 的指示条手势热区
+与 pad 后 Obsidian 状态栏落位、C1 浮层避让效果。
+
+**部署**:待构建管线产出新 asar(`node scripts/refresh-app-patch.mjs`)
+后按流程部署;设备侧复核用 `node scripts/verify-asar.cjs`。
+
+### 第 88 轮(2026-10-01):第 87 轮真机回归修复(窗口调整/全屏贴合/顶部避让)
+
+**动机**:第 87 轮部署后真机复现三个严重回归:①无法动态调整窗口,
+②无论何种模式无法全屏贴合,③触摸模式切桌面布局后顶部导航条仍不
+躲避。逐一根因定位如下。
+
+**根因与修复**:
+
+1. **引擎推送去重断裂窗口状态机(症状①②)**:第 87 轮给所有引擎
+   视口推送加了"值比对去重"(viewportBoundChanged)。但引擎消费的是
+   事件流而非几何流:`windowStatusChange` 先经 `OnWindowSizeChange`
+   推了动画中间矩形并记入 latch,落定后的
+   `windowRectChange(reason=MAXIMIZE)` 算出同值 bound 被去重吞掉——
+   引擎从此收不到带 reason 的矩形事件,最大化/恢复状态机断裂;拖拽
+   期间同值或 reason 事件同样被吞。`WINDOW_SHOWN` 的无条件重推在
+   v7 里本就是隐藏期后的再同步锚点,也被吞。修复:**引擎推送通道
+   全部回退为无条件推送(v7 语义)**;A2 的单发对账保留(300ms 后
+   重读、无条件重推,只是去掉比对门槛)。
+2. **拖拽期文件写入风暴(放大症状①)**:窗口矩形进了 `cfg.windows`
+   条目后,拖拽/缩放每帧的 windowSizeChange 都绕过 unchanged 检测
+   重写 mode 文件(UI 线程 I/O)。修复:几何-only 变化(载荷 insets/
+   decor/keyboard 不变)限频 500ms 一次;载荷变化立即写。
+3. **顶部导航条不躲避(症状③)**:从 asar 内 app.css 反查布局——
+   `.titlebar`(~30px,含窗口按钮)在 body 流内位于 `.app-container`
+   上方,只 pad `.app-container` 时它仍画在系统状态栏下;
+   `.modal-container`(absolute)/`.suggestion-bg`(fixed)脱离 body 流,
+   祖先 padding 无效;第 87 轮写的 `.prompt-container` 规则根本不存在
+   (死规则)。修复:**body inline padding**(`!important`+
+   `border-box`,dataset `data-ohsidian-pad` 标记只自清理)+ 浮层根
+   `.modal-container`/`.suggestion-bg` 自身 padding;pad 条件放宽为
+   `top>0 || bottom>0`(补 bottom-only 形态)。
+4. **(防御)陈旧 `cfg.windows` 条目**:硬杀窗口不跑 destroy 清理,
+   残留条目会让渲染层尺寸匹配配出死 insets。主窗口启动时
+   `clearStaleWindowEntries()` 清空全部条目,本会话窗口随后立即重写。
+
+**文档**:window-state-machine.md §2/§3 修订(A2 第 88 轮语义:引擎
+推送永不去做重,去重只属于文件写入通道)、§9 B2 补生命周期清理与
+写入节流、C1 定型为 body+浮层根方案、末尾新增第 88 轮回归对照表。
+
+**验证**:update-obsidian.mjs 与提取出的 TOUCH_MODE_PATCH/
+MAIN_PROCESS_PATCH 均通过 node --check;verify-asar.cjs 增补 round-88
+标记断言(data-ohsidian-pad / .suggestion-bg pad)。ArkTS 逐处人工
+复查(无条件推送恢复、节流分支、清理方法)。真机复验清单:①拖拽
+缩放/最大化/恢复连续操作,②触摸模式全屏贴合,③PC 模式最大化贴合,
+④触摸切桌面布局后顶部 titlebar 与底部内容均在栏内侧,⑤模态对话框
+居中不被栏遮挡,⑥切走再切回 insets 正确。
+
+### 第 89 轮(2026-10-01):桌面布局全屏形窗口隐藏系统栏(pad 降为兜底)
+
+**动机**:第 88 轮真机复验,症状③④仍在——底部三键导航条遮挡
+Obsidian 底栏控件,顶部状态栏遮挡 Obsidian 顶栏。CSS 避让(body
+padding)与系统栏争同一条屏幕区域的归属,避让赢了布局也难看,输了
+(真机)就是遮挡。经用户授权,第 89 轮改为**栏让位**:该场景直接隐藏
+系统栏,内容铺满全屏。
+
+**实现**:
+1. **隐藏条件**:`fullscreenLike && 桌面布局意图`(override 优先/
+   auto 跟随 systemMode,ArkTS 镜像渲染层 resolveWant)。覆盖两个
+   症状场景:触摸切桌面布局、PC 模式最大化。移动布局与浮窗不隐藏
+   (前者 insets 避让正常工作,后者不压栏)。
+2. **API**:窗口级 `setWindowSystemBarEnable([])` 隐藏/
+   `['status','navigation']` 恢复;边缘滑动仍可临时唤出(系统行为)。
+3. **触发**:几何事件路径 + 1s 监视器(override 由渲染层写入,无几何
+   事件伴随;tick 仅读 mode 文件,状态不变时早退)。
+4. **insets 联动**:barsHidden=true 时发布 0/底部指示条高(第 90 轮
+   修订,见下)→ 渲染层 pad 随 insets 收敛;隐藏前的窗口期 pad 短暂
+   生效后平滑收敛。
+5. **降级**:WMS 拒绝时 barsHidden 保持 false,真实 insets 照常,
+   第 88 轮 CSS pad(body + .modal-container/.suggestion-bg)继续兜底
+   ——退化为第 88 轮行为,不会更糟。
+6. **清理**:窗口销毁停监视器并恢复系统栏。
+
+渲染层无逻辑改动(注释更新为主/兜底策略),补丁 v8→v9(标记同步
+verify-asar.cjs)。
+
+**验证**:node --check 全过(mjs/TOUCH v9/MAIN);ArkTS 逐处人工复查
+(then 内重入早退、销毁清理、降级路径)。真机复验:①触摸切桌面布局
+→ 状态栏与导航条消失、内容铺满、顶栏/底栏无遮挡;②PC 模式最大化
+→ 同上;③边缘滑动可临时唤出栏、松手消失;④切回触摸/移动布局 → 栏
+恢复、insets 避让正常;⑤浮窗(拖出)→ 栏恢复显示;⑥WMS 若拒绝隐藏
+→ pad 兜底生效(退回第 88 轮观感)。
+
+### 第 90 轮(2026-10-01):栏隐藏态保留底部指示条避让
+
+**动机**:第 89 轮真机复验——触摸模式与 PC(2in1)正常,但窗口模式
+最大化时底部仍被遮挡:平板的 `setWindowSystemBarEnable([])` 隐藏了
+状态栏,**手势小白条(导航指示条)不被该 API 控制**,仍浮于窗口底缘
+盖住内容。即栏隐藏态下底部仍有一小条需要避让。
+
+**实现**:pushSafeAreaInsets 的 barsHidden 分支从"发布 0/0"改为
+"发布 0/底部避让高":顶部 0(状态栏已隐藏),底部
+`max(TYPE_NAVIGATION_INDICATOR.bottomRect, TYPE_SYSTEM.bottomRect)`
+(手势小白条走前者;三键导航机型上三键同样可能不被该 API 隐藏,后者
+覆盖)。渲染层零改动——bottom-only inset 正是第 88 轮 pad 条件
+(`top>0||bottom>0`)覆盖的形态:body padding-bottom 抬升内容、背景
+延伸到小白条下,观感与触摸模式一致。
+
+**验证**:ArkTS 逐处人工复查(barsHidden 分支读数、max 兜底、与
+desktopLayout 判定的一致性)。真机复验:①窗口模式最大化 → 小白条下
+内容抬升、背景融合、无控件遮挡;②触摸模式(状态栏已隐藏)底部同样
+避让;③三键导航机型若三键未隐藏 → 底部同样抬升;④移动布局不受影响
+(不隐藏,走原有 vars)。
+
+### 第 91 轮(2026-10-01):最大化后收起残留 decor(日志驱动)
+
+**动机**:用户提供窗口模式最大化的真机日志,两处确认:①最大化矩形
+[0,87,2800,1753](宽高=整屏)、底部小白条 avoid area 高 63 物理 px
+(≈33css)——第 90 轮的 bottom-only inset 正是为此,该日志属第 89 轮
+部署(barsHidden→0/0→pad 撤销→小白条无避让→遮挡),第 90 轮尚未上机;
+②新发现:最大化后 WMS 仍报 hasDecor:1、drawableRect.top=71——浮窗期
+开启的 caption 没人收起,视口被裁出一条 caption 高的顶部死带。
+
+**实现**:pushSafeAreaInsets 的 decor 判定补对称分支——fullscreenLike
+窗口显式 `setWindowDecorVisible(false)` 收起浮窗期开启的 caption,
+drawableRect.top 归零、视口重新覆盖全窗口;新增 decorVisibleLast
+状态跟踪,per-event 调用只在跳变时发出(避免 windowSizeChange 风暴
+期的重复系统调用);启动路径 setWindowDecorVisible(!hideTitleBar)
+同步登记。AppWindowAdapter.setUseNativeFrame 的直接调用维持原样
+(低频显式 API,下次几何事件自动对齐)。
+
+**验证**:ArkTS 人工复查(状态跳变对称性:浮窗→最大化→浮窗;异常
+路径保持旧值重试)。真机复验(随第 90 轮一并):①最大化后顶部无
+caption 死带(视口 top=窗口 top、height=完整高);②底部小白条由
+bottom-only inset 避让、背景融合;③恢复浮窗 → caption 重新出现、
+拖动正常。
+
+### 第 92 轮(2026-10-01):最大化判定改用 available area(日志驱动,修正第 91 轮)
+
+**动机**:第二份真机日志(窗口模式最大化全程)钉死根因——本机
+`getAvailableArea = {top:87, width:2800, height:1753}`,物理屏
+2800×1840。**本机自由窗口"最大化"是到 available area(状态栏下方),
+不是整屏**:旧判定 `rect.height >= display.height`(1753<1840)恒
+false → overlapsBars/decor/隐藏栏三个机制在窗口最大化场景全部失活
+(insets 0/0 不发布、pad 不注入、小白条裸露遮挡)。
+
+**实现**:
+1. 新增 `coversDisplayArea(rect)`:覆盖整屏 **或** available area
+   即为真;替换 overlapsBars(pushSafeAreaInsets)与
+   applySystemBarVisibility 的判定。decor 判定**维持整屏基准**:
+   available-area 最大化的窗口仍显示 caption(带恢复按钮,合法 UI,
+   日志 hasDecor:1 证实),drawableRect.top 扣除 caption 是正确避让
+   而非死带——**撤销第 91 轮的收起分支**(当时误判 hasDecor:1 为残留)。
+2. 修复后窗口最大化行为推演:insets (0,33css) 正常发布 → 渲染层
+   bottom-only 避让(桌面布局 pad / 移动布局 vars 双路径);caption
+   与恢复按钮保留;隐藏栏仅在用户选桌面布局(override=desktop)时
+   激活,触摸/移动布局不隐藏。
+3. 第 91 轮的 decorVisibleLast 状态跟踪与启动同步保留(浮窗分支的
+   调用跳变守卫)。
+
+**教训**:本设备存在两种"最大化"几何——触摸模式强制整屏
+(display 2800×1840)与窗口模式最大化(available 2800×1753),判定
+必须覆盖两者;WMS 的 hasDecor/drawableRect 报告是语义而非残留,
+先读日志再定论。
+
+**验证**:ArkTS 人工复查(三场景推演:触摸全屏/窗口最大化/浮窗)。
+真机复验:①窗口模式最大化 → 小白条处内容抬升、背景融合、无遮挡;
+②caption 与恢复按钮仍在;③恢复浮窗 → 行为不变;④触摸模式全屏
+→ 不变;⑤override=desktop 时最大化 → 栏隐藏+内容铺满(第 89 轮路径)。
+
+**构建修正(同轮)**:`Display.getAvailableArea()` 是异步 API
+(Promise<Rect>),同步判定路径不能直接用——改为缓存模式:
+`refreshAvailAreaCache()` fire-and-forget 刷新(500ms 限频),调用点
+为启动、windowStatusChange(MAXIMIZE/FULL_SCREEN/FLOATING)、1s 监视器;
+`coversDisplayArea` 同步读缓存,缓存未落地时回退整屏判定。缓存首次
+落地或尺寸变化时重推一次 insets(unchanged 检测使空转免费),判定
+在一秒内收敛。
+
+### 第 93 轮(2026-10-01):窗口边框默认改为原生(hidden 冲突,用户验证并指定)
+
+**动机**:第 92 轮后窗口模式最大化底部已正常,但顶部系统 caption 条
+在默认"隐藏边框"(hidden frameless)下显示不全——应用名/最小化/
+最大化/关闭那一栏没了,WMS 的窗口按钮浮在内容上,与 Obsidian 右上角
+自绘控件重叠冲突。用户在 Obsidian 设置实测:"原生边框"(native)与
+"Obsidian 边框"(custom)均正常,仅默认 hidden 异常,并指定默认改
+为原生。
+
+**实现**(渲染层补丁 v9→v10):install(app)(app 就绪钩子)里,当
+`vault.getConfig("frame") == null`(用户从未自己选择过样式)时写
+`setConfig("frame","native")` 并 Notice 提示一次(重启后生效——
+Obsidian 主进程创建 BrowserWindow 时读取)。用户显式选择的样式永远
+优先;设置 → 高级 → 窗口边框样式 仍可改。
+
+**验证**:node --check 全过(mjs/TOUCH v10/MAIN);verify-asar.cjs
+增补 round-93 标记断言。真机复验:①默认配置(未手动设过边框)首启
+→ Notice 提示 → 重启后 caption 完整(应用名+三钮),与 Obsidian
+控件不再重叠;②已在设置里选过样式的用户不受影响;③窗口模式最大化
+底部避让(第 90/92 轮)不受影响。
+
+**第 93 轮补充(93b)**:用户质疑"为什么要手动重启"。澄清:frame 是
+BrowserWindow **构造参数**,已创建的窗口无法应用新值——无论改配置
+还是改 asar 默认代码,都只能影响下一次窗口创建(Obsidian 自己的
+设置页改此项同样要求重启)。体验优化:写入 config 后 **5 秒自动
+优雅重启**(relaunch + quit,走正常退出流程保存布局;Notice 提示
+"5 秒后自动重启")。仅发生一次——config 已写,分支此后惰性。
+
+**第 93 轮补充(93c)**:用户安装后无迁移发生——其 config 已存
+"hidden"(早前测试时手动切换过),v10 的 `getConfig("frame")==null`
+条件把显式存值当作用户选择跳过了。修正为**一次性迁移**:以 mode
+文件 `cfg.frameDefaultDone` 为标记,迁移前无论当前值(null/hidden/
+custom)非 native 一律写 native + 5 秒自动重启;迁移完成后永不触碰
+该设置,用户此后的显式选择(含改回 hidden/custom)不会被覆盖。
+补丁 v10→v11,verify-asar 标记同步(frameDefaultDone)。
+
+**第 93 轮补充(93d)**:93c 部署后 Notice/自动重启均发生,但重启后
+Obsidian 设置里边框仍是旧值——`vault.setConfig` 的配置保存是**防抖
+延迟写**,5 秒后 quit 抢在 app.json 落盘之前,内存值随进程丢失。修正:
+迁移在 setConfig 之后**同步强制落盘** `<vault>/.obsidian/app.json`
+(node fs 读-改-写,保留其他设置项),再调度重启;失败时退回防抖保存。
+迁移标记版本化(frameDefaultDone: true→2)——设备上 93c 已写过 true,
+版本化使 93d 部署后自动再迁移一次。补丁 v11→v12。
+
+**第 93 轮补充(93e)**:93d 强制落盘后设置仍为旧值——考古 minified
+main.js 发现根因:**frame 根本不存在 vault 的 app.json**,它读自
+全局配置 D(`<userData>/obsidian.json`,`let Ae=D.frame==="native"`,
+主进程启动时读一次),93b/93d 的渲染层迁移写错了文件、从未生效。
+修正:删除渲染层迁移块;改为**主进程文本替换**反转默认语义——
+`Ae=D.frame==="native"||D.frame==null`(未设置即 native;显式
+hidden/custom 保留原语义)。refresh-app-patch.mjs 同步登记该替换
+(其精简流程原先不做 main body 替换,标记缺失会 ABORT 提示走完整
+流程)。补丁 v12→v13;verify-asar 标记改为 main 侧。设置 UI 里
+未设置时仍显示"默认",但默认行为已是原生边框。
+
+---
+
+## 窗口专题总览(第 87-93 轮,2026-10-01)
+
+外部窗口审计(f44e8d9)触发的一轮系统性窗口几何重做,含三次真机
+回归修正与两次"打错目标"返工。最终形态:
+
+| 项 | 内容 | 状态 |
+|----|------|------|
+| A1 | WINDOW_SHOWN 补 insets 发布 | 已落地 |
+| A2 | 状态转换后单发对账(无去重) | 已落地 |
+| B1 | 视口不扣避让区,渲染层 CSS 避让 | 已落地 |
+| B2 | mode 文件几何按窗口拆分+启动清理+写入节流 | 已落地 |
+| C1 | safe-pad:body+浮层根(WMS 拒绝隐藏栏时兜底) | 已落地 |
+| C2 | 栏重叠按几何判定(整屏或 available area) | 已落地 |
+| C3 | 删除死数据 cfg.caption | 已落地 |
+| R89/90 | 桌面布局全屏形窗口隐藏系统栏+底部指示条避让 | 已落地 |
+| R93 | 全局 frame 默认语义反转为 unset=native(主进程替换) | 已落地 |
+
+关键教训(记入 docs/window-state-machine.md §3/§9):
+1. 引擎推送通道消费每个事件(含同值重申与 reason 标记),永不去做重;
+   去重只属于文件写入通道。
+2. 本设备存在两种"最大化"几何(触摸=整屏,窗口=available area),
+   判定必须覆盖两者;WMS 的 hasDecor/drawableRect 报告是语义而非残留。
+3. 窗口边框样式(frame)存全局 obsidian.json(D.frame),与 vault
+   app.json 无关;改此类语义必须打在主进程读取点。
+4. 渲染层 console 不进 hilog;asar 是构建产物不在 git,部署前必须
+   refresh-app-patch 重打并核对补丁版本标记。
