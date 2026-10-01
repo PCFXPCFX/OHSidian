@@ -156,6 +156,7 @@ When a note is deleted, the file is moved to `Documents/OHSidianTrash/<vault>/`,
 
 Notes:
 
+- The delete confirmation dialog shows the actual destination of the deletion (`OHSidianTrash` path when the Documents directory is granted, the vault-internal `.trash` otherwise).
 - Deletion only replaces the file move; Obsidian's index and delete-dialog logic are untouched. If the move fails, it falls back to the vault-internal `.trash`.
 - The trash directory appears after the first deleted file.
 - Do not open `OHSidianTrash` as a vault. If opened by mistake, exit the vault and delete the `.obsidian` folder inside it.
