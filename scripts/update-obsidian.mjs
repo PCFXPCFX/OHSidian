@@ -484,6 +484,28 @@ function pollTick(){
 document.addEventListener("visibilitychange",function(){
   if(!document.hidden){lastModeRaw=null}
 });
+/* Delete-dialog destination note, called from the patched dialog site
+   (see APP_BODY_PATCHES). Reflects where the trash hook will actually put
+   the file: the relocated Documents trash when cfg.documentsDir is
+   granted, the hidden in-vault .trash otherwise - both auto-purged after
+   30 days. Language follows Obsidian's localStorage language setting
+   (zh default on this port); null falls back to the stock notice. */
+window.__ohsidianTrashNote=function(){
+  try{
+    var cfg=readMode();
+    var docs=cfg&&typeof cfg.documentsDir==="string"&&cfg.documentsDir;
+    var v=window.app&&window.app.vault;
+    var name=(v&&typeof v.getName==="function"&&v.getName())||"vault";
+    var lang="zh";
+    try{var l=localStorage.getItem("language");if(l&&/^en/i.test(l))lang="en"}catch(eL){}
+    if(docs)return "zh"===lang
+      ?"文件将移至 文档/OHSidianTrash/"+name+"/，30 天后自动清除。"
+      :"Moved to Documents/OHSidianTrash/"+name+"/; auto-purged after 30 days.";
+    return "zh"===lang
+      ?"未授权文档目录：文件将移至仓库内 .trash（文件管理不可见），30 天后自动清除。"
+      :"Documents permission not granted: moved to the vault's hidden .trash; auto-purged after 30 days.";
+  }catch(e){return null}
+};
 /* Deletion safety net + trash relocation. vault.trash(file, system) dispatches to
    adapter.trashSystem (engine bridge; HarmonyOS has no recycle-bin API for
    apps, so it may fail silently or unlink the file outright) or to
@@ -1362,6 +1384,14 @@ async function main() {
   // window.__ohsidianSystemFonts).
   const fontListSrc = 'var t=["Inter","Source Code Pro"];Xne=t;';
   const fontListDst = 'var t=["Inter","Source Code Pro"].concat(window.__ohsidianSystemFonts||[]);Xne=t;';
+  // The delete confirmation dialog shows a stock "moved to your .trash
+  // folder" notice on the local branch (trashOption is forced "local" by
+  // the trash hook). Swap that notice for the OHSidian destination note:
+  // window.__ohsidianTrashNote (injected patch) builds the text at
+  // dialog-open time and returns null on any error, in which case the
+  // stock notice still renders.
+  const deleteNoteSrc = '"local"===i?o.createEl("p",{text:bd.dialogue.labelMoveToVaultTrash()}):';
+  const deleteNoteDst = '"local"===i?o.createEl("p",{text:window.__ohsidianTrashNote?window.__ohsidianTrashNote():bd.dialogue.labelMoveToVaultTrash()}):';
   const APP_BODY_PATCHES = [
     [drawerSwitchSrc, drawerSwitchDst, 'vault drawer switch routed to openVaultChooser',
       'vault drawer switch site not found (app.js layout changed?); ' +
@@ -1369,6 +1399,9 @@ async function main() {
     [fontListSrc, fontListDst, 'system font list injected into the settings font picker',
       'font picker seed site not found (app.js layout changed?); ' +
       'settings will show only Inter / Source Code Pro'],
+    [deleteNoteSrc, deleteNoteDst, 'delete dialog shows the OHSidian trash destination',
+      'delete dialog notice site not found (app.js layout changed?); ' +
+      'the delete dialog keeps the stock ".trash folder" wording'],
   ];
   for (const [src, dst, okMsg, warnMsg] of APP_BODY_PATCHES) {
     if (appSrc.includes(dst)) {
