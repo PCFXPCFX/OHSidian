@@ -98,11 +98,19 @@ function isVersionLess(a, b) {
  *    web .titlebar entirely (the engine viewport already follows
  *    drawableRect below the strip, so no extra padding is applied);
  *    "none" = fullscreen, no caption involved.
- *  - Routes every file deletion to Obsidian's own .trash folder: HarmonyOS
+ *  - Routes every file deletion to Obsidian's own trash flow: HarmonyOS
  *    exposes no system recycle-bin API to third-party apps, so the engine's
  *    "system trash" bridge either fails or (worst case) unlinks permanently.
  *    vault.trash() is forced to the local branch and getConfig("trashOption")
- *    reports "local" so the delete dialog shows the honest label.
+ *    reports "local" so the delete dialog shows the honest label. The local
+ *    branch itself is RELOCATED to <Documents>/OHSidianTrash/<vault>/: a
+ *    vault-local ".trash" is a dot-folder that 文件管理 never shows, so
+ *    deleted notes were unreachable without a PC. Falls back to the stock
+ *    local trash on any fs error (e.g. cross-device renames from sandbox
+ *    vaults), so Obsidian's index handling stays intact either way.
+ *  - The main-process patch purges both the relocated trash and every
+ *    registered vault's .trash 60s after startup: entries whose mtime is
+ *    older than 30 days are unlinked (relocation stamps deletion time).
  *  - Publishes the IME height (cfg.keyboard) as --keyboard-height on
  *    documentElement and dispatches keyboardWillShow/keyboardWillHide:
  *    Obsidian's mobile formatting toolbar positions itself with
@@ -476,12 +484,17 @@ function pollTick(){
 document.addEventListener("visibilitychange",function(){
   if(!document.hidden){lastModeRaw=null}
 });
-/* Deletion safety net. vault.trash(file, system) dispatches to
+/* Deletion safety net + trash relocation. vault.trash(file, system) dispatches to
    adapter.trashSystem (engine bridge; HarmonyOS has no recycle-bin API for
    apps, so it may fail silently or unlink the file outright) or to
    adapter.trashLocal (pure-JS: mkdir .trash + rename, works everywhere).
    Force the local branch and make getConfig("trashOption") report "local"
-   so Obsidian's own delete dialog labels the action correctly. */
+   so Obsidian's own delete dialog labels the action correctly.
+   OHSidian additionally RELOCATES the local trash into the user-visible
+   Documents dir (<cfg.documentsDir>/OHSidianTrash/<vault>/<relPath>): a
+   vault-local ".trash" is a dot-folder that 文件管理 never shows. Only the
+   fs move is replaced - vault.trash still owns the index update, and any
+   failure falls back to the stock trashLocal. */
 function hookTrash(){
   try{
     var v=window.app&&window.app.vault;
@@ -493,6 +506,43 @@ function hookTrash(){
       try{return origTrash.call(this,file,false)}
       catch(e){return origTrash.call(this,file,system)}
     };
+    /* Redirect the LOCAL trash into Documents. trashLocal receives a
+       vault-relative path and must resolve only after the file has moved
+       (vault.trash updates its index once the promise resolves). */
+    var ad=v.adapter;
+    if(ad&&typeof ad.trashLocal==="function"&&!ad.__ohsidianTrashRelocate){
+      ad.__ohsidianTrashRelocate=true;
+      var origLocal=ad.trashLocal;
+      ad.trashLocal=function(rel){
+        try{
+          var base=typeof ad.getBasePath==="function"?ad.getBasePath():(ad.basePath||"");
+          var cfg=readMode();
+          var docs=cfg&&typeof cfg.documentsDir==="string"?cfg.documentsDir:"";
+          if(!base||!docs||!rel||!rel.trim())return origLocal.call(ad,rel);
+          var pathMod=require("path"),fsMod=require("fs");
+          var name=(typeof v.getName==="function"&&v.getName())||pathMod.basename(base);
+          name=String(name).replace(/[\\\/:*?\"<>|]/g,"_").replace(/^\.+$/,"_")||"vault";
+          var src=pathMod.join(base,rel);
+          if(!fsMod.existsSync(src))return origLocal.call(ad,rel);
+          var destDir=pathMod.join(docs,"OHSidianTrash",name,pathMod.dirname(rel));
+          fsMod.mkdirSync(destDir,{recursive:true});
+          var ext=pathMod.extname(src);
+          var stem=pathMod.basename(src,ext);
+          var dest=pathMod.join(destDir,stem+ext);
+          for(var n=2;fsMod.existsSync(dest);n++){
+            dest=pathMod.join(destDir,stem+" ("+n+")"+ext);
+          }
+          fsMod.renameSync(src,dest);
+          /* Stamp deletion time: rename keeps the old mtime, and the purge
+             measures age in the trash by mtime. */
+          try{var now=new Date();fsMod.utimesSync(dest,now,now)}catch(eU){}
+          return Promise.resolve();
+        }catch(e){
+          try{console.warn("[OHSidian] trash relocate failed, local fallback:",e&&e.message||e)}catch(e2){}
+          return origLocal.call(ad,rel);
+        }
+      };
+    }
     if(typeof v.getConfig==="function"){
       var origGetConfig=v.getConfig;
       v.getConfig=function(key){
@@ -1019,6 +1069,21 @@ var tries=0,timer=setInterval(function(){
  * "TypeError: Object has been destroyed" error dialog.
  */
 const MAIN_PROCESS_PATCH = `;(function(){try{
+/* CLI socket relocation: Obsidian 1.13+ binds its CLI server Unix socket to
+   $XDG_RUNTIME_DIR || homedir(); homedir() here is /storage/Users/currentUser,
+   which the app sandbox cannot write, so listen fails with EPERM ("CLI server
+   error" on every boot, CLI server dead). Point it at the app-writable
+   userData dir BEFORE main.js computes the socket path (this patch is
+   prepended to main.js). app.getPath works pre-ready; on failure the socket
+   stays on homedir and the old EPERM noise returns - no regression. */
+if(!process.env.XDG_RUNTIME_DIR){
+  try{
+    process.env.XDG_RUNTIME_DIR=require("electron").app.getPath("userData");
+    try{console.log("[OHSidian] CLI socket dir -> "+process.env.XDG_RUNTIME_DIR)}catch(e){}
+  }catch(e){}
+}
+}catch(e){}})();
+;(function(){try{
 /* The closed-source engine reports an old Electron major (e.g. "5.0.0");
    Obsidian 1.13 gates on it twice: main.js refuses to start below 18,
    and the renderer requires >= 28.2.3 (constant Iie in app.js) before it
@@ -1165,6 +1230,53 @@ var __ohDvRegister=function(){
   }catch(e){}
 };
 if(__ohDvApp.isReady()){__ohDvRegister()}else{__ohDvApp.on("ready",__ohDvRegister)}
+}catch(e){}})();
+/* Trash purge: 60s after startup, unlink trash entries older than 30 days
+   (by mtime; the renderer trash relocation stamps deletion time onto moved
+   files, so in-vault .trash entries from BEFORE that patch age by their
+   last content edit). Roots: the relocated Documents trash plus every
+   registered vault's in-vault .trash (covers pre-relocation leftovers and
+   sandbox vaults). Empty dirs are pruned, symlinks skipped, failures are
+   per-entry and silent - a purge hiccup must never block startup. */
+;(function(){try{
+if(globalThis.__ohsidianTrashPurge)return;globalThis.__ohsidianTrashPurge=true;
+var __ohTrashMaxAge=30*24*60*60*1000;
+setTimeout(function(){try{
+  var el=require("electron"),fsMod=require("fs"),pathMod=require("path");
+  var ud=el.app.getPath("userData");
+  var roots=[];
+  try{
+    var cfg=JSON.parse(fsMod.readFileSync(pathMod.join(ud,"ohsidian-mode.json"),"utf8"));
+    if(cfg&&typeof cfg.documentsDir==="string"&&cfg.documentsDir)roots.push(pathMod.join(cfg.documentsDir,"OHSidianTrash"));
+  }catch(e){}
+  try{
+    var oj=JSON.parse(fsMod.readFileSync(pathMod.join(ud,"obsidian.json"),"utf8"));
+    var vs=(oj&&oj.vaults)||{};
+    for(var k in vs){
+      var p=vs[k]&&vs[k].path;
+      if(typeof p==="string"&&p)roots.push(pathMod.join(p,".trash"));
+    }
+  }catch(e){}
+  var now=Date.now();
+  var purged=0;
+  var walk=function(dir,depth){
+    if(depth>16)return;
+    var es;try{es=fsMod.readdirSync(dir,{withFileTypes:true})}catch(e){return}
+    for(var i=0;i<es.length;i++){
+      var en=es[i];if(!en||en.name==="."||en.name==="..")continue;
+      var fp=pathMod.join(dir,en.name);
+      try{
+        if(en.isDirectory()){walk(fp,depth+1);try{fsMod.rmdirSync(fp)}catch(eE){}}
+        else if(en.isFile()){
+          var st=fsMod.statSync(fp);
+          if(now-st.mtimeMs>__ohTrashMaxAge){fsMod.unlinkSync(fp);purged++}
+        }
+      }catch(eE){}
+    }
+  };
+  for(var i=0;i<roots.length;i++)walk(roots[i],0);
+  try{console.log("[OHSidian] trash purge: roots="+roots.length+", removed="+purged)}catch(e){}
+}catch(e){}},60000);
 }catch(e){}})();/*OHSIDIAN-IPC-GUARD-END*/
 `;
 
