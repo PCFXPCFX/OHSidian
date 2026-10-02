@@ -306,6 +306,10 @@ typedef EGLSyncKHR (*PFN_eglCreateSyncKHR)(EGLDisplay dpy, EGLenum type,
     const EGLint *attribs);
 typedef EGLint (*PFN_eglDupNativeFenceFD)(EGLDisplay dpy, EGLSyncKHR sync);
 typedef EGLBoolean (*PFN_eglDestroySyncKHR)(EGLDisplay dpy, EGLSyncKHR sync);
+/* buffer config introspection (round 98h diagnostics) */
+typedef void (*PFN_NBGetConfig)(OH_NativeBuffer *buffer, OH_NativeBuffer_Config *config);
+static PFN_NBGetConfig gNbGetConfig;
+
 static PFN_eglCreateSyncKHR pEglCreateSyncKHR;
 static PFN_eglDupNativeFenceFD pEglDupNativeFenceFD;
 static PFN_eglDestroySyncKHR pEglDestroySyncKHR;
@@ -719,6 +723,26 @@ static void cfgDrop(OH_AVCodec *codec)
     }
 }
 
+/* Log a window buffer's gralloc config (98h): shows what the queues
+   actually allocate - format mismatch between our flushed RGBA buffer and
+   whatever the bridge's factory expects is the leading abort suspect. */
+static void logBufferConfig(const char *what, OHNativeWindowBuffer *wb)
+{
+    if (gFromNWB == NULL || gNbGetConfig == NULL || wb == NULL) {
+        return;
+    }
+    OH_NativeBuffer *nb = NULL;
+    if (gFromNWB(wb, &nb) != 0 || nb == NULL) {
+        SHIM_LOGI("%{public}s config: (fromNativeWindowBuffer failed)", what);
+        return;
+    }
+    OH_NativeBuffer_Config cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    gNbGetConfig(nb, &cfg);
+    SHIM_LOGI("%{public}s config: %{public}dx%{public}d fmt=%{public}d usage=0x%{public}x stride=%{public}d",
+        what, cfg.width, cfg.height, (int)cfg.format, (unsigned)cfg.usage, (int)cfg.stride);
+}
+
 static void waitFence(int fd)
 {
     if (fd < 0) return;
@@ -743,7 +767,16 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
     srcFence = -1;
 
     if (!gGeomSet && gRelayW > 0 && gRelayH > 0) {
-        gHandleOpt(origWin, SET_BUFFER_GEOMETRY, gRelayW, gRelayH);
+        int32_t curW = 0;
+        int32_t curH = 0;
+        int32_t curFmt = -1;
+        (void)gHandleOpt(origWin, GET_BUFFER_GEOMETRY, &curW, &curH);
+        (void)gHandleOpt(origWin, GET_FORMAT, &curFmt);
+        SHIM_LOGI("bridge window at first frame: geometry=%{public}dx%{public}d fmt=%{public}d",
+            curW, curH, curFmt);
+        if (curW != gRelayW || curH != gRelayH) {
+            SHIM_LOGI("bridge window geometry differs from video - leaving it as-is");
+        }
         gGeomSet = 1;
     }
     if (!gpuInit()) {
@@ -751,12 +784,18 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
         return 1;
     }
 
+    if (gRelayFrames == 0) {
+        logBufferConfig("src(codec nv12)", srcWinBuf);
+    }
     OHNativeWindowBuffer *dstWinBuf = NULL;
     int dstFence = -1;
     if (gReqBuffer == NULL ||
         gReqBuffer(origWin, &dstWinBuf, &dstFence) != 0 || dstWinBuf == NULL) {
         gImageRelBuf(consumer, srcWinBuf, -1);
         return 1;
+    }
+    if (gRelayFrames == 0) {
+        logBufferConfig("dst(bridge queue)", dstWinBuf);
     }
     waitFence(dstFence);
     close(dstFence);
@@ -979,7 +1018,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7g loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7h loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());
@@ -1021,6 +1060,8 @@ __attribute__((constructor)) static void shimInit(void)
         "OH_NativeBuffer_Map");
     gUnmap = (PFN_NBUnmap)libSym(&gBufLib, "libnative_buffer.so",
         "OH_NativeBuffer_Unmap");
+    gNbGetConfig = (PFN_NBGetConfig)libSym(&gBufLib, "libnative_buffer.so",
+        "OH_NativeBuffer_GetConfig");
     gConsumerCreate = (PFN_ConsumerCreate)libSym(&gImgLib, "libnative_image.so",
         "OH_ConsumerSurface_Create");
     gImageAcqWin = (PFN_ImageAcqWin)libSym(&gImgLib, "libnative_image.so",
@@ -1240,22 +1281,20 @@ OH_AVErrCode OH_VideoDecoder_Start(OH_AVCodec *codec)
 
 OH_AVErrCode OH_VideoDecoder_Stop(OH_AVCodec *codec)
 {
+    SHIM_LOGI("Stop called by bridge");
     return gStop ? gStop(codec) : AV_ERR_UNKNOWN;
 }
 
 OH_AVErrCode OH_VideoDecoder_Flush(OH_AVCodec *codec)
 {
+    SHIM_LOGI("Flush called by bridge (seek/stop path?)");
     return gFlush ? gFlush(codec) : AV_ERR_UNKNOWN;
 }
 
 OH_AVErrCode OH_VideoDecoder_Reset(OH_AVCodec *codec)
 {
+    SHIM_LOGI("Reset called by bridge");
     return gReset ? gReset(codec) : AV_ERR_UNKNOWN;
-}
-
-OH_AVErrCode OH_VideoDecoder_SetParameter(OH_AVCodec *codec, OH_AVFormat *format)
-{
-    return gSetParameter ? gSetParameter(codec, format) : AV_ERR_UNKNOWN;
 }
 
 OH_AVErrCode OH_VideoDecoder_PushInputData(OH_AVCodec *codec, uint32_t index, OH_AVCodecBufferAttr attr)

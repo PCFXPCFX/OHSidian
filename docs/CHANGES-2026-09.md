@@ -4519,6 +4519,37 @@ RenderOutputData 停在 1,把日志贴来——那说明桥接的帧工厂没吃
 停在 1,则中止原因不在视频路径时延,转查音频侧(写回调无数据
 导致的 underrun 停播)。
 
+**第 98 轮修订(98h,03:17 日志):fence 后 flush 已进窗口(+3~9ms)
+但中止仍发生(+11~18ms)——帧按时到达仍被拒;98h 上缓冲格式/几何
+诊断并堵住 Flush/Stop 盲区**
+
+03:17 实测(进程 40675,v7g,两实例)证实 fence+预热全部生效:
+GPU 预热在解码器 Start 前完成;实例 2 时间线:桥接放行 .653 →
+我们 flush .664(+11ms,已进窗口)→ 音频 Stop .667(+14ms)。
+**帧按时到达队列,中止照旧**——不是在等帧,而是帧被消费后遭
+拒绝。新线索:桥接在创建解码器之前就建好自己的 NativeImage
+(surface_image InitSurfaceImage 先于 CreateByMime);每次会话
+都有第二次 OnOutputFormatChanged(`width=3840 stride=3840`,
+P010 10bit 双倍宽)——桥接可能按输出格式调整了缓冲期望,而垫片
+强制 SET_BUFFER_GEOMETRY(1920x1080) 与之冲突(96k 曾证明桥接
+帧工厂会因缓冲不合规直接"Failed to create VideoFrame"→中止)。
+
+98h(诊断轮,shim v7h,43.7KB),行为仅一处收敛:
+1. SET_BUFFER_GEOMETRY 改为"仅当查询值≠视频尺寸才写"(默认
+   不再强制);首帧前用 GET_BUFFER_GEOMETRY/GET_FORMAT 打印桥接
+   窗口的真实几何与格式;
+2. 首帧打印 src(编解码器 NV12)与 dst(桥接队列)缓冲的 gralloc
+   config(OH_NativeBuffer_GetConfig:宽高/格式/usage/stride)——
+   直接对照桥接工厂的期望;
+3. Flush/Reset/Stop 转发加日志(排查 seek/停止路径盲区),
+   SetParameter 重复定义合并。
+判定:重测后 hilog 会给出 `bridge window at first frame: geometry=
+WxH fmt=F` 与 `src/dst config: WxH fmt=F usage=U stride=S`——
+若 dst fmt 不是 RGBA(或几何为 3840x1088 之类),即证实格式/
+几何不匹配,按实值修正(可能需把桥接窗口重设回 RGBA,或以
+OnOutputFormatChanged 的 3840 几何对齐);若 Flush/Stop 日志在
+中止前出现,则走 seek/停止路径再查。
+
 
 
 
