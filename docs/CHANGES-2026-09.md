@@ -3655,6 +3655,39 @@ buildArgs → 引擎启动参数 → Chromium 命令行,无需改码)注入:
 libelectron 里进一步定位门控);有桥接日志但报错=vdec HAL 层问题
 (设备/系统版本相关,回退到提示方案并向引擎上游提 issue)。
 
+**第 95/95b 轮复核(自查审计,与本登记表同等标准)**:
+
+1. **ffmpeg branding 判别(补强 95b 因果模型)**:libffmpeg.so 含
+   `aac_latm` 独立串(AAC 解码器编译在内)、h264 串 ×2 → 非裸开源
+   branding,专有解码器(AAC/H.264)在 ffmpeg 内 → **现状 H.264 走
+   ffmpeg 软解、平台硬解桥休眠** → 95b 旗标"激活平台路由"的因果链
+   成立(若 ffmpeg 无 h264,则 H.264 早已走平台桥、旗标将是空操作,
+   HEVC 失败就只能在 HAL 层找原因——真机日志 ③ 可裁决)。`ac3/eac3/
+   dts` 串提示定制构建;`hevc` 仅 1 个独立串(parser,无解码器),
+   与"ffmpeg 无 HEVC 软解"结论一致。
+2. **回退语义精确化(95b 措辞修正)**:Chromium DecoderStream 的
+   回退发生在**claim 阶段**(平台工厂拒判配置)与**初始化失败**时;
+   **流中解码失败不回退**(该流直接报错)。即旗标生效后,若 vdec 桥
+   对某配置 claim 成功但播放中途失败,不会自动落回软解——真机 ② 的
+   H.264 回归检查必须覆盖"完整播放",不能只看能否起播。
+3. **高度漂移修复的残余假设预登记(95)**:非对称公式正确性依赖
+   "引擎 getBounds/setBounds 为内容坐标"(Case A)——依据:①引擎
+   拉起窗口时 sendBounds 传内容 DIP(createWindow 注释与 800×650
+   设计尺寸实锤);②F33 的第 22/23 轮真机验证背书"须加边框";
+   ③用户未报告位置漂移(外框语义下每次还原会多减一个 caption 的
+   位置,必然被察觉)。**若真机 ①(重启 ×5)发现高度仍漂移但速率
+   减半,即为 Case B(外框语义)**:届时正确修法是 setBounds 直接
+   直传 bounds(去掉边框加算与位置减算),在下一轮按此执行。
+4. **其余复查确认无问题**:8 处边框 hunk 的空值防御(windowProp/
+   drawableRect 未合成时 right/bottom 置 0,不产生负值或整窗尺寸
+   误判)、createWindow 的 hide_title_bar 双向处理(新窗口无框时
+   不继承父窗口边框)、弹窗子窗口 drawableRect=全窗(修正后退化为
+   +0,行为不变)、媒体补丁的 error 捕获时机(补丁前置于 app.js,
+   先于任何媒体元素创建)、MEDIA_ERR 码 3/4 过滤(1/2 网络类不打扰)、
+   ohsidian-flags.json JSON 有效性(python 解析通过)与 extraFlags
+   管道(EngineFlags → buildArgs → 引擎命令行,已在源码核实)、
+   未知特性名被 Chromium 无害忽略。
+
 ---
 
 ## 窗口专题总览(第 87-93 轮,2026-10-01)
