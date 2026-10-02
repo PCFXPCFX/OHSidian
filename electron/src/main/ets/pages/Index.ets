@@ -27,7 +27,7 @@
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-import { WebWindow } from 'web_engine';
+import { WebWindow, BackPressBridge } from 'web_engine';
 import { KeyCode } from '@kit.InputKit';
 import CustomChildProcess from '../process/CustomChildProcess';
  
@@ -71,6 +71,27 @@ struct Index {
   aboutToDisappear() {
     // removeUpdateStyleFunction
     this.updateStyle.removeUpdateStyleFunction(this.xcomponentId);
+  }
+
+  // Back gesture (round 96): consumed instead of the default Ability
+  // teardown (removeMissionAfterTerminate made one side-swipe close the
+  // window). Published to the renderer through the mode file; the 500ms
+  // debounce absorbs the multi-fire of one gesture (device-verified in
+  // the Vitreus project: "否则会连退好几级").
+  private lastBackMs: number = 0;
+
+  onBackPress(): boolean {
+    const now: number = Date.now();
+    if (now - this.lastBackMs < 500) {
+      return true;
+    }
+    this.lastBackMs = now;
+    try {
+      BackPressBridge.notify(getContext(this).getApplicationContext().filesDir, this.xcomponentId);
+    } catch (e) {
+      // publish failure must not propagate - the gesture stays consumed
+    }
+    return true;
   }
 
   build() {

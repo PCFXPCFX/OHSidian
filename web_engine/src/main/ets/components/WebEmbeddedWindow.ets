@@ -182,7 +182,7 @@ export struct WebEmbeddedWindow {
     }
     let resDir = '--bundle-installation-dir=' + getContext().resourceDir;
     let vec_args = [override_ua, resDir, default_uri];
-    EngineFlags.getFlags(getContext().resourceDir).forEach((flag: string) => {
+    EngineFlags.getFlags(getContext().resourceDir, getContext().getApplicationContext().filesDir).forEach((flag: string) => {
       vec_args.push(flag);
     });
     return vec_args;

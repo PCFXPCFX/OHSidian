@@ -27,13 +27,43 @@
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-import { WebWindowNode } from 'web_engine';
+import { WebWindowNode, BackPressBridge } from 'web_engine';
 import { KeyCode } from '@kit.InputKit';
 
 let storage = LocalStorage.getShared();
 @Entry(storage)
 @Component
 struct WindowNode {
+  // Back gesture (round 96): same semantics as Index - consumed instead of
+  // the default Ability teardown, published to the focused renderer through
+  // the mode file. The page itself carries no xcomponentId link; the id
+  // comes from the shared LocalStorage the ability stored it under (used
+  // for logging only - the consumer routes by window focus).
+  private lastBackMs: number = 0;
+
+  onBackPress(): boolean {
+    const now: number = Date.now();
+    if (now - this.lastBackMs < 500) {
+      return true;
+    }
+    this.lastBackMs = now;
+    try {
+      let windowId: string = '';
+      try {
+        const v = LocalStorage.getShared().get<string>('xcomponentId');
+        if (typeof v === 'string') {
+          windowId = v;
+        }
+      } catch (eL) {
+        // LocalStorage entry absent - publish without the id
+      }
+      BackPressBridge.notify(getContext(this).getApplicationContext().filesDir, windowId);
+    } catch (e) {
+      // publish failure must not propagate - the gesture stays consumed
+    }
+    return true;
+  }
+
   build() {
     Row() {
       WebWindowNode()

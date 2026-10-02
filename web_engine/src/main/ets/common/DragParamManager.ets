@@ -464,23 +464,28 @@ export class DragParamManager {
     let destPath = `${cacheDir}/${DRAG_IN_DIRNAME}/${Date.now()}-${index}-${DragParamManager.baseName(filePath)}`;
     let source = DragParamManager.openTargetForUri(uri, filePath);
     try {
-      this.copyViaOpen(source, destPath);
+      await this.copyViaOpen(source, destPath);
     } catch (firstErr) {
       let bundleUri = DragParamManager.bundleScopedUri(filePath);
       if (!bundleUri || bundleUri === source) {
         throw firstErr as Error;
       }
       LogUtil.info(TAG, `sanitizeExternalDropData, open failed (${JSON.stringify(firstErr)}), retry as ${bundleUri}`);
-      this.copyViaOpen(bundleUri, destPath);
+      await this.copyViaOpen(bundleUri, destPath);
     }
     LogUtil.info(TAG, `sanitizeExternalDropData, copied external file into cache: ${destPath}`);
     return "file://" + destPath;
   }
 
-  private copyViaOpen(source: string, destPath: string): void {
+  private async copyViaOpen(source: string, destPath: string): Promise<void> {
     let srcFile = fs.openSync(source, fs.OpenMode.READ_ONLY);
     try {
-      fs.copyFileSync(srcFile.fd, destPath);
+      // Round 96: the Promise copyFile runs on an internal thread - the
+      // sync copyFileSync version blocked the ArkTS UI thread for the
+      // whole transfer (hundreds of MB from 中转站/分享 = seconds of
+      // frozen rendering and input; the "video drag wedges the app"
+      // report). The fd is closed only after the await settles.
+      await fs.copyFile(srcFile.fd, destPath);
     } finally {
       fs.closeSync(srcFile);
     }

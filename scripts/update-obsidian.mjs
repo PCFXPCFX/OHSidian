@@ -141,7 +141,7 @@ function isVersionLess(a, b) {
  *    migration, system fonts).
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
-if(window.__ohsidianTouchPatch==="15")return;window.__ohsidianTouchPatch="15";
+if(window.__ohsidianTouchPatch==="16")return;window.__ohsidianTouchPatch="16";
 /* Keep the renderer's view of the Electron major consistent with the main
    process shim: app.js requires >= 28.2.3 (Iie) before it stops showing the
    "manual update" notice. Replace the whole versions object - mutating the
@@ -603,6 +603,8 @@ function pollTick(){
         if(txt!==lastModeRaw){
           lastModeRaw=txt;
           try{lastWant=syncFromSystem(lastWant)}catch(e){}
+          /* Back gesture published by the @Entry pages (round 96). */
+          try{applyBackPress()}catch(e){}
           /* Rotation / bar changes rewrite cfg.insets without touching
              systemMode - re-apply the safe area on every change too. */
           try{applySafeArea()}catch(e){}
@@ -702,6 +704,49 @@ document.addEventListener("error",function(ev){
     ohsidianOfferSystemPlayer(el);
   }catch(e){}
 },true);
+/* Back-press consumer (round 96). The @Entry pages (Index/WindowNode)
+   consume the system back gesture in onBackPress (previously the gesture
+   DESTROYED the hosting ability - the reported "侧划直接退出") and publish
+   cfg.backPress={seq,ts,windowId} into the mode file. Semantics, highest
+   first: close the top overlay with a synthetic Escape -> Obsidian
+   navigate-back -> nothing. Only the FOCUSED window acts (the gesture
+   targets it; hidden windows are already skipped by pollTick).
+   Notes: synthetic KeyboardEvent cannot carry keyCode (init dict ignored,
+   reads back 0) - Obsidian's Scope/Modal Escape handling matches on key,
+   so the event is dispatched ON the overlay element itself, which reaches
+   container-scoped AND document/window-scoped listeners through the
+   bubble path. lastBackSeq seeds from the file ONCE at boot (not lazily -
+   a lazy seed would swallow the first gesture when the field is absent)
+   so a stale entry left by a previous session never fires a phantom back;
+   the ArkTS writer is monotonic against the published file, so seq keeps
+   rising across restarts. */
+var lastBackSeq=(function(){try{var b=(readMode()||{}).backPress;return (b&&typeof b.seq==="number")?b.seq:0}catch(e){return 0}})();
+function applyBackPress(){
+  try{
+    var cfg=readMode();if(!cfg)return;
+    var bp=cfg.backPress;
+    if(!bp||typeof bp.seq!=="number")return;
+    if(bp.seq<=lastBackSeq)return;
+    lastBackSeq=bp.seq;
+    try{if(!document.hasFocus())return}catch(eF){}
+    var overlay=document.querySelector('.modal-container,.modal-bg,.suggestion-container,.menu,.prompt');
+    if(overlay){
+      try{
+        var e={key:'Escape',code:'Escape',bubbles:true,cancelable:true};
+        var t=(overlay.querySelector&&overlay.querySelector("input,textarea"))||overlay;
+        t.dispatchEvent(new KeyboardEvent('keydown',e));
+        t.dispatchEvent(new KeyboardEvent('keyup',e));
+      }catch(e1){}
+      return;
+    }
+    var cmds=window.app&&window.app.commands&&window.app.commands.commands;
+    if(cmds&&window.app.commands.executeCommandById){
+      var id=cmds["app:go-back"]?"app:go-back":"";
+      if(!id){var ks=Object.keys(cmds);for(var i=0;i<ks.length;i++){if(/go-back|navigate-back/.test(ks[i])){id=ks[i];break}}}
+      if(id){try{window.app.commands.executeCommandById(id)}catch(e2){}}
+    }
+  }catch(e){}
+}
 /* Delete-dialog destination note, called from the patched dialog site
    (see APP_BODY_PATCHES). Reflects where the trash hook will actually put
    the file: the relocated Documents trash when cfg.documentsDir is

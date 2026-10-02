@@ -3688,6 +3688,101 @@ libelectron 里进一步定位门控);有桥接日志但报错=vdec HAL 层问�
    管道(EngineFlags → buildArgs → 引擎命令行,已在源码核实)、
    未知特性名被 Chromium 无害忽略。
 
+### 第 96 轮(2026-10-02):外部改进方案核实与落地(返回手势/iFrame 登录/拖拽卡顿)
+
+**动机**:外部"OHSidian 代码级改进方案"(基线 9950f59)提出 6 项。
+先逐项对照源码(与引擎二进制)核实其事实与方案,再实施其中修复类
+三项;方案自身有 4 处错误在核实中识别并修正。
+
+**核实结论**:
+
+- **属实并采纳**:①全仓确无 onBackPress/canGoBack 处理,三个窗口
+  Ability 均 `removeMissionAfterTerminate: true`(module.json5
+  L31/L113/L133)——侧划返回手势直接销毁窗口,"侧划即退出"成立;
+  ②`DragParamManager.copyViaOpen` 在 ArkTS UI 线程同步
+  `fs.copyFileSync` 整个文件(跨应用不可读来源才触发,文件管理器
+  拖拽走直通分支不受影响——该限定文档表述准确);③
+  `ThirdPartyStoragePartitioning` 特性串在 libelectron.so 中存在
+  (×3)——`--disable-features` 旗标是真实候选而非空操作;④通道表
+  (NativeContext 7 命令无 back 语义、JSBind 方向、mode.json 轮询、
+  deep-link 桥模式)与源码一致。
+- **方案错误,已修正 4 处**:
+  1. **消费者选型**(关键):方案主案让主进程以
+     `BrowserWindow.webContents.executeJavaScript` 驱动页面——该
+     API 是否被闭源引擎实现无法静态证实(与方案自己批评的
+     "Vitreus 直调不可迁移"是同类风险),且需另建 back.json 专用
+     文件与 100ms 常驻轮询。**改用方案自己的备选**:消费者放渲染层
+     pollTick(200ms,已有路径,零新增常驻开销),直接用第一方
+     `app.commands`,无任何闭源 API 依赖;200ms 与 100ms 之差对手势
+     语义无感。
+  2. **合成 Escape 的 keyCode 陷阱**:文档代码向 KeyboardEvent
+     构造器传 `keyCode:27`——构造器初始化字典会忽略 keyCode(只读,
+     实际读到 0)。改为把事件**派发到浮层元素本身**(沿容器→
+     document→window 冒泡,容器级与文档级监听全部命中),依赖
+     key/code 匹配(Obsidian 的 Scope/Modal 即如此)。
+  3. **WindowNode 页面取 id**:文档称该页面无 xcomponentId——页面
+     结构体本身确实没有,但其内层组件 WebWindowNode 有
+     `@LocalStorageLink('xcomponentId')`;页面侧从共享 LocalStorage
+     读取(方案的建议恰好可用),id 仅用于日志定位,消费端按窗口
+     焦点路由。
+  4. **首手势吞没缺陷(自查发现)**:若消费者用惰性播种(文档式的
+     `lastBackSeq` 初值语义),backPress 字段缺席时首个手势会被当作
+     播种吞掉;改为**启动时一次性播种** lastBackSeq(方案未发现的
+     问题,ArkTS 写侧 seq 对已发布文件单调,跨重启不重置)。
+
+**落地实现**:
+
+1. **侧划返回手势(P1)**:新增 `web_engine/.../utils/BackPressBridge.ets`
+   (经 index.ets 导出):读-改-写 `cfg.backPress={seq,ts,windowId}`,
+   tmp(**独立 `.bp.tmp` 后缀**,防多进程若成立时与其他窗口几何写者
+   的临时文件互踩)+ rename 原子发布,seq 对已发布文件单调;
+   `pages/Index.ets` 与 `pages/WindowNode.ets` 挂 `onBackPress():
+   boolean`,500ms 防抖(一次手势连续多次触发,真机经验),**永远
+   返回 true 消费**(根除默认销毁);TOUCH_MODE_PATCH v15→v16 增加
+   `applyBackPress` 并挂入 pollTick 内容变化分支:仅聚焦窗口生效 →
+   顶层浮层(`.modal-container/.modal-bg/.suggestion-container/
+   .menu/.prompt`,不含瞬态 .notice)存在时合成 Escape 关闭 → 否则
+   执行导航返回(精确 `app:go-back` 优先,`/go-back|navigate-back/`
+   模糊回退,避免误中插件命令) → 无历史则无操作。启动播种防止
+   上次会话残留触发幽灵返回。
+2. **iFrame 第三方登录(P2,旗标)**:打包 flags 追加
+   `--disable-features=ThirdPartyStoragePartitioning`(内嵌网页登录
+   的 cookie 不再按第三方分区,重启保留登录态;特性串已在引擎中
+   证实存在,效果待真机)。**用户层 flags 覆盖文件**(方案建议,已
+   实现):`EngineFlags.getFlags(resourceDir, filesDir?)` 新增第二参,
+   读取 `<filesDir>/ohsidian-flags-user.json`(仅 extraFlags,追加在
+   打包项之后,解析失败只降级用户层);三个窗口组件调用点同步更新。
+   此后实验性开关集可以"发一个 JSON 文件"的方式分发,无需重打包。
+3. **拖拽视频卡顿(P2)**:`copyViaOpen` 改异步
+   `await fs.copyFile(fd, dest)`(内部线程执行,UI 线程只等待),
+   `resolveReadableFileUri` 两处调用点补 await(函数本就是 async,
+   签名不变);fd 在 finally 中于复制完成后关闭。数百 MB 中转站/
+   分享来源不再冻结 UI;文件管理器拖拽(直通分支)行为不变。
+
+**缓办(附理由)**:
+
+- §5 局域网伺服器:方案自评 2-3 天且建议独立版本发布;涉及网络
+  服务暴露面(只读/随机 token/接口绑定)需真机专项,暂缓。
+- §6 触控板捏合缩放开关:属新增设置项(P3)而非缺陷;三处
+  PinchGesture 位点已核实(WebWindow:240/WebWindowNode:204/
+  WebEmbeddedWindow:95),方案的 ModeFlags 设计基本可行,后续按需
+  单独实施。
+- §7 HarmonyOS 7.0 插件加载:验证任务非代码缺陷,依赖真机矩阵,
+  95b 引入的用户层 flags 文件即为方案要求的取证通道
+  (`--enable-logging=stderr` 可经 ohsidian-flags-user.json 注入)。
+
+**验证**:TOUCH/MAIN 补丁语法通过(vm.Script);verify-asar 标记
+v15→v16 + 新增 back-press consumer marker;flags JSON 解析通过;
+ArkTS 改动待 DevEco 编译。**真机回归清单**:①主窗口侧划:浮层开
+→ 关浮层;无浮层 → 笔记导航回退;最早历史 → 无操作(不退出);
+②BrowserAbility 窗口(pages/WindowNode)同上;③500ms 内连续两次
+侧划只生效一次;④命令面板/全局搜索浮层打开时侧划:浮层关闭且
+导航不变;⑤iFrame 登录(Custom Frames):登录 → 杀进程 → 重启
+登录态保留(旗标生效判据);⑥中转站拖入约 300MB 视频:拖放期间
+UI 可操作,文件延迟落位无 ANR;⑦文件管理器拖入同一文件:行为与
+修改前一致(直通不复制);⑧hilog 观察 `BackPressBridge: back press
+published` seq 单调递增。
+
 ---
 
 ## 窗口专题总览(第 87-93 轮,2026-10-01)

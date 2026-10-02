@@ -143,7 +143,7 @@ class WindowNodeController extends NodeController {
     this.config.electronRelaunchArgs.forEach((arg: string) => {
       vec_args.push(arg);
     });
-    EngineFlags.getFlags(getContext().resourceDir).forEach((flag: string) => {
+    EngineFlags.getFlags(getContext().resourceDir, getContext().getApplicationContext().filesDir).forEach((flag: string) => {
       vec_args.push(flag);
     });
     return vec_args;
