@@ -221,6 +221,21 @@ OH_AVErrCode OH_VideoDecoder_Configure(OH_AVCodec *codec, OH_AVFormat *format)
 {
     dumpAndFix(format);
     OH_AVErrCode r = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
+    if (r != AV_ERR_OK && gSetIntValue != NULL) {
+        /* Round 96f: 8K (7680x4320) HEVC fails with NV12 on this device -
+           the HAL likely caps NV12 buffer allocation below 8K, while
+           SURFACE_FORMAT lets the surface's own (possibly compressed /
+           tiled) format carry it. Retry once with pixel_format=4 before
+           giving up; the dict is stateless per Configure call, so setting
+           the key again is safe. */
+        SHIM_LOGI("Configure with NV12 failed (%{public}d) - retrying with SURFACE_FORMAT", r);
+        gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_SURFACE_FORMAT);
+        OH_AVErrCode r2 = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
+        SHIM_LOGI("Configure(SURFACE_FORMAT) -> %{public}d", r2);
+        if (r2 == AV_ERR_OK) {
+            return AV_ERR_OK;
+        }
+    }
     SHIM_LOGI("Configure -> %{public}d", r);
     return r;
 }

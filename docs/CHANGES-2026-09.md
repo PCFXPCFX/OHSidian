@@ -3995,6 +3995,48 @@ hilog 是既有事实);补丁 v17→v18 增加两条通道,命令面板
    (profile/尺寸对齐等),探针逐键扩展试错;③hevc 全部通过 →
    问题在引擎传入的具体码流参数(尺寸/元数据),属引擎侧调试范畴。
 
+**第 96 轮补充(96f):垫片实锤成功——1080p HEVC 硬解全链路打通;96d
+记录更正;v2 增加 SURFACE_FORMAT 回退**
+
+用户以含垫片构建真机播放(23:57 hilog),结果超出预期:
+
+1. **96d 记录更正(重要)**:96d 依据 23:26 日志判"同名遮蔽被引擎
+   绕过"——**判断错误**。真相:引擎对 vdec 的 dlopen 是"绝对路径
+   尝试(命名空间检查失败,MUSL-LDSO warning)→ 回退 soname 搜索",
+   回退搜索会命中包内 libs 目录;23:26 的构建尚未把垫片打进去
+   (96c 提交晚于该构建),回退落到系统库;本次构建垫片在包内,
+   `VdecShim: shim loaded - shadowing system libnative_media_vdec.so`
+   实际出现,链路:引擎 → 绝对路径失败 → soname 回退 → 包内垫片 →
+   垫片按绝对路径 dlopen 真系统库成功(真 CodecClient 日志佐证)。
+   "改写绝对路径串不可行"的分析仍有效,但整条修复路早已打通。
+2. **HEVC 1080p 硬解端到端成功**:实例 [571]/[572]/[575]
+   (`CreateByMime(video/hevc) -> ok`,1920×1080@60)在垫片注入
+   pixel_format=NV12 后 Configure/SetSurface/Prepare/Start **全部
+   返回 0**,OnOutputFormatChanged 报出完整输出格式,解码输出缓冲
+   真实流动([out] UpdateOutputCache/GetBuffer)——用户报告的
+   "HEVC 大部分播不了"对 1080p 视频已修复;音频时间轴同步推进。
+3. **残余失败:7680×4320(8K)**:实例 [573]/[574] 同样注入 NV12
+   后 Configure → 3(AV_ERR_INVALID_DATA)。1080p 同参数成功,
+   指向 HAL 对 NV12 大缓冲的尺寸/内存上限,或 8K 需 surface 原生
+   格式(压缩/平铺)承载。
+4. **垫片 v2**(scripts/vdec-shim/shim.c):Configure 注入 NV12
+   失败后**自动以 SURFACE_FORMAT(pixel_format=4)重试一次**,
+   成功即返回 0;输出 "Configure(SURFACE_FORMAT) -> n" 供判读。
+   若 8K 在 v2 下仍失败,属设备解码能力上限(向 SIG/华为反馈的
+   能力矩阵问题),垫片侧不再迭代。
+5. **NAPI 探针桥移除**:96e 的 process.dlopen 探针在引擎主进程
+   实测失败("Cannot convert undefined or null to object"——引擎
+   对 process.dlopen 的实现与标准 Node 不兼容),且垫片本身已是
+   真实视频上的活体实验,探针失去意义;MAIN_PROCESS_PATCH 段已删
+   (vdecprobe_addon.c 源码与产物留档)。标记同步移除,asar 刷新
+   (TOUCH v19 不变,main 补丁 12906 字节)。
+6. **验证与部署**:libnative_media_vdec.so 21.3KB(v2);下次构建
+   随包。真机判读:hilog 过滤 VdecShim——1080p 视频应直接播放;
+   8K 视频看 "Configure(SURFACE_FORMAT) -> 0" 是否出现。命令面板
+   "视频硬解(实验)"开关现仅控制 enable-features 旗标(96d 已证
+   与路由无关),垫片本身不依赖该开关——垫片始终生效,删除包内
+   文件即回退。
+
 **第 96 轮补充(96e):探针改为应用内 N-API 插件(shell 域被 SELinux 拦截)**
 
 hdc 部署 /data/local/tmp/ohprobe 实测失败:`ls -laZ` 显示标签正确
