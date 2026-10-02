@@ -34,6 +34,7 @@ try {
     'app media codec guidance (round 95 bug 1)': app.includes('ohsidianOfferSystemPlayer'),
     'app atomic mode-file write (H1)': app.includes('writeModeFileSync'),
     'app trash meta sidecar (F2)': app.includes('.ohsidian-trash-meta.json'),
+    'main vdec configure probe (round 96e)': main.includes('__ohsidianVdecProbe'),
     'main trash purge will-quit pass (F-N16)': main.includes('__ohTrashPurgeOnce'),
     'main frame default unset=native (round 93e)': main.includes('D.frame==null'),
     'app per-window geometry match (round 87 B2)': app.includes('resolveGeometry'),

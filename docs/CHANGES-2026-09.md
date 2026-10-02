@@ -3995,6 +3995,31 @@ hilog 是既有事实);补丁 v17→v18 增加两条通道,命令面板
    (profile/尺寸对齐等),探针逐键扩展试错;③hevc 全部通过 →
    问题在引擎传入的具体码流参数(尺寸/元数据),属引擎侧调试范畴。
 
+**第 96 轮补充(96e):探针改为应用内 N-API 插件(shell 域被 SELinux 拦截)**
+
+hdc 部署 /data/local/tmp/ohprobe 实测失败:`ls -laZ` 显示标签正确
+(data_local_tmp:s0)+x 也在,但 exec 返回 Permission denied(126);
+debugserver 目录(lldb_server_file 标签)同样被拒;setenforce 0 需
+root——本机 shell 域不可执行 /data 二进制(Consumer 版 SELinux 策略,
+与 root 的开发机不同)。
+
+**改造**:探针改写为 N-API 插件(scripts/vdec-shim/vdecprobe_addon.c →
+electron/libs/arm64-v8a/libvdecprobe.so,15.8KB,手写
+napi_register_module_v1 零 NAPI 头依赖),由 MAIN_PROCESS_PATCH 在
+app ready +5s 经 `process.dlopen('/data/storage/el1/bundle/libs/arm64/
+libvdecprobe.so')` 加载——**运行在引擎失败的同一进程内**,dlopen 系统
+vdec/core 的命名空间行为与引擎实测一致(引擎自身在该进程内成功创建过
+CodecClient 实例)。探针运行后把结果写入
+<Documents|userData>/OHSidian/vdec-probe.txt 并经 console 桥打印;
+实验矩阵不变(每 mime 5 组:w/h only=引擎形态、+NV12、+SURFACE_
+FORMAT、+YUVI420、+RGBA;另查能力 hardware 属性)。每次启动静默
+运行一次(4 个编解码实例建/毁,无表面无播放,开销毫秒级)。
+
+**使用**:重新构建 HAP(v19 asar + libvdecprobe.so 随包)→ 安装启动
+→ 直接读 文档/OHSidian/vdec-probe.txt(或 hilog/console 中
+[OHSidian] vdec probe results 段)。主进程 dlopen 被引擎策略拦截时,
+日志会给出具体失败信息,同样是有价值的证据。
+
 ---
 
 ## 窗口专题总览(第 87-93 轮,2026-10-01)

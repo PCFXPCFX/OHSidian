@@ -1728,6 +1728,58 @@ __cbEl.ipcMain.on("ohs-console",function(_evt,payload){
 });
 try{console.log("[OHSidian] console bridge ready (renderer opt-in: 命令面板 → 运行日志捕获)")}catch(e2){}
 }catch(e){}})();
+/* VDEC configure probe (round 96e): the /data/local/tmp probe binary is
+   blocked by SELinux (shell domain may not exec /data binaries), so the
+   probe ships as an N-API addon INSIDE the app instead - libvdecprobe.so
+   is loaded once at startup via process.dlopen into the very process whose
+   engine fails with "OH_VideoDecoder_Configure invalid argument", running
+   a Configure matrix per mime (w/h only = the engine shape, then
+   pixel_format variants) against the REAL system codec service. Results
+   go to <Documents|userData>/OHSidian/vdec-probe.txt and the console
+   (visible through the round-96b console bridge). Harmless: standalone
+   codec instances, created and destroyed, no surface, no playback. */
+;(function(){try{
+if(globalThis.__ohsidianVdecProbe)return;globalThis.__ohsidianVdecProbe=true;
+var __vpApp=require("electron").app;
+var __vpRun=function(){
+  try{
+    if(process.platform!=="ohos"||process.arch!=="arm64")return;
+    if(typeof process.dlopen!=="function")return;
+    var fsMod=require("fs"),pathMod=require("path");
+    var ud=__vpApp.getPath("userData");
+    var docs=null;
+    try{
+      var cfg=JSON.parse(fsMod.readFileSync(pathMod.join(ud,"ohsidian-mode.json"),"utf8"));
+      if(cfg&&typeof cfg.documentsDir==="string"&&cfg.documentsDir)docs=cfg.documentsDir;
+    }catch(e0){}
+    var base=docs?pathMod.join(docs,"OHSidian"):ud;
+    try{fsMod.mkdirSync(base,{recursive:true})}catch(e1){}
+    var outPath=pathMod.join(base,"vdec-probe.txt");
+    var addon="/data/storage/el1/bundle/libs/arm64/libvdecprobe.so";
+    if(!fsMod.existsSync(addon)){
+      try{console.log("[OHSidian] vdec probe addon absent, skipped ("+addon+")")}catch(e2){}
+      return;
+    }
+    process.env.OHSIDIAN_PROBE_OUT=outPath;
+    try{
+      process.dlopen({name:"vdecprobe",filename:addon},addon);
+    }catch(e5){
+      try{console.log("[OHSidian] vdec probe dlopen failed: "+(e5&&e5.message||e5))}catch(e6){}
+      return;
+    }
+    setTimeout(function(){
+      try{
+        var txt=fsMod.readFileSync(outPath,"utf8");
+        try{console.log("[OHSidian] vdec probe results:\n"+txt)}catch(e3){}
+      }catch(e4){
+        try{console.log("[OHSidian] vdec probe output missing: "+(e4&&e4.message||e4))}catch(e7){}
+      }
+    },1500);
+  }catch(e){}
+};
+if(__vpApp.isReady()){setTimeout(__vpRun,5000)}
+else{__vpApp.on("ready",function(){setTimeout(__vpRun,5000)})}
+}catch(e){}})();
 /* Trash purge: 60s after startup (and once more on will-quit, F-N16 - a
    session shorter than 60s or a multi-day background session used to miss
    the pass entirely), unlink trash entries older than 30 days. Age base:
