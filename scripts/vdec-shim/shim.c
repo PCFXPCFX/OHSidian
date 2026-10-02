@@ -1,39 +1,44 @@
 /*
- * libnative_media_vdec.so shim (round 96c) - OHSidian HEVC experiment.
+ * libnative_media_vdec.so shim v6 (round 97) - OHSidian HEVC compat layer.
  *
- * WHY: libelectron.so's closed-source MediaCodecDecoderBridgeImpl configures
- * the OHOS video decoder with width/height ONLY (no OH_MD_KEY_PIXEL_FORMAT),
- * and device HALs reject that with "invalid argument"; the bridge then does
- * not report the failure to Chromium, leaving <video> hung (hilog:
- * OH_VideoDecoder_Configure invalid argument). See CHANGES rounds 95b/95c.
+ * Root cause chain (proven across rounds 95b-96k, see docs/CHANGES-2026-09.md):
+ *  1. The closed-source bridge configures the decoder with width/height only;
+ *     the HAL rejects it (fixed here by injecting pixel_format).
+ *  2. The bridge never sets the consumer queue format; the HAL hard-wires
+ *     NV12 output while the queue allocates RGBA (fixed by the queue format,
+ *     but the frame factory still failed - see 3).
+ *  3. The port's frame factory imports ONLY RGBA textures
+ *     (CopyRGBATextureToVideoFrame; zero YUV import in the binary), so an
+ *     NV12 queue still yields "Failed to create VideoFrame" and the decoder
+ *     is torn down ~70ms after start.
  *
- * HOW: this library is built with the SAME soname as the system
- * libnative_media_vdec.so and bundled into the HAP, so the dynamic linker
- * loads THIS copy for the app process (shadowing). Everything is forwarded
- * 1:1 to the real system library (dlopen by absolute path), except
- * OH_VideoDecoder_Configure, which (a) dumps the incoming format keys into
- * hilog and (b) when OH_MD_KEY_PIXEL_FORMAT is absent, sets NV12 and
- * retries - the missing key is the leading suspect for the HAL rejection.
+ * Round 97 compat layer: a SURFACE RELAY. SetSurface is intercepted; the
+ * codec gets a private NV12 consumer queue (OH_ConsumerSurface_Create), and
+ * the frame-available callback converts each decoded frame NV12->RGBA
+ * (CPU, fixed-point BT.601) into the bridge's original RGBA window. The
+ * bridge's frame factory then imports a correctly-filled RGBA buffer - the
+ * exact configuration that rendered (garbage) in round 96g, now with
+ * correct content.
  *
- * SAFETY: with the routing feature flag off (round 95c default) the bridge
- * is never invoked and this shim is inert; delete this file to remove it.
- *
- * Build (DevEco NDK):
- *   clang.exe --target=aarch64-linux-ohos --sysroot=<NDK>/sysroot \
- *     -shared -fPIC -O2 shim.c -o libnative_media_vdec.so \
- *     -lhilog_ndk.z.so -lnative_media_core
+ * Everything else forwards 1:1 to the real system libnative_media_vdec.so
+ * (dlopen by absolute path). Delete this file from the HAP to remove the
+ * whole compat layer.
  */
 
 #include <dlfcn.h>
+#include <poll.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 #include <hilog/log.h>
 #include <multimedia/player_framework/native_avcodec_base.h>
 #include <multimedia/player_framework/native_avcodec_videodecoder.h>
 #include <multimedia/player_framework/native_avformat.h>
 #include <native_buffer/native_buffer.h>
 #include <native_window/external_window.h>
+#include <native_image/native_image.h>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -43,8 +48,7 @@
 #define SHIM_LOGI(...) ((void)OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__))
 #define SHIM_LOGE(...) ((void)OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, __VA_ARGS__))
 
-/* The real system library, loaded by absolute path so our own soname never
- * self-resolves. */
+/* ===== real system library ===== */
 static void *gReal = NULL;
 
 typedef OH_AVCodec *(*PFN_CreateByMime)(const char *mime);
@@ -93,19 +97,39 @@ static PFN_IsValid gIsValid;
 static PFN_FormatGetIntValue gGetIntValue;
 static PFN_FormatSetIntValue gSetIntValue;
 
-/* Loaded lazily on first use: the shim's constructor runs during library
- * loading, before libelectron's own NDK bootstrap - keep it minimal. */
+/* ===== graphics libs (resolved by plain soname; the app namespace resolves
+   them the same way it resolved libnative_media_core.so) ===== */
 static void *gCore = NULL;
 static bool gCoreTried = false;
-/* Round 96i: the consumer surface's buffer queue must ALLOCATE NV12 to
-   match the HAL's hard-wired NV12 output (OnOutputFormatChanged always
-   reports pixel_format=2 / graphic 24; RGBA output is 'unsupport
-   interface'). Set the window format at SetSurface time - before Start,
-   i.e. before any buffer is dequeued - via the standard video-surface
-   mechanism. */
+static void *gImgLib = NULL;
+static void *gWinLib = NULL;
+static void *gBufLib = NULL;
+
 typedef int32_t (*PFN_WindowOpt)(OHNativeWindow *window, int code, ...);
-static void *gNwLib = NULL;
-static PFN_WindowOpt gWindowOpt;
+typedef int32_t (*PFN_ReqBuffer)(OHNativeWindow *window, OHNativeWindowBuffer **buffer, int *fenceFd);
+typedef int32_t (*PFN_FlushBuffer)(OHNativeWindow *window, OHNativeWindowBuffer *buffer, int fenceFd, Region region);
+typedef int32_t (*PFN_FromNWB)(OHNativeWindowBuffer *nativeWindowBuffer, OH_NativeBuffer **buffer);
+typedef int32_t (*PFN_NBMapPlanes)(OH_NativeBuffer *buffer, void **virAddr, OH_NativeBuffer_Planes *outPlanes);
+typedef int32_t (*PFN_NBUnmap)(OH_NativeBuffer *buffer);
+typedef OH_NativeImage *(*PFN_ConsumerCreate)(void);
+typedef OHNativeWindow *(*PFN_ImageAcqWin)(OH_NativeImage *image);
+typedef int32_t (*PFN_ImageAcqBuf)(OH_NativeImage *image, OHNativeWindowBuffer **nativeWindowBuffer, int *fenceFd);
+typedef int32_t (*PFN_ImageRelBuf)(OH_NativeImage *image, OHNativeWindowBuffer *nativeWindowBuffer, int fenceFd);
+typedef int32_t (*PFN_ImageSetListener)(OH_NativeImage *image, OH_OnFrameAvailableListener listener);
+typedef void (*PFN_ImageDestroy)(OH_NativeImage **image);
+
+static PFN_WindowOpt gHandleOpt;
+static PFN_ReqBuffer gReqBuffer;
+static PFN_FlushBuffer gFlushBuffer;
+static PFN_FromNWB gFromNWB;
+static PFN_NBMapPlanes gMapPlanes;
+static PFN_NBUnmap gUnmap;
+static PFN_ConsumerCreate gConsumerCreate;
+static PFN_ImageAcqWin gImageAcqWin;
+static PFN_ImageAcqBuf gImageAcqBuf;
+static PFN_ImageRelBuf gImageRelBuf;
+static PFN_ImageSetListener gImageSetListener;
+static PFN_ImageDestroy gImageDestroy;
 
 static void *coreSym(const char *name)
 {
@@ -119,8 +143,209 @@ static void *coreSym(const char *name)
     return gCore ? dlsym(gCore, name) : NULL;
 }
 
-/* Format-key dump + fix helper. OH_AVFormat exposes no key enumeration, so
- * probe the keys the HAL cares about for a surface-mode video decoder. */
+static void *libSym(void **handle, const char *soname, const char *name)
+{
+    if (*handle == NULL) {
+        *handle = dlopen(soname, RTLD_NOW | RTLD_LOCAL);
+        if (*handle == NULL) {
+            SHIM_LOGE("%{public}s dlopen failed: %{public}s", soname, dlerror());
+            return NULL;
+        }
+    }
+    void *sym = dlsym(*handle, name);
+    if (sym == NULL) {
+        SHIM_LOGE("dlsym %{public}s failed: %{public}s", name, dlerror());
+    }
+    return sym;
+}
+
+/* ===== relay state (single active video surface; the first decoder that
+   reaches SetSurface claims it - matches the one-playing-video case; extra
+   decoders keep the old direct path) ===== */
+static pthread_mutex_t gRelayLock = PTHREAD_MUTEX_INITIALIZER;
+static OHNativeWindow *gOrigWin = NULL;
+static OH_NativeImage *gConsumer = NULL;
+static OH_AVCodec *gRelayCodec = NULL;
+static int gRelayW = 0;
+static int gRelayH = 0;
+static int gGeomSet = 0;
+static int gRelayActive = 0;
+static long gRelayFrames = 0;
+
+/* per-codec configured size (Configure happens before SetSurface; a tiny
+   ring handles the multi-decoder pages) */
+#define CFG_SLOTS 8
+typedef struct {
+    OH_AVCodec *codec;
+    int w;
+    int h;
+} CfgEntry;
+static CfgEntry gCfg[CFG_SLOTS];
+static int gCfgN = 0;
+
+static void cfgRecord(OH_AVCodec *codec, int w, int h)
+{
+    for (int i = 0; i < gCfgN; i++) {
+        if (gCfg[i].codec == codec) {
+            gCfg[i].w = w;
+            gCfg[i].h = h;
+            return;
+        }
+    }
+    if (gCfgN < CFG_SLOTS) {
+        gCfg[gCfgN].codec = codec;
+        gCfg[gCfgN].w = w;
+        gCfg[gCfgN].h = h;
+        gCfgN++;
+    }
+}
+
+static int cfgLookup(OH_AVCodec *codec, int *w, int *h)
+{
+    for (int i = 0; i < gCfgN; i++) {
+        if (gCfg[i].codec == codec) {
+            *w = gCfg[i].w;
+            *h = gCfg[i].h;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void cfgDrop(OH_AVCodec *codec)
+{
+    for (int i = 0; i < gCfgN; i++) {
+        if (gCfg[i].codec == codec) {
+            gCfg[i] = gCfg[gCfgN - 1];
+            gCfgN--;
+            return;
+        }
+    }
+}
+
+/* ===== NV12 -> RGBA conversion, fixed-point BT.601 (libyuv-equivalent
+   coefficients). dst is RGBA byte order (R at byte 0) to match an
+   RGBA8888 shared image sampled by the compositor. ===== */
+static inline uint8_t clamp8(int v)
+{
+    if (v < 0) return 0;
+    if (v > 255) return 255;
+    return (uint8_t)v;
+}
+
+static void nv12ToRgba(uint8_t *dst, int dstStrideBytes,
+    const uint8_t *yPlane, int yStride,
+    const uint8_t *uvPlane, int uvStride,
+    int width, int height)
+{
+    for (int y = 0; y < height; y++) {
+        const uint8_t *yRow = yPlane + (size_t)y * yStride;
+        const uint8_t *uvRow = uvPlane + (size_t)(y >> 1) * uvStride;
+        uint8_t *dRow = dst + (size_t)y * dstStrideBytes;
+        for (int x = 0; x < width; x++) {
+            int Y = yRow[x];
+            int U = uvRow[(x & ~1)];
+            int V = uvRow[(x & ~1) + 1];
+            dRow[x * 4 + 0] = clamp8((298 * Y + 409 * V + 128) >> 8);
+            dRow[x * 4 + 1] = clamp8((298 * Y - 100 * U - 208 * V + 128) >> 8);
+            dRow[x * 4 + 2] = clamp8((298 * Y + 516 * U + 128) >> 8);
+            dRow[x * 4 + 3] = 255;
+        }
+    }
+}
+
+static void waitFence(int fd)
+{
+    if (fd < 0) return;
+    struct pollfd p;
+    p.fd = fd;
+    p.events = POLLIN;
+    (void)poll(&p, 1, 300);
+}
+
+/* Per-frame relay: runs on the consumer's frame-available thread. */
+static void relayOnFrame(void *context)
+{
+    (void)context;
+    if (!gRelayActive || gOrigWin == NULL || gConsumer == NULL) {
+        return;
+    }
+    OHNativeWindowBuffer *srcWinBuf = NULL;
+    int srcFence = -1;
+    if (gImageAcqBuf(gConsumer, &srcWinBuf, &srcFence) != 0 || srcWinBuf == NULL) {
+        return;
+    }
+    OH_NativeBuffer *srcNB = NULL;
+    if (gFromNWB == NULL || gFromNWB(srcWinBuf, &srcNB) != 0 || srcNB == NULL) {
+        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
+        return;
+    }
+    waitFence(srcFence);
+
+    void *srcVir = NULL;
+    OH_NativeBuffer_Planes srcPlanes;
+    memset(&srcPlanes, 0, sizeof(srcPlanes));
+    if (gMapPlanes(srcNB, &srcVir, &srcPlanes) != 0 || srcVir == NULL ||
+        srcPlanes.planeCount < 2) {
+        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
+        return;
+    }
+    const uint8_t *yPlane = (const uint8_t *)srcVir + (size_t)srcPlanes.planes[0].offset;
+    const uint8_t *uvPlane = (const uint8_t *)srcVir + (size_t)srcPlanes.planes[1].offset;
+    int yStride = (int)srcPlanes.planes[0].rowStride;
+    int uvStride = (int)srcPlanes.planes[1].rowStride;
+
+    if (!gGeomSet && gRelayW > 0 && gRelayH > 0) {
+        gHandleOpt(gOrigWin, SET_BUFFER_GEOMETRY, gRelayW, gRelayH);
+        gGeomSet = 1;
+    }
+
+    OHNativeWindowBuffer *dstWinBuf = NULL;
+    int dstFence = -1;
+    if (gReqBuffer == NULL ||
+        gReqBuffer(gOrigWin, &dstWinBuf, &dstFence) != 0 || dstWinBuf == NULL) {
+        gUnmap(srcNB);
+        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
+        return;
+    }
+    OH_NativeBuffer *dstNB = NULL;
+    if (gFromNWB(dstWinBuf, &dstNB) != 0 || dstNB == NULL) {
+        gUnmap(srcNB);
+        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
+        return;
+    }
+    waitFence(dstFence);
+
+    void *dstVir = NULL;
+    OH_NativeBuffer_Planes dstPlanes;
+    memset(&dstPlanes, 0, sizeof(dstPlanes));
+    if (gMapPlanes(dstNB, &dstVir, &dstPlanes) != 0 || dstVir == NULL ||
+        dstPlanes.planeCount < 1) {
+        gUnmap(srcNB);
+        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
+        return;
+    }
+    uint8_t *dst = (uint8_t *)dstVir + (size_t)dstPlanes.planes[0].offset;
+    int dstStride = (int)dstPlanes.planes[0].rowStride;
+
+    nv12ToRgba(dst, dstStride, yPlane, yStride, uvPlane, uvStride,
+        gRelayW, gRelayH);
+
+    gUnmap(dstNB);
+    gUnmap(srcNB);
+    Region region;
+    region.rects = NULL;
+    region.rectNumber = 0;
+    gFlushBuffer(gOrigWin, dstWinBuf, -1, region);
+    gImageRelBuf(gConsumer, srcWinBuf, srcFence);
+    gRelayFrames++;
+    if ((gRelayFrames % 60) == 1) {
+        SHIM_LOGI("relayed %{public}ld frames (%{public}dx%{public}d, rgba copy)",
+            gRelayFrames, gRelayW, gRelayH);
+    }
+}
+
+/* Format-key dump + fix helper (rounds 96c-96h). */
 static void dumpAndFix(OH_AVFormat *format)
 {
     if (format == NULL) {
@@ -143,15 +368,6 @@ static void dumpAndFix(OH_AVFormat *format)
         return;
     }
     if (!hasPf) {
-        /* Round 96h order: RGBA first. Round 96g device evidence: with
-           SURFACE_FORMAT the frames FINALLY reached the screen (noise =
-           render path alive, format interpretation wrong) - the bridge's
-           surface queue does render, it just disagrees with the buffer
-           layout. Vendor surfaces default to RGBA8888 allocation while
-           the HAL kept writing YUV; an explicit RGBA key makes the HAL
-           convert in hardware so buffer content and allocation match.
-           SURFACE_FORMAT then NV12 remain as Configure fallbacks (the
-           dict re-evaluates per failed call, device-verified). */
         SHIM_LOGI("pixel_format absent -> injecting RGBA (try 1)");
         gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_RGBA);
     }
@@ -168,7 +384,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim loaded - shadowing system libnative_media_vdec.so (round 96c HEVC experiment)");
+    SHIM_LOGI("shim v6 loaded - surface-relay compat layer (round 97)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());
@@ -196,36 +412,37 @@ __attribute__((constructor)) static void shimInit(void)
     gIsValid = (PFN_IsValid)realSym(gReal, "OH_VideoDecoder_IsValid");
     gGetIntValue = (PFN_FormatGetIntValue)coreSym("OH_AVFormat_GetIntValue");
     gSetIntValue = (PFN_FormatSetIntValue)coreSym("OH_AVFormat_SetIntValue");
-    /* Round 96i-rev: the absolute /system/lib64 path does not exist on
-       device (dlopen ENOENT, user log 00:30) - resolve by PLAIN soname
-       first (the shim's namespace already resolves libnative_media_core.so
-       this way, and libelectron itself links libnative_window.so), then
-       fall back to absolute candidates. */
-    gNwLib = dlopen("libnative_window.so", RTLD_NOW | RTLD_LOCAL);
-    if (gNwLib == NULL) {
-        const char *candidates[] = {
-            "/system/lib64/libnative_window.z.so",
-            "/system/lib64/ndk/libnative_window.z.so",
-            "/system/lib64/platformsdk/libnative_window.z.so",
-        };
-        for (unsigned ci = 0; ci < sizeof(candidates) / sizeof(candidates[0]); ci++) {
-            gNwLib = dlopen(candidates[ci], RTLD_NOW | RTLD_LOCAL);
-            if (gNwLib != NULL) break;
-        }
-    }
-    if (gNwLib != NULL) {
-        gWindowOpt = (PFN_WindowOpt)dlsym(gNwLib, "OH_NativeWindow_NativeWindowHandleOpt");
-        if (gWindowOpt == NULL) {
-            SHIM_LOGE("NativeWindowHandleOpt dlsym failed: %{public}s", dlerror());
-        }
-    } else {
-        SHIM_LOGE("libnative_window.so dlopen failed: %{public}s", dlerror());
-    }
-    SHIM_LOGI("real symbols resolved: configure=%{public}d getfmt=%{public}d",
-        gConfigure != NULL, gGetIntValue != NULL);
+    gHandleOpt = (PFN_WindowOpt)libSym(&gWinLib, "libnative_window.so",
+        "OH_NativeWindow_NativeWindowHandleOpt");
+    gReqBuffer = (PFN_ReqBuffer)libSym(&gWinLib, "libnative_window.so",
+        "OH_NativeWindow_NativeWindowRequestBuffer");
+    gFlushBuffer = (PFN_FlushBuffer)libSym(&gWinLib, "libnative_window.so",
+        "OH_NativeWindow_NativeWindowFlushBuffer");
+    gFromNWB = (PFN_FromNWB)libSym(&gBufLib, "libnative_buffer.so",
+        "OH_NativeBuffer_FromNativeWindowBuffer");
+    gMapPlanes = (PFN_NBMapPlanes)libSym(&gBufLib, "libnative_buffer.so",
+        "OH_NativeBuffer_MapPlanes");
+    gUnmap = (PFN_NBUnmap)libSym(&gBufLib, "libnative_buffer.so",
+        "OH_NativeBuffer_Unmap");
+    gConsumerCreate = (PFN_ConsumerCreate)libSym(&gImgLib, "libnative_image.so",
+        "OH_ConsumerSurface_Create");
+    gImageAcqWin = (PFN_ImageAcqWin)libSym(&gImgLib, "libnative_image.so",
+        "OH_NativeImage_AcquireNativeWindow");
+    gImageAcqBuf = (PFN_ImageAcqBuf)libSym(&gImgLib, "libnative_image.so",
+        "OH_NativeImage_AcquireNativeWindowBuffer");
+    gImageRelBuf = (PFN_ImageRelBuf)libSym(&gImgLib, "libnative_image.so",
+        "OH_NativeImage_ReleaseNativeWindowBuffer");
+    gImageSetListener = (PFN_ImageSetListener)libSym(&gImgLib, "libnative_image.so",
+        "OH_NativeImage_SetOnFrameAvailableListener");
+    gImageDestroy = (PFN_ImageDestroy)libSym(&gImgLib, "libnative_image.so",
+        "OH_NativeImage_Destroy");
+    SHIM_LOGI("symbols: configure=%{public}d getfmt=%{public}d handleopt=%{public}d "
+        "consumer=%{public}d acqbuf=%{public}d mapplanes=%{public}d",
+        gConfigure != NULL, gGetIntValue != NULL, gHandleOpt != NULL,
+        gConsumerCreate != NULL, gImageAcqBuf != NULL, gMapPlanes != NULL);
 }
 
-/* ===== Exported forwards (surface the engine imports) ===== */
+/* ===== Exported forwards ===== */
 
 OH_AVCodec *OH_VideoDecoder_CreateByMime(const char *mime)
 {
@@ -242,6 +459,25 @@ OH_AVCodec *OH_VideoDecoder_CreateByName(const char *name)
 
 OH_AVErrCode OH_VideoDecoder_Destroy(OH_AVCodec *codec)
 {
+    pthread_mutex_lock(&gRelayLock);
+    if (gRelayActive && codec == gRelayCodec) {
+        gRelayActive = 0;
+        pthread_mutex_unlock(&gRelayLock);
+        /* let an in-flight frame callback finish before tearing the queue
+           down (the callback thread may be mid-conversion) */
+        usleep(120000);
+        pthread_mutex_lock(&gRelayLock);
+        if (gConsumer != NULL && gImageDestroy != NULL) {
+            gImageDestroy(&gConsumer);
+        }
+        gConsumer = NULL;
+        gOrigWin = NULL;
+        gRelayCodec = NULL;
+        gGeomSet = 0;
+        SHIM_LOGI("relay torn down with codec");
+    }
+    cfgDrop(codec);
+    pthread_mutex_unlock(&gRelayLock);
     return gDestroy ? gDestroy(codec) : AV_ERR_UNKNOWN;
 }
 
@@ -257,46 +493,97 @@ OH_AVErrCode OH_VideoDecoder_RegisterCallback(OH_AVCodec *codec, OH_AVCodecCallb
 
 OH_AVErrCode OH_VideoDecoder_SetSurface(OH_AVCodec *codec, OHNativeWindow *window)
 {
-    if (gWindowOpt != NULL && window != NULL) {
-        /* NATIVEBUFFER_PIXEL_FMT_YCBCR_420_SP == 24 (matches the HAL's
-           video_graphic_pixel_format=24 in OnOutputFormatChanged). The
-           bridge never sets a queue format, so the queue defaults to
-           RGBA8888 and every NV12 frame renders as noise (round 96g). */
-        int32_t cur = -1;
-        gWindowOpt(window, GET_FORMAT, &cur);
-        SHIM_LOGI("SetSurface: queue format before = %{public}d", cur);
-        int32_t r = gWindowOpt(window, SET_FORMAT,
-            (int32_t)NATIVEBUFFER_PIXEL_FMT_YCBCR_420_SP);
-        gWindowOpt(window, GET_FORMAT, &cur);
-        SHIM_LOGI("SetSurface: queue SET_FORMAT NV12(24) -> %{public}d, now = %{public}d", r, cur);
+    if (window == NULL || gConsumerCreate == NULL || gImageAcqWin == NULL ||
+        gImageSetListener == NULL || gMapPlanes == NULL || gFromNWB == NULL ||
+        gHandleOpt == NULL || gImageAcqBuf == NULL || gImageRelBuf == NULL ||
+        gUnmap == NULL || gReqBuffer == NULL || gFlushBuffer == NULL) {
+        /* graphics stack pieces unavailable - direct passthrough */
+        OH_AVErrCode r0 = gSetSurface ? gSetSurface(codec, window) : AV_ERR_UNKNOWN;
+        SHIM_LOGI("SetSurface(passthrough) -> %{public}d", r0);
+        return r0;
     }
-    OH_AVErrCode r2 = gSetSurface ? gSetSurface(codec, window) : AV_ERR_UNKNOWN;
-    SHIM_LOGI("SetSurface -> %{public}d", r2);
-    return r2;
+    pthread_mutex_lock(&gRelayLock);
+    if (gRelayActive && codec == gRelayCodec) {
+        /* a re-set (after Flush/Reset) must point the codec back at the
+           RELAY window, or the bridge's raw RGBA queue would receive NV12 */
+        OHNativeWindow *rw = gImageAcqWin(gConsumer);
+        pthread_mutex_unlock(&gRelayLock);
+        OH_AVErrCode r = gSetSurface ? gSetSurface(codec, rw) : AV_ERR_UNKNOWN;
+        SHIM_LOGI("SetSurface(own relay window re-set) -> %{public}d", r);
+        return r;
+    }
+    if (gRelayActive) {
+        /* relay busy with another decoder (multi-video page) - the extra
+           decoder keeps the direct path; this shim does not multiplex */
+        pthread_mutex_unlock(&gRelayLock);
+        OH_AVErrCode r = gSetSurface ? gSetSurface(codec, window) : AV_ERR_UNKNOWN;
+        SHIM_LOGI("SetSurface(second decoder direct) -> %{public}d", r);
+        return r;
+    }
+    int w = 0;
+    int h = 0;
+    if (!cfgLookup(codec, &w, &h) || w <= 0 || h <= 0) {
+        pthread_mutex_unlock(&gRelayLock);
+        OH_AVErrCode r = gSetSurface ? gSetSurface(codec, window) : AV_ERR_UNKNOWN;
+        SHIM_LOGI("SetSurface(no configured size, direct) -> %{public}d", r);
+        return r;
+    }
+    OH_NativeImage *consumer = gConsumerCreate();
+    if (consumer == NULL) {
+        pthread_mutex_unlock(&gRelayLock);
+        SHIM_LOGE("ConsumerSurface.Create failed - direct passthrough");
+        OH_AVErrCode r = gSetSurface ? gSetSurface(codec, window) : AV_ERR_UNKNOWN;
+        return r;
+    }
+    OHNativeWindow *relayWin = gImageAcqWin(consumer);
+    if (relayWin == NULL) {
+        gImageDestroy(&consumer);
+        pthread_mutex_unlock(&gRelayLock);
+        OH_AVErrCode r = gSetSurface ? gSetSurface(codec, window) : AV_ERR_UNKNOWN;
+        return r;
+    }
+    (void)gHandleOpt(relayWin, SET_FORMAT, (int32_t)NATIVEBUFFER_PIXEL_FMT_YCBCR_420_SP);
+    OH_OnFrameAvailableListener listener;
+    listener.context = NULL;
+    listener.onFrameAvailable = relayOnFrame;
+    gImageSetListener(consumer, listener);
+    OH_AVErrCode r = gSetSurface ? gSetSurface(codec, relayWin) : AV_ERR_UNKNOWN;
+    if (r != AV_ERR_OK) {
+        SHIM_LOGE("real SetSurface(relay window) failed %{public}d - direct fallback", r);
+        gImageDestroy(&consumer);
+        pthread_mutex_unlock(&gRelayLock);
+        OH_AVErrCode r2 = gSetSurface ? gSetSurface(codec, window) : AV_ERR_UNKNOWN;
+        SHIM_LOGI("SetSurface(direct fallback) -> %{public}d", r2);
+        return r2;
+    }
+    gRelayCodec = codec;
+    gRelayW = w;
+    gRelayH = h;
+    gOrigWin = window;
+    gConsumer = consumer;
+    gGeomSet = 0;
+    gRelayFrames = 0;
+    gRelayActive = 1;
+    pthread_mutex_unlock(&gRelayLock);
+    SHIM_LOGI("relay engaged: %{public}dx%{public}d NV12 -> RGBA into bridge window", w, h);
+    return r;
 }
 
 OH_AVErrCode OH_VideoDecoder_Configure(OH_AVCodec *codec, OH_AVFormat *format)
 {
     dumpAndFix(format);
     OH_AVErrCode r = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
-    if (r != AV_ERR_OK && gSetIntValue != NULL) {
-        /* Fallback order (96h): RGBA failed -> SURFACE_FORMAT (96g:
-           rendered, wrong layout) -> NV12 (96f: configured OK at 1080p). */
-        SHIM_LOGI("Configure with RGBA failed (%{public}d) - retrying with SURFACE_FORMAT", r);
-        gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_SURFACE_FORMAT);
-        OH_AVErrCode r2 = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
-        SHIM_LOGI("Configure(SURFACE_FORMAT) -> %{public}d", r2);
-        if (r2 != AV_ERR_OK) {
-            SHIM_LOGI("retrying with NV12");
-            gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
-            r2 = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
-            SHIM_LOGI("Configure(NV12) -> %{public}d", r2);
-        }
-        if (r2 == AV_ERR_OK) {
-            return AV_ERR_OK;
+    SHIM_LOGI("Configure -> %{public}d", r);
+    if (r == AV_ERR_OK && gSetIntValue != NULL && gGetIntValue != NULL) {
+        int32_t w = 0;
+        int32_t h = 0;
+        if (gGetIntValue(format, OH_MD_KEY_WIDTH, &w) &&
+            gGetIntValue(format, OH_MD_KEY_HEIGHT, &h) && w > 0 && h > 0) {
+            pthread_mutex_lock(&gRelayLock);
+            cfgRecord(codec, (int)w, (int)h);
+            pthread_mutex_unlock(&gRelayLock);
         }
     }
-    SHIM_LOGI("Configure -> %{public}d", r);
     return r;
 }
 

@@ -4207,6 +4207,48 @@ OHMSIDIAN 用户层 flags 实验开关保留。verify-asar 标记 v19 不变。
    SET_FORMAT NV12(垫片已证);③帧工厂增加 NV12 导入路径
    (本次代码级定位);④converter PPS 守卫笔误。
 
+### 第 97 轮(2026-10-03):surface 中继兼容层——绕开帧工厂缺陷的完整实现
+
+**动机**:用户要求做兼容层。96k 已定位根因(帧工厂仅 RGBA 导入),
+且 96g 证明"RGBA 队列 + 内容正确"时下游全链路可渲染——兼容层的
+形态因此确定:**在解码器与桥接层之间插一个 NV12→RGBA 转换中继**,
+桥接层下游保持原样。
+
+**实现**(scripts/vdec-shim/shim.c 重写,26.9KB,全部 NDK API 均已在
+头文件与引擎二进制中验证存在):
+
+1. **SetSurface 拦截**:第一个到达的解码器(即用户正在播放的视频)
+   认领中继——`OH_ConsumerSurface_Create`(API 12)创建中间 NV12
+   消费者,把它的生产者窗口交给真解码器;桥接层原窗口(RGBA 队列,
+   96g 已证可渲染)留给中继输出。后续/多视频页的解码器走直通
+   (保持旧行为)。
+2. **逐帧中继**(OnFrameAvailable 回调线程):
+   `OH_NativeImage_AcquireNativeWindowBuffer`(带 fence)→
+   `OH_NativeBuffer_FromNativeWindowBuffer` + `MapPlanes`(取 Y/UV
+   平面真实 stride/offset)→ 等待 fence(poll sync fd)→
+   `NativeWindowRequestBuffer` 取桥接队列 RGBA 缓冲(首帧先
+   SET_BUFFER_GEOMETRY 对齐视频尺寸)→ 定点 BT.601 NV12→RGBA
+   转换(系数与 libyuv 一致,R 在低字节,匹配 RGBA8888 共享图像
+   采样)→ `FlushBuffer` → 归还源缓冲。
+3. **生命周期**:Destroy 时若中继归属该编解码器,置 inactive +
+   120ms 宽限(等在途回调)后销毁中间消费者;Flush/Reset 后的
+   SetSurface 重调转发回中继窗口(防止桥接裸队列再收 NV12);
+   多解码器按 codec 指针区分,配置尺寸存 8 槽环形表。
+4. **性能**:标量 C 定点转换,1080p 约 2-5ms/帧(60fps 预算 16ms,
+   单核占用 ~20-30%);回调线程内联处理,过载时由队列自然丢帧。
+
+**自查已处理**:re-set 分支(转回中继窗口而非桥接裸队列)、Destroy
+竞态宽限、Configure→SetSurface 顺序依赖(尺寸在认领前已知)、
+fence 所有权(poll 不消费,Release/Flush 由系统关闭)、错误路径
+全部走直通回退(兼容层任何一环失败都退化为旧行为而非崩溃)。
+
+**真机判读**(hilog 过滤 VdecShim):`relay engaged: 1920x1080...`
+= 中继就位;`relayed N frames` 持续增长 = 帧在转换输出;画面正常
+= **HEVC 应用内播放达成**(兼容层路线成功);若 relayed 增长但
+画面异常 → 色彩/布局微调(ABGR/RGBA swizzle、crop);若无 relayed
+→ 转换/队列环节被拒,按日志定位。8K 仍受 HAL 能力上限(96i 终审)。
+
+
 
 
 
