@@ -132,15 +132,17 @@ static void dumpAndFix(OH_AVFormat *format)
         return;
     }
     if (!hasPf) {
-        /* Round 96g order: SURFACE_FORMAT first. Round 96f evidence: with
-           NV12 the codec decodes AND the bridge consumes output buffers,
-           yet Chromium still tears the decoder down (~100ms) and errors -
-           consistent with the bridge's surface queue expecting the
-           format IT negotiated, not a forced NV12. SURFACE_FORMAT lets
-           the HAL follow the surface's native format. NV12 remains the
-           fallback (it did pass Configure at 1080p). */
-        SHIM_LOGI("pixel_format absent -> injecting SURFACE_FORMAT (try 1)");
-        gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_SURFACE_FORMAT);
+        /* Round 96h order: RGBA first. Round 96g device evidence: with
+           SURFACE_FORMAT the frames FINALLY reached the screen (noise =
+           render path alive, format interpretation wrong) - the bridge's
+           surface queue does render, it just disagrees with the buffer
+           layout. Vendor surfaces default to RGBA8888 allocation while
+           the HAL kept writing YUV; an explicit RGBA key makes the HAL
+           convert in hardware so buffer content and allocation match.
+           SURFACE_FORMAT then NV12 remain as Configure fallbacks (the
+           dict re-evaluates per failed call, device-verified). */
+        SHIM_LOGI("pixel_format absent -> injecting RGBA (try 1)");
+        gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_RGBA);
     }
 }
 
@@ -229,12 +231,18 @@ OH_AVErrCode OH_VideoDecoder_Configure(OH_AVCodec *codec, OH_AVFormat *format)
     dumpAndFix(format);
     OH_AVErrCode r = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
     if (r != AV_ERR_OK && gSetIntValue != NULL) {
-        /* Fallback order (96g): SURFACE_FORMAT failed -> try NV12 (it
-           passed Configure at 1080p in round 96f). */
-        SHIM_LOGI("Configure with SURFACE_FORMAT failed (%{public}d) - retrying with NV12", r);
-        gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
+        /* Fallback order (96h): RGBA failed -> SURFACE_FORMAT (96g:
+           rendered, wrong layout) -> NV12 (96f: configured OK at 1080p). */
+        SHIM_LOGI("Configure with RGBA failed (%{public}d) - retrying with SURFACE_FORMAT", r);
+        gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_SURFACE_FORMAT);
         OH_AVErrCode r2 = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
-        SHIM_LOGI("Configure(NV12) -> %{public}d", r2);
+        SHIM_LOGI("Configure(SURFACE_FORMAT) -> %{public}d", r2);
+        if (r2 != AV_ERR_OK) {
+            SHIM_LOGI("retrying with NV12");
+            gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
+            r2 = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
+            SHIM_LOGI("Configure(NV12) -> %{public}d", r2);
+        }
         if (r2 == AV_ERR_OK) {
             return AV_ERR_OK;
         }
