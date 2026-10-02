@@ -3601,6 +3601,60 @@ Notice(若 shell.openPath 可用则含"用系统播放器打开"按钮,
 Documents 下仓库可验证);⑥嵌入 H.264/VP9 视频正常播放且**无**
 误报提示。
 
+**第 95 轮补充(95b):HEVC 真播放路径——系统硬解路由开关(用户明确
+要求"直接在 Obsidian 里播放",不满足于提示方案)**
+
+对引擎二进制做静态取证(libelectron.so / libffmpeg.so,均为本仓库
+LFS 文件,可直接扫描),推翻了外部文档"鸿蒙硬解未接入"的部分结论:
+
+1. **libelectron.so 直接链接鸿蒙 AVCodec NDK**:
+   `libnative_media_vdec.so` + `libnative_media_codecbase.so` +
+   `libnative_media_core.so`(DT_NEEDED 实测)——系统视频解码服务,
+   **华为设备的 HEVC 硬件解码授权就落在这一层**(用户判断正确)。
+2. **桥接层显式支持 HEVC**:`MediaCodecDecoderBridgeImpl::
+   CreateVideoDecoder video/avc` 与 `video/hevc` 两行日志字符串,
+   外加 `CreatePlatformVideoDecoder` 工厂与
+   `hevc main / hevc main 10` 等能力档位串;`disable_accelerated_
+   hevc_decode` 开关存在(反向证明加速 HEVC 是设计内路径)。
+3. **症状与路由假设吻合**:Chromium 桌面型构建默认走 ffmpeg 软解,
+   ffmpeg(开源 branding)有 H.264/VP9/AV1 而无 HEVC → H.264/VP9 能播
+   ("少数能播"),HEVC 报 "HEVC decoding is not supported."
+   (字符串在案)→ "大部分播不了"。V 版浏览器正常是因为浏览器调
+   系统编解码扩展。
+4. **重新打包 libffmpeg.so 判定为不可行**:需要闭源引擎配套的
+   OHOS Chromium 源码树/工具链重新构建,外部 ffmpeg 二进制存在
+   ABI/符号表不兼容导致引擎加载失败的风险;且若平台硬解路由能打开,
+   重新打包完全多余(系统解码器已链接,只差路由)。
+
+**修复**:`ohsidian-flags.json` 的 `extraFlags`(既有管道:
+EngineFlags.getFlags → WebWindow/WebWindowNode/WebEmbeddedWindow.
+buildArgs → 引擎启动参数 → Chromium 命令行,无需改码)注入:
+
+```
+--enable-features=PlatformVideoDecoder,kIsPlatformVideoDecoder,
+                   PlatformAudioDecoder,kIsPlatformAudioDecoder
+```
+
+- 目的:把 `<video>`/`<audio>` 解码路由切到平台桥(libnative_media_
+  vdec 硬解),Chromium 的 DecoderStream 在平台解码器拒判/初始化
+  失败时**自动回退** ffmpeg 软解,当前能播的 H.264/VP9 理论上不受影响。
+- 特性名带两套拼写:二进制里只有 `kIsPlatformVideoDecoder` 独立串
+  (移植方可能把宏名当特性名),上游标准名是 `PlatformVideoDecoder`,
+  静态无法唯一确认;Chromium 对未知特性名仅告警并忽略,多写无害。
+- 回滚:删除 ohsidian-flags.json 的 extraFlags 条目即可(配置文件,
+  无需改码;JSON 内 comment 字段已写明)。
+- 第 95 轮的媒体提示补丁**保留**:它是平台硬解不可用设备(或路由
+  未生效时)的用户侧兜底;硬解生效时补丁永不触发。
+
+**真机验证(95b,下轮部署前)**:
+①嵌入 HEVC/H.265 视频(Huawei 手机直录)→ 直接播放,无提示 Notice;
+②嵌入 H.264/VP9 视频 → 仍正常播放且无 Notice(平台路由不得劣化
+现状);③HEVC 播放时 hilog 过滤 `MediaCodecDecoderBridgeImpl` /
+`CreateVideoDecoder` → 应看到 `video/hevc` 桥接日志(证明路由命中);
+④若 ① 失败,按 ③ 的日志区分:无桥接日志=特性名未命中(需在
+libelectron 里进一步定位门控);有桥接日志但报错=vdec HAL 层问题
+(设备/系统版本相关,回退到提示方案并向引擎上游提 issue)。
+
 ---
 
 ## 窗口专题总览(第 87-93 轮,2026-10-01)
