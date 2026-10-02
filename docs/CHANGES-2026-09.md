@@ -3520,6 +3520,87 @@ writeTouchModeFile 未变化早退对首次写 override='auto' 的保留、2in1
 同步遍历,不阻塞退出)、CI 中 ARCHIVE 变量在 set -u 下先赋值后引用
 的顺序、verify-asar 全部 marker 与补丁源串一致。
 
+### 第 95 轮(2026-10-02):用户双 Bug 修复(2in1 窗口高度漂移 + HEVC 视频不可播)
+
+**动机**:2in1 用户实测反馈 ①本地嵌入视频大部分播不了(少数能播,
+V 版浏览器正常)②窗口尺寸记忆"宽度能记住,高度有点错乱"。外部
+分析文档(OHSidian-user-bugs-2026-10-02.md)给出两个根因,本轮先按
+源码核实再修复。
+
+**核实结论**:
+
+- **Bug 2(窗口高度漂移)属实,且比文档多一处**。文档列出
+  setBounds/setWindowLimits/adjustBounds 共 5+ 处对称边框算式,逐处
+  grep 核实实际有 **8 处**:`AppWindowAdapter` 的 setBounds(L485)、
+  setWindowLimits(L542-545)与**文档遗漏的 createWindow 初始尺寸**
+  (L197-198),`SystemFloatingWindowAdapter` 的 setBounds、
+  setWindowLimits、adjustBounds 与 windowSizeChange 监听器(反向换算,
+  文档 2.3.7 所述属实),`PopupWindowAdapter` 的 setWindowLimits。
+  根因确认为"对称边框假设"错误:2in1/平板原生边框只有**顶部
+  caption(~32-71px)非零**,左右/底全为 0,`width+=2×left`、
+  `height+=2×top` 在每次内容↔外框换算时多加一个 caption 高度——
+  宽度因 left=right=0 而稳定,高度逐轮漂移,与用户"宽度记住、
+  高度错乱"完全吻合。方向约定(引擎按内容坐标传 bounds、适配器
+  负责加边框)有 F33 的第 22/23 轮真机验证背书,故修公式本身即可。
+- **Bug 1(HEVC)属实,但文档的修复方案不可行,采用其变体**。
+  根因确认:libffmpeg.so 是标准开源 Chromium 构建,无 HEVC/H.265
+  解码器;鸿蒙硬解未接入 web `<video>`(libelectron.so 闭源,应用层
+  无法对接 MediaCodec);华为手机默认 HEVC 录制 → 大部分播不了,
+  能播的是 H.264/VP9/AV1。**文档方案 C 原样不可行**:它建议调
+  `ExternalProtocolAdapter.openExternal('file://...')`,但该适配器有
+  scheme 白名单(http/https/mailto/tel/obsidian,第 11 轮安全加固),
+  file:// 被禁止;放宽白名单是安全退步。且仓库内 MediaAdapter 只有
+  相机预览、无任何解码绑定(文档核实无误)。
+
+**修复实现**:
+
+1. **非对称边框公式(8 处统一)**。内容→外框换算改为按实际边框:
+   `right = windowRect.width - drawableRect.left - drawableRect.width`,
+   `bottom = windowRect.height - drawableRect.top - drawableRect.height`
+   (负值钳 0;drawableRect 未合成时宽高 ≤0 则置 0,避免把整窗尺寸
+   误当边框),`width += left + right`、`height += top + bottom`;
+   外框→内容(windowSizeChange)反向同理。三适配器 8 处 + 注释同步。
+   在 left=right=bottom=0 的 2in1 原生边框上:宽度与旧逻辑一致
+   (本就正确),高度从 `+2×caption` 修正为 `+caption`(真实外框=内容
+   +caption),内容尺寸逐轮稳定,漂移消除;在四边全 0 的 frameless
+   窗口上全部算式退化为 +0,行为不变。
+2. **HEVC 媒体提示补丁(方案 C 可落地形态)**。TOUCH_MODE_PATCH
+   v14→v15:document 捕获阶段监听 VIDEO/AUDIO 的 error 事件,仅对
+   code 3(MEDIA_ERR_DECODE)/4(MEDIA_ERR_SRC_NOT_SUPPORTED)——
+   正是"无对应解码器"家族,加载/网络错误(1/2)不打扰——触发:
+   经 `.internal-embed` 容器 src 属性(vault 相对路径)→
+   `vault.adapter.getFullPath` 解析真实文件路径(app:// 直链降级为
+   仅 file:// 解析);Notice 说明"编码可能不受支持(HEVC/H.265),
+   建议转码 H.264/MP4";**运行时探测** `@electron/remote`.shell.
+   openPath(引擎 shell 模块已有 trashItem/openExternal 先例,
+   openPath 存在与否闭源不可静态证实):存在则附加"用系统播放器
+   打开"按钮,不存在则仅引导。每元素一次 + 每会话 5 次上限防
+   Notice 风暴。不做 ArkTS/Binder 改动,不放宽任何安全白名单。
+3. verify-asar.cjs 标记 v14→v15,新增媒体提示 marker
+   (ohsidianOfferSystemPlayer)。
+
+**核实后不修(附理由)**:
+
+- Bug 1 的方案 A(重编 libffmpeg 启用 HEVC 软解):libffmpeg.so 为
+  LFS 二进制,本仓库无构建链;HEVC 专利池授权风险;且为闭源引擎
+  配套二进制,替换需真机逐版验证——留待上游协作(文档 4.2 中期
+  方向)。
+- Bug 1 的方案 B(AVPlayer 对接 `<video>`):libelectron.so 闭源,
+  应用层无法拦截 web 元素内部解码管线,社区项目无法独立完成。
+- 文档 4.3"遗留未修"清单(S1/F2/H1/H15)已**全部在第 94 轮修复**
+  (commit 2c524b7),该清单撰写时点早于第 94 轮,不再重修。
+
+**验证**:TOUCH_MODE_PATCH/MAIN_PROCESS_PATCH 语法通过
+(vm.Script);verify-asar 全部 marker 核对一致;ArkTS 改动待
+DevEco 编译。真机回归:①2in1 + 原生边框:Obsidian 窗口 resize 后
+重启 ×5,高度稳定不漂移;②resize 到极小尺寸,窗口可继续缩放
+(setWindowLimits 修正后 min/max 语义);③三种 frame 样式
+(native/hidden/custom)下 setBounds 各验一次;④弹窗/浮窗
+(vault 切换器等)位置尺寸正确;⑤嵌入 HEVC 视频 → 出现提示
+Notice(若 shell.openPath 可用则含"用系统播放器打开"按钮,
+Documents 下仓库可验证);⑥嵌入 H.264/VP9 视频正常播放且**无**
+误报提示。
+
 ---
 
 ## 窗口专题总览(第 87-93 轮,2026-10-01)

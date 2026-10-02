@@ -211,17 +211,26 @@ export class PopupWindowAdapter extends BaseWindowAdapter {
     const mainWindowProp = windowClass?.getWindowProperties();
     let xComBorder: number = mainWindowProp?.drawableRect.left || 0;
     let xComTop: number = mainWindowProp?.drawableRect.top || 0;
+    // Per-side borders (round 95, Bug 2 - see AppWindowAdapter.setBounds):
+    // the symmetric "+2x each" assumed bottom == top, but native frames
+    // carry only the top caption (left/right/bottom are 0), so the min/max
+    // heights were skewed by one caption. Limits apply to the OUTER window.
+    let xComRight: number = 0;
+    let xComBottom: number = 0;
+    if (mainWindowProp && mainWindowProp.drawableRect.width > 0 &&
+      mainWindowProp.drawableRect.height > 0) {
+      xComRight = Math.max(0, mainWindowProp.windowRect.width -
+        mainWindowProp.drawableRect.left - mainWindowProp.drawableRect.width);
+      xComBottom = Math.max(0, mainWindowProp.windowRect.height -
+        mainWindowProp.drawableRect.top - mainWindowProp.drawableRect.height);
+    }
 
     try {
-      // Frame borders are symmetric (see AppWindowAdapter.setBounds): width
-      // grows by 2x the left border, height by 2x the TOP border. Mixing
-      // xComBorder into the height mis-sized framed windows whenever the
-      // frame height differed from the frame width.
       let windowLimits: window.WindowLimits = {
-        minWidth: minWidth === 0 ? minWidth : minWidth + xComBorder + xComBorder,
-        minHeight: minHeight === 0 ? minHeight : minHeight + xComTop + xComTop,
-        maxWidth: maxWidth === 0 ? maxWidth : maxWidth + xComBorder + xComBorder,
-        maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComTop,
+        minWidth: minWidth === 0 ? minWidth : minWidth + xComBorder + xComRight,
+        minHeight: minHeight === 0 ? minHeight : minHeight + xComTop + xComBottom,
+        maxWidth: maxWidth === 0 ? maxWidth : maxWidth + xComBorder + xComRight,
+        maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComBottom,
       };
 
       windowClass?.setWindowLimits(windowLimits)

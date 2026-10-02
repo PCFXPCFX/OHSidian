@@ -160,8 +160,23 @@ export class AppWindowAdapter extends BaseAdapter {
 
     let windowClass = this.ctxAdapter.getActiveProxy().getWindow();
     const windowProp = windowClass?.getWindowProperties();
+    // Per-side borders (round 95, Bug 2): HarmonyOS 2in1 / tablet native
+    // frames carry ONLY a top caption (~32-71 px); left/right/bottom are 0.
+    // The old symmetric assumption (width += 2x left, height += 2x top) grew
+    // the height by an extra caption per conversion. Right/bottom come from
+    // the PARENT window's chrome (the new window carries the same frame
+    // style); zeroed while the drawable rect has not been composed yet.
     let leftBorder: number = param.hide_title_bar ? 0 : windowProp?.drawableRect.left || 0;
     let topBorder: number = param.hide_title_bar ? 0 : windowProp?.drawableRect.top || 0;
+    let rightBorder: number = 0;
+    let bottomBorder: number = 0;
+    if (!param.hide_title_bar && windowProp && windowProp.drawableRect.width > 0 &&
+      windowProp.drawableRect.height > 0) {
+      rightBorder = Math.max(0, windowProp.windowRect.width -
+        windowProp.drawableRect.left - windowProp.drawableRect.width);
+      bottomBorder = Math.max(0, windowProp.windowRect.height -
+        windowProp.drawableRect.top - windowProp.drawableRect.height);
+    }
 
     // The engine can request a window without geometry (mobile-emulated
     // flows send undefined fields, exactly like the empty setBounds calls).
@@ -186,16 +201,17 @@ export class AppWindowAdapter extends BaseAdapter {
       bounds = { left: 0, top: 0, width: 800, height: 650 };
       leftBorder = 0;
       topBorder = 0;
+      rightBorder = 0;
+      bottomBorder = 0;
       centered = true;
       LogUtil.warn(TAG, 'createWindow without valid bounds, using 800x650 DIP centered');
     }
 
-    // Frame borders are symmetric (see setBounds): width grows by 2x the
-    // left border, height by 2x the top border. Upstream mixed leftBorder
-    // into the height, mis-sizing framed windows. Borders are px; the engine
-    // bounds are DIP - convert borders to DIP before adding.
-    let widthDip: number = Math.round(bounds.width + (leftBorder + leftBorder) / density);
-    let heightDip: number = Math.round(bounds.height + (topBorder + topBorder) / density);
+    // Per-side borders (see above): width grows by left+right, height by
+    // top+bottom - NOT 2x each. Borders are px; the engine bounds are
+    // DIP - convert borders to DIP before adding.
+    let widthDip: number = Math.round(bounds.width + (leftBorder + rightBorder) / density);
+    let heightDip: number = Math.round(bounds.height + (topBorder + bottomBorder) / density);
     // StartOptions units (SDK): windowLeft/windowTop are px, while
     // windowWidth/windowHeight are vp. Engine DIP == vp, so sizes pass
     // through and only the position converts to px.
@@ -473,17 +489,28 @@ export class AppWindowAdapter extends BaseAdapter {
       bounds.top = windowProp?.windowRect.top || 0;
     }
 
-    // xComponent bounds need to add a border
-    let leftBorder: number = hasFrame ? windowProp?.drawableRect.left || 0 : 0;
-    let topBorder: number = hasFrame ? windowProp?.drawableRect.top || 0 : 0;
+    // xComponent bounds need to add a border. Per-side (round 95, Bug 2):
+    // the old symmetric assumption (width += 2x left, height += 2x top) is
+    // wrong on native-frame windows where only the TOP caption is non-zero
+    // (left/right/bottom are 0) - every restore grew the height by an extra
+    // caption and the saved height drifted on every launch (user report:
+    // "width remembers, height drifts"). With per-side borders the outer
+    // rect is exactly content + chrome, so the saved content size is stable.
+    const drawable = windowProp?.drawableRect;
+    const windowRect = windowProp?.windowRect;
+    let leftBorder: number = hasFrame ? drawable?.left || 0 : 0;
+    let topBorder: number = hasFrame ? drawable?.top || 0 : 0;
+    let rightBorder: number = 0;
+    let bottomBorder: number = 0;
+    if (hasFrame && drawable && windowRect && drawable.width > 0 &&
+      drawable.height > 0) {
+      rightBorder = Math.max(0, windowRect.width - drawable.left - drawable.width);
+      bottomBorder = Math.max(0, windowRect.height - drawable.top - drawable.height);
+    }
     bounds.left -= leftBorder;
     bounds.top -= topBorder;
-    // Frame borders are symmetric: the width grows by one border on each
-    // side, the height by the top border on each side. (Upstream added
-    // leftBorder to the height, which mis-sized framed windows whenever the
-    // frame width differed from the frame height.)
-    bounds.width = bounds.width + leftBorder + leftBorder;
-    bounds.height = bounds.height + topBorder + topBorder;
+    bounds.width = bounds.width + leftBorder + rightBorder;
+    bounds.height = bounds.height + topBorder + bottomBorder;
 
     // Diagnostic: the engine manages window bounds itself (desktop behavior);
     // on fullscreen windows the system rejects the calls. Log both the
@@ -534,15 +561,24 @@ export class AppWindowAdapter extends BaseAdapter {
     const windowProp = windowClass.getWindowProperties();
     let xComBorder: number = windowProp?.drawableRect.left || 0;
     let xComTop: number = windowProp?.drawableRect.top || 0;
+    // Per-side borders (round 95, Bug 2 - see setBounds): limits apply to
+    // the OUTER window, so the content limits grow by left+right / top+bottom.
+    let xComRight: number = 0;
+    let xComBottom: number = 0;
+    if (windowProp && windowProp.drawableRect.width > 0 &&
+      windowProp.drawableRect.height > 0) {
+      xComRight = Math.max(0, windowProp.windowRect.width -
+        windowProp.drawableRect.left - windowProp.drawableRect.width);
+      xComBottom = Math.max(0, windowProp.windowRect.height -
+        windowProp.drawableRect.top - windowProp.drawableRect.height);
+    }
 
     try {
-      // Symmetric borders (see setBounds): width grows by 2x the left
-      // border, height by 2x the TOP border.
       let windowLimits: window.WindowLimits = {
-        minWidth: minWidth === 0 ? minWidth : minWidth + xComBorder + xComBorder,
-        minHeight: minHeight === 0 ? minHeight : minHeight + xComTop + xComTop,
-        maxWidth: maxWidth === 0 ? maxWidth : maxWidth + xComBorder + xComBorder,
-        maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComTop,
+        minWidth: minWidth === 0 ? minWidth : minWidth + xComBorder + xComRight,
+        minHeight: minHeight === 0 ? minHeight : minHeight + xComTop + xComBottom,
+        maxWidth: maxWidth === 0 ? maxWidth : maxWidth + xComBorder + xComRight,
+        maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComBottom,
       };
 
       windowClass.setWindowLimits(windowLimits)

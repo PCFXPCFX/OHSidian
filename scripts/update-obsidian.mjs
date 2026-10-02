@@ -141,7 +141,7 @@ function isVersionLess(a, b) {
  *    migration, system fonts).
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
-if(window.__ohsidianTouchPatch==="14")return;window.__ohsidianTouchPatch="14";
+if(window.__ohsidianTouchPatch==="15")return;window.__ohsidianTouchPatch="15";
 /* Keep the renderer's view of the Electron major consistent with the main
    process shim: app.js requires >= 28.2.3 (Iie) before it stops showing the
    "manual update" notice. Replace the whole versions object - mutating the
@@ -622,6 +622,86 @@ function pollTick(){
 document.addEventListener("visibilitychange",function(){
   if(!document.hidden){lastModeRaw=null}
 });
+/* Bug 1 (HEVC, 2026-10-02 user report): the engine bundles the standard
+   open-source Chromium ffmpeg - NO HEVC/H.265 (and some patent-pool audio)
+   decoders - and the closed-source engine exposes no HarmonyOS MediaCodec
+   bridge into the web <video> element, so locally recorded HEVC clips fail
+   to play (the web build works because browsers call the OS codecs). The
+   decoder cannot be added from this repo (libffmpeg/libelectron are closed
+   binaries). What CAN be done is to say so at the exact moment the user
+   hits it: capture media error events (code 3 = decode, 4 = source not
+   supported - precisely the "no decoder" family), resolve the vault file
+   behind the embed, and offer "open with the system player" through the
+   engine's shell.openPath when that exists (feature-detected; the
+   openExternal ArkTS path cannot help - its scheme allowlist blocks file://
+   by design). Load/network errors (1/2) stay quiet. */
+var __ohsidianMediaNotices=0;
+function ohsidianResolveMediaPath(el){
+  try{
+    var v=window.app&&window.app.vault;
+    if(v){
+      /* Internal embeds: the container carries the vault-relative src. */
+      var host=el&&el.closest?el.closest(".internal-embed"):null;
+      var rel=host&&host.getAttribute?host.getAttribute("src"):"";
+      if(rel&&typeof v.getAbstractFileByPath==="function"){
+        var f=null;
+        try{f=v.getAbstractFileByPath(rel)}catch(e0){}
+        if(f&&v.adapter&&typeof v.adapter.getFullPath==="function"){
+          try{return v.adapter.getFullPath(f.path)}catch(e1){}
+        }
+      }
+    }
+    var src=(el&&el.currentSrc)||(el&&el.src)||"";
+    if(src.indexOf("file://")===0){
+      var raw=src.substring("file://".length);
+      try{return decodeURIComponent(raw)}catch(e2){return raw}
+    }
+  }catch(e){}
+  return null;
+}
+function ohsidianOfferSystemPlayer(el){
+  try{
+    if(__ohsidianMediaNotices>=5)return;
+    __ohsidianMediaNotices++;
+    var p=ohsidianResolveMediaPath(el);
+    var openFn=null;
+    if(p){
+      try{
+        var remote=require("@electron/remote");
+        if(remote&&remote.shell&&typeof remote.shell.openPath==="function"){
+          openFn=function(){try{remote.shell.openPath(p)}catch(e1){}};
+        }
+      }catch(eR){}
+    }
+    var zh=true;
+    try{var l=localStorage.getItem("language");if(l&&/^en/i.test(l))zh=false}catch(eL){}
+    var msg=zh
+      ?"OHSidian: 此视频/音频编码可能不受支持(常见于 HEVC/H.265 录制,内置解码器不含专有格式)。建议转码为 H.264/MP4 后重新插入。"
+      :"OHSidian: This media codec is likely unsupported (HEVC/H.265 recordings; the bundled decoder ships no proprietary codecs). Transcode to H.264/MP4 and re-embed.";
+    var n=new Notice(msg,openFn?12000:6000);
+    if(openFn&&n&&n.noticeEl){
+      var btn=document.createElement("button");
+      btn.className="mod-cta";
+      btn.textContent=zh?"用系统播放器打开":"Open with system player";
+      btn.style.marginTop="6px";
+      btn.addEventListener("click",function(){try{openFn()}catch(e2){}try{n.hide()}catch(e3){}});
+      n.noticeEl.appendChild(btn);
+    }
+  }catch(e){}
+}
+document.addEventListener("error",function(ev){
+  try{
+    var el=ev.target;
+    if(!el||!el.tagName)return;
+    var tag=el.tagName.toUpperCase();
+    if(tag!=="VIDEO"&&tag!=="AUDIO")return;
+    var code=el.error?el.error.code:0;
+    if(code!==3&&code!==4)return;
+    if(el.__ohsidianMediaNoticed)return;
+    el.__ohsidianMediaNoticed=true;
+    ohsidianOfferSystemPlayer(el);
+  }catch(e){}
+},true);
 /* Delete-dialog destination note, called from the patched dialog site
    (see APP_BODY_PATCHES). Reflects where the trash hook will actually put
    the file: the relocated Documents trash when cfg.documentsDir is

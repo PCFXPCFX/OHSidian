@@ -105,11 +105,25 @@ export class SystemFloatingWindowAdapter extends BaseWindowAdapter {
       try {
         data.on('windowSizeChange', (size) => {
           const windowProp = data.getWindowProperties();
+          // Outer -> content conversion. Per-side borders (round 95, Bug 2):
+          // the old symmetric subtraction removed 2x drawableRect.left from
+          // the width and 2x drawableRect.top from the height - on native
+          // frames only the TOP caption exists, so the height was reported
+          // one caption too short and the viewport shrank on every
+          // resize event.
+          const drawable = windowProp.drawableRect;
+          const windowRect = windowProp.windowRect;
+          let rightBorder: number = 0;
+          let bottomBorder: number = 0;
+          if (drawable.width > 0 && drawable.height > 0) {
+            rightBorder = Math.max(0, windowRect.width - drawable.left - drawable.width);
+            bottomBorder = Math.max(0, windowRect.height - drawable.top - drawable.height);
+          }
           let windowBound: WindowBound = {
-            left: windowProp.windowRect.left + windowProp.drawableRect.left,
-            top: windowProp.windowRect.top + windowProp.drawableRect.top,
-            width: size.width - windowProp.drawableRect.left - windowProp.drawableRect.left,
-            height: size.height - windowProp.drawableRect.top - windowProp.drawableRect.top,
+            left: windowRect.left + drawable.left,
+            top: windowRect.top + drawable.top,
+            width: size.width - drawable.left - rightBorder,
+            height: size.height - drawable.top - bottomBorder,
           };
           this.nativeContext.OnWindowSizeChange(param.window_id, windowBound);
         });
@@ -228,12 +242,23 @@ export class SystemFloatingWindowAdapter extends BaseWindowAdapter {
     const windowProp = windowClass?.getWindowProperties();
     let xComBorder: number = windowProp?.drawableRect.left || 0;
     let xComTop: number = windowProp?.drawableRect.top || 0;
+    // Per-side borders (round 95, Bug 2 - see AppWindowAdapter.setBounds):
+    // width grows by left+right, height by top+bottom. Native frames carry
+    // only the top caption, so the symmetric "+2x top" grew the height by
+    // an extra caption on every call.
+    let xComRight: number = 0;
+    let xComBottom: number = 0;
+    if (windowProp && windowProp.drawableRect.width > 0 &&
+      windowProp.drawableRect.height > 0) {
+      xComRight = Math.max(0, windowProp.windowRect.width -
+        windowProp.drawableRect.left - windowProp.drawableRect.width);
+      xComBottom = Math.max(0, windowProp.windowRect.height -
+        windowProp.drawableRect.top - windowProp.drawableRect.height);
+    }
     bounds.left -= xComBorder;
     bounds.top -= xComTop;
-    // Symmetric borders (see AppWindowAdapter.setBounds): width += 2x left,
-    // height += 2x top.
-    bounds.width = bounds.width + xComBorder + xComBorder;
-    bounds.height = bounds.height + xComTop + xComTop;
+    bounds.width = bounds.width + xComBorder + xComRight;
+    bounds.height = bounds.height + xComTop + xComBottom;
 
     try {
       windowClass.moveWindowTo(bounds.left, bounds.top)
@@ -265,15 +290,25 @@ export class SystemFloatingWindowAdapter extends BaseWindowAdapter {
     const windowProp = windowClass?.getWindowProperties();
     let xComBorder: number = windowProp?.drawableRect.left || 0;
     let xComTop: number = windowProp?.drawableRect.top || 0;
+    // Per-side borders (round 95, Bug 2 - see setBounds above): the limits
+    // apply to the OUTER window, so content limits grow by left+right /
+    // top+bottom.
+    let xComRight: number = 0;
+    let xComBottom: number = 0;
+    if (windowProp && windowProp.drawableRect.width > 0 &&
+      windowProp.drawableRect.height > 0) {
+      xComRight = Math.max(0, windowProp.windowRect.width -
+        windowProp.drawableRect.left - windowProp.drawableRect.width);
+      xComBottom = Math.max(0, windowProp.windowRect.height -
+        windowProp.drawableRect.top - windowProp.drawableRect.height);
+    }
 
     try {
-      // Symmetric borders (see AppWindowAdapter.setBounds): height grows by
-      // 2x the top border, not top+left.
       let windowLimits: window.WindowLimits = {
-        minWidth: minWidth === 0 ? minWidth : minWidth + xComBorder + xComBorder,
-        minHeight: minHeight === 0 ? minHeight : minHeight + xComTop + xComTop,
-        maxWidth: maxWidth === 0 ? maxWidth : maxWidth + xComBorder + xComBorder,
-        maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComTop,
+        minWidth: minWidth === 0 ? minWidth : minWidth + xComBorder + xComRight,
+        minHeight: minHeight === 0 ? minHeight : minHeight + xComTop + xComBottom,
+        maxWidth: maxWidth === 0 ? maxWidth : maxWidth + xComBorder + xComRight,
+        maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComBottom,
       };
       windowClass?.setWindowLimits(windowLimits)
         .catch((err: BusinessError) => {
@@ -302,12 +337,22 @@ export class SystemFloatingWindowAdapter extends BaseWindowAdapter {
     const windowProp = mainWindow?.getWindowProperties();
     let xComBorder: number = windowProp?.drawableRect.left || 0;
     let xComTop: number = windowProp?.drawableRect.top || 0;
+    // Per-side borders (round 95, Bug 2 - see setBounds above). The new
+    // floating window carries the parent's frame style, so the parent's
+    // chrome dimensions are the right ones.
+    let xComRight: number = 0;
+    let xComBottom: number = 0;
+    if (windowProp && windowProp.drawableRect.width > 0 &&
+      windowProp.drawableRect.height > 0) {
+      xComRight = Math.max(0, windowProp.windowRect.width -
+        windowProp.drawableRect.left - windowProp.drawableRect.width);
+      xComBottom = Math.max(0, windowProp.windowRect.height -
+        windowProp.drawableRect.top - windowProp.drawableRect.height);
+    }
     out_bounds.left -= xComBorder;
     out_bounds.top -= xComTop;
-    // Symmetric borders (see AppWindowAdapter.setBounds): height grows by
-    // 2x the top border, not top+left.
-    out_bounds.width += xComBorder + xComBorder;
-    out_bounds.height += xComTop + xComTop;
+    out_bounds.width += xComBorder + xComRight;
+    out_bounds.height += xComTop + xComBottom;
     return out_bounds;
   }
 

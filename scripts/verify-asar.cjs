@@ -25,7 +25,8 @@ try {
     process.exit(1);
   }
   const checks = {
-    'app touch patch v14': app.includes('__ohsidianTouchPatch==="14"'),
+    'app touch patch v15': app.includes('__ohsidianTouchPatch==="15"'),
+    'app media codec guidance (round 95 bug 1)': app.includes('ohsidianOfferSystemPlayer'),
     'app atomic mode-file write (H1)': app.includes('writeModeFileSync'),
     'app trash meta sidecar (F2)': app.includes('.ohsidian-trash-meta.json'),
     'main trash purge will-quit pass (F-N16)': main.includes('__ohTrashPurgeOnce'),
