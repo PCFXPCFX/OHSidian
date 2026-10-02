@@ -4264,6 +4264,27 @@ SetSurface 走直通 → 8 → 视频连元数据都无法加载("连时间都�
 行是 I 级,过滤到 W/E 会丢失全部关键轨迹(01:24 片段的误读
 即由此而来)。
 
+**第 97 轮修订(97c,01:50 日志):中继接管成功,卡点收窄到
+GetImageLayout——已加 Map 回退路径**
+
+97b 修复验证通过:回退链恢复后 1080p 在 SURFACE_FORMAT 处
+Configure→0、SetSurface→0、`relay engaged: 1920x1080 NV12 -> RGBA
+into bridge window`、Prepare/Start 全 0——中继正式接管。
+
+新断点(精确):中继逐帧取缓冲时
+`OH_NativeBuffer_MapPlanes: GetPlanesInfo failed`(上游
+`GetImageLayout Failed`)——解码器分配的缓冲不携带平面布局
+元数据,MapPlanes 无法返回 Y/UV 信息,中继回调每帧失败,
+~350ms 后解码器被拆。
+
+修复(97c):平面布局改为双路径——优先 MapPlanes(带布局元数据
+的缓冲);失败则 `OH_NativeBuffer_Map` + 从解码器
+`GetOutputDescription` 读取其自报的 `stride` /
+`video_slice_height`(设备转储证实 stride==width、slice==height、
+UV 紧随 Y)手工计算 NV12 布局;目标 RGBA 缓冲同理回退
+(stride=width×4)。27.9KB。
+
+
 
 
 

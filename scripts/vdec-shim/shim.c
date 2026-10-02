@@ -110,6 +110,7 @@ typedef int32_t (*PFN_ReqBuffer)(OHNativeWindow *window, OHNativeWindowBuffer **
 typedef int32_t (*PFN_FlushBuffer)(OHNativeWindow *window, OHNativeWindowBuffer *buffer, int fenceFd, Region region);
 typedef int32_t (*PFN_FromNWB)(OHNativeWindowBuffer *nativeWindowBuffer, OH_NativeBuffer **buffer);
 typedef int32_t (*PFN_NBMapPlanes)(OH_NativeBuffer *buffer, void **virAddr, OH_NativeBuffer_Planes *outPlanes);
+typedef int32_t (*PFN_NBMap)(OH_NativeBuffer *buffer, void **virAddr);
 typedef int32_t (*PFN_NBUnmap)(OH_NativeBuffer *buffer);
 typedef OH_NativeImage *(*PFN_ConsumerCreate)(void);
 typedef OHNativeWindow *(*PFN_ImageAcqWin)(OH_NativeImage *image);
@@ -123,6 +124,7 @@ static PFN_ReqBuffer gReqBuffer;
 static PFN_FlushBuffer gFlushBuffer;
 static PFN_FromNWB gFromNWB;
 static PFN_NBMapPlanes gMapPlanes;
+static PFN_NBMap gMap;
 static PFN_NBUnmap gUnmap;
 static PFN_ConsumerCreate gConsumerCreate;
 static PFN_ImageAcqWin gImageAcqWin;
@@ -254,6 +256,25 @@ static void nv12ToRgba(uint8_t *dst, int dstStrideBytes,
     }
 }
 
+/* Query the codec's reported stride / slice height from
+   GetOutputDescription (round 97b fix: this buffer's GetImageLayout is
+   unsupported, so MapPlanes cannot provide the layout - compute the NV12
+   geometry from the values the decoder itself publishes). */
+static int queryFmtInt(const char *key, int fallback)
+{
+    int v = fallback;
+    if (gRelayCodec != NULL && gGetOutputDescription != NULL && gGetIntValue != NULL) {
+        OH_AVFormat *fmt = gGetOutputDescription(gRelayCodec);
+        if (fmt != NULL) {
+            int32_t got = 0;
+            if (gGetIntValue(fmt, key, &got) && got > 0) {
+                v = (int)got;
+            }
+        }
+    }
+    return v;
+}
+
 static void waitFence(int fd)
 {
     if (fd < 0) return;
@@ -282,18 +303,42 @@ static void relayOnFrame(void *context)
     }
     waitFence(srcFence);
 
+    /* Plane layout, two paths (round 97c): MapPlanes when the buffer
+       carries layout metadata; otherwise plain Map + the NV12 geometry
+       the decoder publishes in its output format (stride /
+       video_slice_height - device dump shows stride==width,
+       slice==height, UV directly after Y). */
     void *srcVir = NULL;
     OH_NativeBuffer_Planes srcPlanes;
     memset(&srcPlanes, 0, sizeof(srcPlanes));
-    if (gMapPlanes(srcNB, &srcVir, &srcPlanes) != 0 || srcVir == NULL ||
-        srcPlanes.planeCount < 2) {
+    const uint8_t *yPlane = NULL;
+    const uint8_t *uvPlane = NULL;
+    int yStride = 0;
+    int uvStride = 0;
+    int srcMapped = 0;
+    if (gMapPlanes(srcNB, &srcVir, &srcPlanes) == 0 && srcVir != NULL &&
+        srcPlanes.planeCount >= 2) {
+        yPlane = (const uint8_t *)srcVir + (size_t)srcPlanes.planes[0].offset;
+        uvPlane = (const uint8_t *)srcVir + (size_t)srcPlanes.planes[1].offset;
+        yStride = (int)srcPlanes.planes[0].rowStride;
+        uvStride = (int)srcPlanes.planes[1].rowStride;
+        srcMapped = 1;
+    } else if (gMap != NULL && gMap(srcNB, &srcVir) == 0 && srcVir != NULL) {
+        int st = queryFmtInt("stride", gRelayW);
+        int sliceH = queryFmtInt("video_slice_height", gRelayH);
+        if (st < gRelayW) st = gRelayW;
+        if (sliceH < gRelayH) sliceH = gRelayH;
+        yPlane = (const uint8_t *)srcVir;
+        uvPlane = (const uint8_t *)srcVir + (size_t)st * (size_t)sliceH;
+        yStride = st;
+        uvStride = st;
+        srcMapped = 1;
+        SHIM_LOGI("src layout via Map fallback: stride=%{public}d sliceH=%{public}d", st, sliceH);
+    }
+    if (!srcMapped) {
         gImageRelBuf(gConsumer, srcWinBuf, srcFence);
         return;
     }
-    const uint8_t *yPlane = (const uint8_t *)srcVir + (size_t)srcPlanes.planes[0].offset;
-    const uint8_t *uvPlane = (const uint8_t *)srcVir + (size_t)srcPlanes.planes[1].offset;
-    int yStride = (int)srcPlanes.planes[0].rowStride;
-    int uvStride = (int)srcPlanes.planes[1].rowStride;
 
     if (!gGeomSet && gRelayW > 0 && gRelayH > 0) {
         gHandleOpt(gOrigWin, SET_BUFFER_GEOMETRY, gRelayW, gRelayH);
@@ -319,14 +364,20 @@ static void relayOnFrame(void *context)
     void *dstVir = NULL;
     OH_NativeBuffer_Planes dstPlanes;
     memset(&dstPlanes, 0, sizeof(dstPlanes));
-    if (gMapPlanes(dstNB, &dstVir, &dstPlanes) != 0 || dstVir == NULL ||
-        dstPlanes.planeCount < 1) {
+    uint8_t *dst = NULL;
+    int dstStride = 0;
+    if (gMapPlanes(dstNB, &dstVir, &dstPlanes) == 0 && dstVir != NULL &&
+        dstPlanes.planeCount >= 1) {
+        dst = (uint8_t *)dstVir + (size_t)dstPlanes.planes[0].offset;
+        dstStride = (int)dstPlanes.planes[0].rowStride;
+    } else if (gMap != NULL && gMap(dstNB, &dstVir) == 0 && dstVir != NULL) {
+        dst = (uint8_t *)dstVir;
+        dstStride = gRelayW * 4;
+    } else {
         gUnmap(srcNB);
         gImageRelBuf(gConsumer, srcWinBuf, srcFence);
         return;
     }
-    uint8_t *dst = (uint8_t *)dstVir + (size_t)dstPlanes.planes[0].offset;
-    int dstStride = (int)dstPlanes.planes[0].rowStride;
 
     nv12ToRgba(dst, dstStride, yPlane, yStride, uvPlane, uvStride,
         gRelayW, gRelayH);
@@ -422,6 +473,8 @@ __attribute__((constructor)) static void shimInit(void)
         "OH_NativeBuffer_FromNativeWindowBuffer");
     gMapPlanes = (PFN_NBMapPlanes)libSym(&gBufLib, "libnative_buffer.so",
         "OH_NativeBuffer_MapPlanes");
+    gMap = (PFN_NBMap)libSym(&gBufLib, "libnative_buffer.so",
+        "OH_NativeBuffer_Map");
     gUnmap = (PFN_NBUnmap)libSym(&gBufLib, "libnative_buffer.so",
         "OH_NativeBuffer_Unmap");
     gConsumerCreate = (PFN_ConsumerCreate)libSym(&gImgLib, "libnative_image.so",
