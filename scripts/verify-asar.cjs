@@ -25,7 +25,8 @@ try {
     process.exit(1);
   }
   const checks = {
-    'app touch patch v18': app.includes('__ohsidianTouchPatch==="18"'),
+    'app touch patch v19': app.includes('__ohsidianTouchPatch==="19"'),
+    'app video-hw experiment toggle (round 96c)': app.includes('ohsidian-video-hw'),
     'app console bridge opt-in (round 96b)': app.includes('ohsidianConsoleCapture'),
     'main console bridge (round 96b)': main.includes('__ohsidianConsoleBridge'),
     'app media hang watchdog (round 95c)': app.includes('loadedmetadata') && app.includes('__ohsidianWatched'),

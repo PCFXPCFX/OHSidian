@@ -141,7 +141,7 @@ function isVersionLess(a, b) {
  *    migration, system fonts).
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
-if(window.__ohsidianTouchPatch==="18")return;window.__ohsidianTouchPatch="18";
+if(window.__ohsidianTouchPatch==="19")return;window.__ohsidianTouchPatch="19";
 /* Console -> main bridge (round 96b): the renderer console never reaches
    hilog natively. Opt-in via the command "OHSidian: 运行日志捕获 开/关"
    (persisted in localStorage, takes effect on the next app start): the
@@ -1399,6 +1399,34 @@ var install=function(app){
           else localStorage.setItem("ohsidianConsoleCapture","1");
           try{new Notice("OHSidian 运行日志捕获 → "+(on?"关闭":"开启")+" (重启应用后生效)")}catch(e){}
         }catch(e){}
+      }});
+    /* Round 96c: the vdec-shim experiment toggle. The HAP bundles a
+       libnative_media_vdec.so shim that fixes the engine bridge's broken
+       decoder Configure (adds pixel_format when absent) - but the platform
+       routing itself stays OFF unless this feature flag is present. The
+       toggle writes the USER-LAYER flags file that EngineFlags (round 96)
+       reads at boot, so the experiment never ships enabled by default.
+       Needs the shim lib in the package + an app restart. */
+    app.commands.addCommand({id:"ohsidian-video-hw",name:"OHSidian: 视频硬解(实验) 开/关 (重启生效)",
+      callback:function(){
+        try{
+          var p=dataDir()+"/ohsidian-flags-user.json";
+          var fsMod=require("fs");
+          var cfg={};
+          try{cfg=JSON.parse(fsMod.readFileSync(p,"utf8"))}catch(e){cfg={}}
+          var flags=Array.isArray(cfg.extraFlags)?cfg.extraFlags:[];
+          var FLAG="--enable-features=PlatformVideoDecoder,kIsPlatformVideoDecoder,PlatformAudioDecoder,kIsPlatformAudioDecoder";
+          var idx=flags.indexOf(FLAG);
+          if(idx>=0){
+            flags.splice(idx,1);
+            try{new Notice("OHSidian 视频硬解(实验) → 关闭 (重启生效)")}catch(e){}
+          }else{
+            flags.push(FLAG);
+            try{new Notice("OHSidian 视频硬解(实验) → 开启 (重启生效;需包内 vdec 垫片)")}catch(e){}
+          }
+          cfg.extraFlags=flags;
+          fsMod.writeFileSync(p,JSON.stringify(cfg,null,2),"utf8");
+        }catch(e){try{new Notice("OHSidian 视频硬解开关写入失败: "+(e&&e.message||e))}catch(e2){}}
       }});
     /* Zoom-style font scale chooser: cycles 跟随系统 → 100% → 110% → 125% →
        150% → 100%... Written into the mode file as cfg.fontScaleOverride;

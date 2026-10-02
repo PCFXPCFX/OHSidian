@@ -3917,6 +3917,49 @@ hilog 是既有事实);补丁 v17→v18 增加两条通道,命令面板
 至少其一有内容;②HEVC 播放场景下日志应出现管线悬挂相关的渲染层
 报错行,补齐 95c 诊断材料。
 
+**第 96 轮补充(96c):vdec 垫片实验——不改 libelectron 的二进制级修复路径**
+
+用户追问"能否逆向修改 libelectron.so"。结论:**可以,但选择了比
+盲改机器码更可控的符号边界拦截**。95c 已定位根因(桥接层 Configure
+只传 width/height,缺 pixel_format);拦截点因此选在系统库边界——
+
+1. **同名遮蔽垫片**(scripts/vdec-shim/shim.c,产物
+   electron/libs/arm64-v8a/libnative_media_vdec.so,21KB):以与系统
+   库相同的 soname 打进 HAP,动态链接器对 libelectron 的
+   DT_NEEDED 优先解析到包内副本。垫片按绝对路径
+   dlopen 真正的系统库,把引擎导入的 12 个 OH_VideoDecoder_* 符号
+   全量 1:1 转发(签名取自本机 DevEco NDK 同版头文件,ABI 天然
+   一致),仅对 `OH_VideoDecoder_Configure` 动手术:dump 全部格式键
+   到 hilog → **缺 OH_MD_KEY_PIXEL_FORMAT 时注入
+   AV_PIXEL_FORMAT_NV12** → 再调真 Configure 并回报结果。
+2. **安全模型**:95c 已将路由旗标撤出打包默认值,垫片在旗标关闭时
+   **完全惰性**(桥接层不被调用);新增命令面板开关"OHSidian:
+   视频硬解(实验) 开/关"(round 96 的用户层 flags 机制,写
+   <filesDir>/ohsidian-flags-user.json,重启生效)控制实验,默认
+   关闭。补丁 v18→v19,新增 toggle marker。
+3. **真机判定信号**:开启实验并重启后,hilog 过滤 `VdecShim`——
+   出现 `shim loaded - shadowing system libnative_media_vdec.so`
+   即遮蔽生效;随后 Configure 行会打印 width/height/pixelFormat/
+   profile 的实际键况与 HAL 返回码:
+   - 补 NV12 后 Configure 返回 0(AV_ERR_OK)= **HEVC 硬解打通**,
+     后续把垫片转为默认随包分发;
+   - 仍失败且日志显示 width/height 缺失 = 引擎读取尺寸的更深层
+     bug,垫片可再迭代(垫片侧伪造合法尺寸);
+   - hilog 无任何 VdecShim 行 = 同名遮蔽被链接器命名空间拦截,
+     下一步才是 DT_NEEDED 字符串改写(libelectron.so 的依赖名改指
+     垫片,plan B,已有精确方案未实施)。
+4. **构建配方**(本机 DevEco NDK 实测通过):
+   `clang --target=aarch64-linux-ohos --sysroot=<NDK>/sysroot
+   -shared -fPIC -O2 shim.c -o libnative_media_vdec.so
+   <sysroot>/usr/lib/aarch64-linux-ohos/{libhilog_ndk.z.so,
+   libnative_media_core.so}`;产物 21KB、导出 20 个 vdec 符号、
+   DT_NEEDED 仅 hilog/core/libc。
+5. **边界与注意**:垫片只做参数级修补与日志,不修改 libelectron.so
+   本体(可整文件删除回退);本应用本就随包分发引擎二进制,垫片属
+   自应用兼容性互操作,对外分发前建议向引擎提供方同步该实验
+   (95c 的证据包可直接引用);若引擎上游修复 Configure,直接删除
+   垫片文件即可回到干净状态。
+
 ---
 
 ## 窗口专题总览(第 87-93 轮,2026-10-01)
