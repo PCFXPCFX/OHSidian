@@ -4119,6 +4119,17 @@ v4 真机日志(00:22)把最后一个变量钉死:
    队列格式错位已定位、需要引擎侧在 ConsumerSurface 上设
    NV12)向 SIG/华为反馈。
 
+**96i 修订(v5b,00:30 日志)**:v5 实为空转——
+`/system/lib64/libnative_window.so` 在设备上不存在(dlopen ENOENT),
+SET_FORMAT 从未执行(该轮行为与 v4 等价)。修正:按**裸 soname**
+`libnative_window.so` 解析(垫片命名空间已证实可按裸名解析
+libnative_media_core.so;libelectron 本身即链接该库),回退
+`.z` 后缀绝对路径候选;SetSurface 前后各做一次 GET_FORMAT 诊断
+(打印队列实际格式,裁决缓冲分配是否被改写)。另确认:该轮
+1080p 会话 Configure→SetSurface→Prepare→Start 依旧全 0、8K 三
+格式全拒,与 96i 结论一致。
+
+
 **第 96 轮补充(96e):探针改为应用内 N-API 插件(shell 域被 SELinux 拦截)**
 
 hdc 部署 /data/local/tmp/ohprobe 实测失败:`ls -laZ` 显示标签正确
