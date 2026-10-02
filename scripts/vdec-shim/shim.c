@@ -32,6 +32,8 @@
 #include <multimedia/player_framework/native_avcodec_base.h>
 #include <multimedia/player_framework/native_avcodec_videodecoder.h>
 #include <multimedia/player_framework/native_avformat.h>
+#include <native_buffer/native_buffer.h>
+#include <native_window/external_window.h>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -95,6 +97,15 @@ static PFN_FormatSetIntValue gSetIntValue;
  * loading, before libelectron's own NDK bootstrap - keep it minimal. */
 static void *gCore = NULL;
 static bool gCoreTried = false;
+/* Round 96i: the consumer surface's buffer queue must ALLOCATE NV12 to
+   match the HAL's hard-wired NV12 output (OnOutputFormatChanged always
+   reports pixel_format=2 / graphic 24; RGBA output is 'unsupport
+   interface'). Set the window format at SetSurface time - before Start,
+   i.e. before any buffer is dequeued - via the standard video-surface
+   mechanism. */
+typedef int32_t (*PFN_WindowOpt)(OHNativeWindow *window, int code, ...);
+static void *gNwLib = NULL;
+static PFN_WindowOpt gWindowOpt;
 
 static void *coreSym(const char *name)
 {
@@ -185,6 +196,15 @@ __attribute__((constructor)) static void shimInit(void)
     gIsValid = (PFN_IsValid)realSym(gReal, "OH_VideoDecoder_IsValid");
     gGetIntValue = (PFN_FormatGetIntValue)coreSym("OH_AVFormat_GetIntValue");
     gSetIntValue = (PFN_FormatSetIntValue)coreSym("OH_AVFormat_SetIntValue");
+    gNwLib = dlopen("/system/lib64/libnative_window.so", RTLD_NOW | RTLD_LOCAL);
+    if (gNwLib != NULL) {
+        gWindowOpt = (PFN_WindowOpt)dlsym(gNwLib, "OH_NativeWindow_NativeWindowHandleOpt");
+        if (gWindowOpt == NULL) {
+            SHIM_LOGE("NativeWindowHandleOpt dlsym failed: %{public}s", dlerror());
+        }
+    } else {
+        SHIM_LOGE("libnative_window.so dlopen failed: %{public}s", dlerror());
+    }
     SHIM_LOGI("real symbols resolved: configure=%{public}d getfmt=%{public}d",
         gConfigure != NULL, gGetIntValue != NULL);
 }
@@ -221,9 +241,18 @@ OH_AVErrCode OH_VideoDecoder_RegisterCallback(OH_AVCodec *codec, OH_AVCodecCallb
 
 OH_AVErrCode OH_VideoDecoder_SetSurface(OH_AVCodec *codec, OHNativeWindow *window)
 {
-    OH_AVErrCode r = gSetSurface ? gSetSurface(codec, window) : AV_ERR_UNKNOWN;
-    SHIM_LOGI("SetSurface -> %{public}d", r);
-    return r;
+    if (gWindowOpt != NULL && window != NULL) {
+        /* NATIVEBUFFER_PIXEL_FMT_YCBCR_420_SP == 24 (matches the HAL's
+           video_graphic_pixel_format=24 in OnOutputFormatChanged). The
+           bridge never sets a queue format, so the queue defaults to
+           RGBA8888 and every NV12 frame renders as noise (round 96g). */
+        int32_t r = gWindowOpt(window, SET_FORMAT,
+            (int32_t)NATIVEBUFFER_PIXEL_FMT_YCBCR_420_SP);
+        SHIM_LOGI("SetSurface: queue SET_FORMAT NV12(24) -> %{public}d", r);
+    }
+    OH_AVErrCode r2 = gSetSurface ? gSetSurface(codec, window) : AV_ERR_UNKNOWN;
+    SHIM_LOGI("SetSurface -> %{public}d", r2);
+    return r2;
 }
 
 OH_AVErrCode OH_VideoDecoder_Configure(OH_AVCodec *codec, OH_AVFormat *format)

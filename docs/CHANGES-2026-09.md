@@ -4088,6 +4088,37 @@ SURFACE_FORMAT、NV12 依次回退(一次 Configure 调用内三级重试,
 拒且 SURFACE 仍乱码 = HAL 不支持 RGB 输出 + 队列格式不可控,
 垫片层穷尽,维持 96g 的收尾建议(转码 + 上游)。
 
+**第 96 轮补充(96i):格式失配机理闭环——HAL 铁定输出 NV12;垫片
+v5 在 SetSurface 时把消费者队列格式设为 NV12**
+
+v4 真机日志(00:22)把最后一个变量钉死:
+
+1. **RGBA 输出被 outright 拒绝**:`{Configure} unsupport interface`
+   (错误 9)——该 HAL 无 HEVC→RGB 输出能力,RGB 路线终结;
+2. **SURFACE_FORMAT 通过但 HAL 无视之**:Configure → 0 后
+   OnOutputFormatChanged 仍报 `pixel_format = 2` +
+   `video_graphic_pixel_format = 24`(NV12),stride=1920——HAL
+   铁定输出 NV12,surface 请求不改变输出;乱码机理完整闭环:
+   **桥接层从不设置队列格式 → 队列按默认 RGBA8888 分配缓冲 →
+   HAL 硬写 NV12 → RGBA 解读 = 雪花**;
+3. **8K 三格式全拒**(RGBA/SURFACE/NV12 均 invalid argument)=
+   设备能力上限,终审。
+4. **垫片 v5**(编解码 API 内最后一个可达杠杆):SetSurface 包装器
+   在转发真调用**之前**,经
+   `OH_NativeWindow_NativeWindowHandleOpt(window, SET_FORMAT,
+   NATIVEBUFFER_PIXEL_FMT_YCBCR_420_SP /*=24*/)` 把消费者窗口的
+   缓冲队列格式设为 NV12——标准视频 surface 机制,时机在 Start
+   之前(任何缓冲出队之前),libnative_window.so 按 dlopen 解析。
+   队列分配与 HAL 输出对齐后,帧内容与缓冲布局应一致;桥接层的
+   合成路径(Chromium NativePixmap/VideoFrame 导入)能否处理 NV12
+   是最后一道关。
+5. **判读**:hilog 看 `SetSurface: queue SET_FORMAT NV12(24) -> 0`;
+   画面正常 = HEVC 应用内硬解达成;SET_FORMAT 失败或仍乱码/黑屏 =
+   编解码 API 层杠杆穷尽——转 H.264 软解(现状可播)+ 以
+   95b-96i 完整证据链(Configure 缺键已由垫片证明可修、渲染层
+   队列格式错位已定位、需要引擎侧在 ConsumerSurface 上设
+   NV12)向 SIG/华为反馈。
+
 **第 96 轮补充(96e):探针改为应用内 N-API 插件(shell 域被 SELinux 拦截)**
 
 hdc 部署 /data/local/tmp/ohprobe 实测失败:`ls -laZ` 显示标签正确
