@@ -4488,6 +4488,37 @@ fd 号,帧 1 的输出槽永不释放,HAL 不解码帧 2(若 fd 号被复用则
 RenderOutputData 停在 1,把日志贴来——那说明桥接的帧工厂没吃下
 我们 flush 的缓冲,需对照其 NativeImage 更新路径再修。
 
+**第 98 轮修订(98g,03:07 日志):fence 修复后管线仍在"首帧窗口"
+ competition 中落败——桥接在 RenderOutputData 后 ~11-18ms 内中止,
+ 改用 EGL native fence 消除 glFinish 阻塞 + worker 启动即预热 GPU**
+
+03:07 实测(进程 35484,v7f,两实例)拿到完整闭环证据:
+- `RenderOutputData #1 idx=13`(桥接放行帧 1)+ 紧随 7 个
+  FreeOutputData(池清空=中止时序);`flush 0` 确认我们的 flush 成功;
+- 实例 2(GPU 已热)时间线:帧可用 .281 → 桥接放行 .283 → 我们
+  flush 完成 .295(12ms)→ **音频 Stop .294(早 1ms!)**;
+- 两实例中止均发生在放行后 11-18ms,而 96g(编解码器直写桥接
+  队列,无中继)帧 2ms 即位、管线存活——结论:**桥接在放行输出槽
+  后以 ~10ms 级窗口等待帧落入其队列,中继转换(含 glFinish 3-8ms
+  CPU 阻塞)每次都刚好迟到**。
+
+修复(98g,shim v7g,42.7KB):
+1. **fence 化 flush**:绘制后 eglCreateSyncKHR(
+   EGL_SYNC_NATIVE_FENCE_ANDROID)+ eglDupNativeFenceFDANDROID
+   取 fence fd,FlushBuffer 携带该 fence(消费方按 BufferQueue 标准语义
+   在读取时等 fence,GPU 顺序不丢)——CPU 零等待,完全复刻编解码器
+   原生 flush 行为;驱动扩展表已确认 EGL_ANDROID_native_fence_sync
+   存在;sync 进程不可用时回退 glFinish + fence -1;
+2. **worker 线程启动即预热 GPU**(display/context/program,省 ~25ms
+   冷启动;03:07 实例 1 的首帧因冷启动晚了 ~100ms);
+3. fence 创建失败路径统一回退,无新增状态。
+
+判定(重测):`relayed 1 frames` 的 flush 时间戳应落在桥接放行
+(CodecListenerStub [out]GetBuffer)后 ~5ms 内,且音频 Stop 不再
+紧随其后;`relayed N frames` 持续增长 + 画面正常 = 成功。若仍
+停在 1,则中止原因不在视频路径时延,转查音频侧(写回调无数据
+导致的 underrun 停播)。
+
 
 
 

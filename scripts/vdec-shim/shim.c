@@ -292,6 +292,24 @@ static PFN_glDrawArrays pglDrawArrays;
 static PFN_glFinish pglFinish;
 static PFN_glGetString pglGetString;
 
+/* EGL sync (fence) entry points - round 98g. EGL_ANDROID_native_fence_sync
+   is advertised by this driver (device extension dump); passing a REAL
+   fence fd with FlushBuffer lets the bridge's consumer order itself on the
+   GPU, removing the glFinish stall that misses the ~11ms first-frame
+   window (device logs 03:07: bridge aborts 11-18ms after RenderOutputData
+   if the converted frame has not landed in its queue yet; the codec's own
+   flush lands in 2ms in the no-relay configuration). */
+#ifndef EGL_SYNC_NATIVE_FENCE_ANDROID
+#define EGL_SYNC_NATIVE_FENCE_ANDROID 0x3126
+#endif
+typedef EGLSyncKHR (*PFN_eglCreateSyncKHR)(EGLDisplay dpy, EGLenum type,
+    const EGLint *attribs);
+typedef EGLint (*PFN_eglDupNativeFenceFD)(EGLDisplay dpy, EGLSyncKHR sync);
+typedef EGLBoolean (*PFN_eglDestroySyncKHR)(EGLDisplay dpy, EGLSyncKHR sync);
+static PFN_eglCreateSyncKHR pEglCreateSyncKHR;
+static PFN_eglDupNativeFenceFD pEglDupNativeFenceFD;
+static PFN_eglDestroySyncKHR pEglDestroySyncKHR;
+
 #define GLPROC(var, name) \
     do { \
         (var) = (typeof(var))(void *)eglGetProcAddress(name); \
@@ -338,6 +356,10 @@ static int gpuResolveProcs(void)
     GLPROC(pglDrawArrays, "glDrawArrays");
     GLPROC(pglFinish, "glFinish");
     GLPROC(pglGetString, "glGetString");
+    /* sync procs are optional (fallback = glFinish + fence -1) */
+    pEglCreateSyncKHR = (PFN_eglCreateSyncKHR)(void *)eglGetProcAddress("eglCreateSyncKHR");
+    pEglDupNativeFenceFD = (PFN_eglDupNativeFenceFD)(void *)eglGetProcAddress("eglDupNativeFenceFDANDROID");
+    pEglDestroySyncKHR = (PFN_eglDestroySyncKHR)(void *)eglGetProcAddress("eglDestroySyncKHR");
     done = 1;
     SHIM_LOGI("gpu: %d GLES entry points resolved via eglGetProcAddress", 31);
     return 1;
@@ -800,10 +822,33 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
         pglEnableVertexAttribArray(gAPos);
         pglDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
-    pglFinish();
     pglBindFramebuffer(GL_FRAMEBUFFER, 0);
     gEglDestroyImage(gEglDpy, srcImg);
     gEglDestroyImage(gEglDpy, dstImg);
+    /* Order the GPU work with a native fence instead of glFinish: the
+       bridge's consumer waits the fence when it reads the buffer (standard
+       BufferQueue producer semantics, identical to the codec's own
+       flush). glFinish here cost 3-8ms and missed the bridge's ~11ms
+       first-frame window every time (device logs 03:07). Fallback when
+       sync procs are missing: glFinish + fence -1. */
+    int flushFence = -1;
+    if (pEglCreateSyncKHR != NULL && pEglDupNativeFenceFD != NULL &&
+        pEglDestroySyncKHR != NULL) {
+        EGLSyncKHR sync = pEglCreateSyncKHR(gEglDpy,
+            EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+        if (sync != EGL_NO_SYNC_KHR) {
+            flushFence = pEglDupNativeFenceFD(gEglDpy, sync);
+            pEglDestroySyncKHR(gEglDpy, sync);
+            if (flushFence < 0) {
+                flushFence = -1;
+                pglFinish();
+            }
+        } else {
+            pglFinish();
+        }
+    } else {
+        pglFinish();
+    }
 
     /* Full-rect damage region: some BufferQueue dirty-accounting paths
        need a non-empty region for the buffer to become acquirable by the
@@ -816,7 +861,7 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
     Region region;
     region.rects = &dmg;
     region.rectNumber = 1;
-    int flushRet = gFlushBuffer(origWin, dstWinBuf, -1, region);
+    int flushRet = gFlushBuffer(origWin, dstWinBuf, flushFence, region);
     /* fence -1: we waited and closed the acquire fence ourselves; the
        release must NOT hand a stale/closed fd to the producer or the HAL
        blocks before decoding frame 2 (98f root cause: only 1 frame ever
@@ -850,6 +895,13 @@ static int gWorkerStarted = 0;
 static void *relayWorkerMain(void *arg)
 {
     (void)arg;
+    /* Pre-warm the EGL/GLES pipeline BEFORE the first frame: the cold path
+       (display + context + program + gralloc first allocation) costs
+       ~25ms and pushed the first converted frame past the bridge's
+       first-frame window in the 03:07 device logs. */
+    if (!gpuInit()) {
+        SHIM_LOGE("gpu: pre-warm failed on worker thread (will retry per frame)");
+    }
     for (;;) {
         pthread_mutex_lock(&gWakeLock);
         while (!gWake) {
@@ -927,7 +979,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7f loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7g loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());
