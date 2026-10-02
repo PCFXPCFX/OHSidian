@@ -63,6 +63,9 @@
 #ifndef GL_TEXTURE_EXTERNAL_OES
 #define GL_TEXTURE_EXTERNAL_OES 0x8D65
 #endif
+#ifndef EGL_OPENGL_ES3_BIT
+#define EGL_OPENGL_ES3_BIT 0x0040
+#endif
 
 /* gl2ext.h only declares this under GL_GLEXT_PROTOTYPES; declare it here -
    the symbol is exported by libGLESv2.so (verified in the NDK stub). */
@@ -214,10 +217,13 @@ static GLuint gFbo = 0;
 static GLint gAPos = -1;
 static GLint gScaleLoc = -1;
 static int gEglReady = 0;
+static int gIsES3 = 0;
+static int gGpuDead = 0;
 static pthread_t gEglOwner;
 static int gEglOwnerValid = 0;
 
-static const char *G_VSH =
+/* ESSL 1.00 pair: needs GL_OES_EGL_image_external + samplerExternalOES. */
+static const char *G_VSH_ES2 =
     "attribute vec2 aPos;\n"
     "uniform vec2 uScale;\n"
     "varying vec2 vUV;\n"
@@ -233,7 +239,7 @@ static const char *G_VSH =
 /* The driver converts YUV->RGB during the external-OES sample (BT.709 per
    the buffer's own metadata: matrix_coefficients=1 in the device dump), so
    the shader is a passthrough. */
-static const char *G_FSH =
+static const char *G_FSH_ES2 =
     "#extension GL_OES_EGL_image_external : require\n"
     "precision mediump float;\n"
     "varying vec2 vUV;\n"
@@ -242,16 +248,173 @@ static const char *G_FSH =
     "  gl_FragColor = vec4(texture2D(sTex, vUV).rgb, 1.0);\n"
     "}\n";
 
+/* ESSL 3.00 pair: same extension under its _essl3 spelling; tried when the
+   driver rejects the ESSL1 form (device log 02:29: "gpu: program link
+   failed" on the ES2 path). */
+static const char *G_VSH_ES3 =
+    "#version 300 es\n"
+    "in vec2 aPos;\n"
+    "uniform vec2 uScale;\n"
+    "out vec2 vUV;\n"
+    "void main() {\n"
+    "  vUV = vec2((aPos.x * 0.5 + 0.5) * uScale.x, (0.5 - aPos.y * 0.5) * uScale.y);\n"
+    "  gl_Position = vec4(aPos, 0.0, 1.0);\n"
+    "}\n";
+
+static const char *G_FSH_ES3 =
+    "#version 300 es\n"
+    "#extension GL_OES_EGL_image_external_essl3 : require\n"
+    "precision mediump float;\n"
+    "in vec2 vUV;\n"
+    "uniform samplerExternalOES sTex;\n"
+    "out vec4 oClr;\n"
+    "void main() {\n"
+    "  oClr = vec4(texture(sTex, vUV).rgb, 1.0);\n"
+    "}\n";
+
+/* hilog lines cap out around 4KB; print driver logs in ~600B chunks. */
+static void gpuLogText(const char *what, const char *s)
+{
+    if (s == NULL || s[0] == '\0') {
+        SHIM_LOGE("gpu: %s (no log)", what);
+        return;
+    }
+    size_t len = strlen(s);
+    size_t off = 0;
+    int chunk = 0;
+    while (off < len && chunk < 8) {
+        char buf[600];
+        size_t n = len - off;
+        if (n > sizeof(buf) - 1) {
+            n = sizeof(buf) - 1;
+        }
+        memcpy(buf, s + off, n);
+        buf[n] = '\0';
+        SHIM_LOGE("gpu: %s[%{public}d]: %{public}s", what, chunk++, buf);
+        off += n;
+    }
+}
+
 static GLuint gpuCompile(GLenum type, const char *src)
 {
     GLuint sh = glCreateShader(type);
+    if (sh == 0) {
+        SHIM_LOGE("gpu: glCreateShader(%{public}u) -> 0 (err 0x%{public}x)",
+            (unsigned)type, (unsigned)glGetError());
+        return 0;
+    }
     glShaderSource(sh, 1, &src, NULL);
     glCompileShader(sh);
+    GLint ok = 0;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        GLsizei n = 0;
+        log[0] = '\0';
+        glGetShaderInfoLog(sh, (GLsizei)sizeof(log) - 1, &n, log);
+        if (n < 0 || n >= (GLsizei)sizeof(log)) {
+            n = (GLsizei)sizeof(log) - 1;
+        }
+        log[n] = '\0';
+        gpuLogText(type == GL_VERTEX_SHADER ? "VS compile" : "FS compile", log);
+        glDeleteShader(sh);
+        return 0;
+    }
     return sh;
+}
+
+static GLuint gpuBuildProgram(int es3)
+{
+    const char *vsh = es3 ? G_VSH_ES3 : G_VSH_ES2;
+    const char *fsh = es3 ? G_FSH_ES3 : G_FSH_ES2;
+    GLuint vs = gpuCompile(GL_VERTEX_SHADER, vsh);
+    GLuint fs = gpuCompile(GL_FRAGMENT_SHADER, fsh);
+    if (vs == 0 || fs == 0) {
+        if (vs != 0) glDeleteShader(vs);
+        if (fs != 0) glDeleteShader(fs);
+        return 0;
+    }
+    GLuint prog = glCreateProgram();
+    if (prog == 0) {
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+        return 0;
+    }
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        GLsizei n = 0;
+        log[0] = '\0';
+        glGetProgramInfoLog(prog, (GLsizei)sizeof(log) - 1, &n, log);
+        if (n < 0 || n >= (GLsizei)sizeof(log)) {
+            n = (GLsizei)sizeof(log) - 1;
+        }
+        log[n] = '\0';
+        gpuLogText("program link", log);
+        glDeleteProgram(prog);
+        return 0;
+    }
+    return prog;
+}
+
+static int gpuSetup(EGLConfig cfg, int es3)
+{
+    const EGLint cfgAttr[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_RENDERABLE_TYPE, es3 ? EGL_OPENGL_ES3_BIT : EGL_OPENGL_ES2_BIT,
+        EGL_NONE
+    };
+    EGLConfig use = NULL;
+    EGLint n = 0;
+    if (!eglChooseConfig(gEglDpy, cfgAttr, &use, 1, &n) || n < 1) {
+        SHIM_LOGE("gpu: eglChooseConfig(ES%{public}d) failed", es3 ? 3 : 2);
+        return 0;
+    }
+    const EGLint ctxAttr[] = { EGL_CONTEXT_CLIENT_VERSION, es3 ? 3 : 2, EGL_NONE };
+    gEglCtx = eglCreateContext(gEglDpy, use, EGL_NO_CONTEXT, ctxAttr);
+    if (gEglCtx == EGL_NO_CONTEXT) {
+        SHIM_LOGE("gpu: eglCreateContext(ES%{public}d) failed", es3 ? 3 : 2);
+        return 0;
+    }
+    const EGLint pbAttr[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+    gEglPbuf = eglCreatePbufferSurface(gEglDpy, use, pbAttr);
+    if (gEglPbuf == EGL_NO_SURFACE ||
+        !eglMakeCurrent(gEglDpy, gEglPbuf, gEglPbuf, gEglCtx)) {
+        SHIM_LOGE("gpu: pbuffer/makeCurrent(ES%{public}d) failed", es3 ? 3 : 2);
+        return 0;
+    }
+    static int gGlExtLogged = 0;
+    if (!gGlExtLogged) {
+        gGlExtLogged = 1;
+        const GLubyte *glext = glGetString(GL_EXTENSIONS);
+        gpuLogText("GL_EXTENSIONS", glext != NULL ? (const char *)glext : "(null)");
+    }
+    gProg = gpuBuildProgram(es3);
+    if (gProg == 0) {
+        SHIM_LOGE("gpu: program build failed (ES%{public}d)", es3 ? 3 : 2);
+        return 0;
+    }
+    gAPos = glGetAttribLocation(gProg, "aPos");
+    gScaleLoc = glGetUniformLocation(gProg, "uScale");
+    glGenTextures(1, &gSrcTex);
+    glGenTextures(1, &gDstTex);
+    glGenFramebuffers(1, &gFbo);
+    gIsES3 = es3;
+    return 1;
 }
 
 static int gpuInit(void)
 {
+    if (gGpuDead) {
+        return 0;
+    }
     if (gEglReady && gEglOwnerValid && pthread_equal(gEglOwner, pthread_self())) {
         return 1;
     }
@@ -283,6 +446,12 @@ static int gpuInit(void)
             gEglDpy = EGL_NO_DISPLAY;
             return 0;
         }
+        static int gEglExtLogged = 0;
+        if (!gEglExtLogged) {
+            gEglExtLogged = 1;
+            const char *eglext = eglQueryString(gEglDpy, EGL_EXTENSIONS);
+            gpuLogText("EGL_EXTENSIONS", eglext != NULL ? eglext : "(null)");
+        }
     }
     if (gEglCreateImage == NULL) {
         /* the NDK stub exports only the EGL 1.5 core name; the runtime
@@ -300,55 +469,40 @@ static int gpuInit(void)
             return 0;
         }
     }
-    const EGLint cfgAttr[] = {
-        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_NONE
-    };
-    EGLConfig cfg = NULL;
-    EGLint n = 0;
-    if (!eglChooseConfig(gEglDpy, cfgAttr, &cfg, 1, &n) || n < 1) {
-        SHIM_LOGE("gpu: eglChooseConfig failed");
-        return 0;
+    if (gpuSetup(NULL, 0)) {
+        gEglOwner = pthread_self();
+        gEglOwnerValid = 1;
+        gEglReady = 1;
+        SHIM_LOGI("gpu: EGL+GLES ES%{public}d ready on frame thread (program %u)",
+            gIsES3 ? 3 : 2, gProg);
+        return 1;
     }
-    const EGLint ctxAttr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
-    gEglCtx = eglCreateContext(gEglDpy, cfg, EGL_NO_CONTEXT, ctxAttr);
-    if (gEglCtx == EGL_NO_CONTEXT) {
-        SHIM_LOGE("gpu: eglCreateContext failed");
-        return 0;
+    /* retry as ESSL 3.00: some drivers expose the external-image extension
+       only under its _essl3 name or inside ES3 contexts */
+    eglMakeCurrent(gEglDpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (gEglPbuf != EGL_NO_SURFACE) {
+        eglDestroySurface(gEglDpy, gEglPbuf);
+        gEglPbuf = EGL_NO_SURFACE;
     }
-    const EGLint pbAttr[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
-    gEglPbuf = eglCreatePbufferSurface(gEglDpy, cfg, pbAttr);
-    if (gEglPbuf == EGL_NO_SURFACE ||
-        !eglMakeCurrent(gEglDpy, gEglPbuf, gEglPbuf, gEglCtx)) {
-        SHIM_LOGE("gpu: pbuffer/makeCurrent failed");
-        return 0;
+    if (gEglCtx != EGL_NO_CONTEXT) {
+        eglDestroyContext(gEglDpy, gEglCtx);
+        gEglCtx = EGL_NO_CONTEXT;
     }
-    GLuint vs = gpuCompile(GL_VERTEX_SHADER, G_VSH);
-    GLuint fs = gpuCompile(GL_FRAGMENT_SHADER, G_FSH);
-    gProg = glCreateProgram();
-    glAttachShader(gProg, vs);
-    glAttachShader(gProg, fs);
-    glLinkProgram(gProg);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    GLint linked = 0;
-    glGetProgramiv(gProg, GL_LINK_STATUS, &linked);
-    if (!linked) {
-        SHIM_LOGE("gpu: program link failed");
-        return 0;
+    gProg = 0;
+    gSrcTex = 0;
+    gDstTex = 0;
+    gFbo = 0;
+    if (gpuSetup(NULL, 1)) {
+        gEglOwner = pthread_self();
+        gEglOwnerValid = 1;
+        gEglReady = 1;
+        SHIM_LOGI("gpu: EGL+GLES ES%{public}d ready on frame thread (program %u)",
+            gIsES3 ? 3 : 2, gProg);
+        return 1;
     }
-    gAPos = glGetAttribLocation(gProg, "aPos");
-    gScaleLoc = glGetUniformLocation(gProg, "uScale");
-    glGenTextures(1, &gSrcTex);
-    glGenTextures(1, &gDstTex);
-    glGenFramebuffers(1, &gFbo);
-    gEglOwner = pthread_self();
-    gEglOwnerValid = 1;
-    gEglReady = 1;
-    SHIM_LOGI("gpu: EGL+GLES ready on frame thread (program %u)", gProg);
-    return 1;
+    gGpuDead = 1;
+    SHIM_LOGE("gpu: no usable GLES context+program (ES2/ES3 both failed) - relay idle");
+    return 0;
 }
 
 /* ===== relay state (single active video surface; the first decoder that
@@ -607,7 +761,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7 loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7b loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());

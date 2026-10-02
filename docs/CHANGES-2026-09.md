@@ -4340,6 +4340,31 @@ Y 方向按 GL 纹理约定翻转,若真机画面颠倒则只需改顶点着色�
 若 `gpu: eglCreateImage failed`/`FBO incomplete` 则 GPU 导入被
 驱动拒绝——后备方案仍为垫片内置软解。
 
+**第 98 轮修订(98b,02:29 日志):ES2 着色器程序链接失败——加编译/
+链接日志 + GL_EXTENSIONS 转储 + ES3(_essl3 扩展)回退阶梯**
+
+02:29 实测(进程 11702):链路前段全通——`shim v7 loaded` →
+Configure 回退链命中 SURFACE_FORMAT → `relay engaged: 1920x1080`
+→ Prepare/Start 全 0,但帧回调里 `gpu: program link failed`,
+桥接窗口收不到帧,~300ms 后解码器照旧被拆(`relay torn down`)。
+EGL 上下文/pbuffer/makeCurrent 都成功,失败点只在 GLSL 程序。
+
+最可能原因:片段着色器 `#extension GL_OES_EGL_image_external :
+require` 在该驱动的 ESSL 1.00 编译器不通过(扩展不存在,或仅以
+`_essl3` 拼写/仅 ES3 上下文提供)。98b 改动:
+1. 全量诊断——逐着色器编译状态 + InfoLog、程序 InfoLog、
+   GL_EXTENSIONS/EGL_EXTENSIONS 分块转储(600B/行),失败原因
+   直接以驱动原文进 hilog;
+2. 回退阶梯——ES2(essl1 + `GL_OES_EGL_image_external`)失败后,
+   销毁上下文换 ES3(`#version 300 es` + `in/out/texture()` +
+   `GL_OES_EGL_image_external_essl3`,配置按 ES3 bit 重新选),
+   两路都挂才判 `gGpuDead`(停止逐帧重试,中继静默);
+3. 成功日志升级为 `gpu: EGL+GLES ES2/ES3 ready on frame thread`。
+产物 41.9KB(shim v7b)。判定:重测后要么 `ES2/ES3 ready` 落地、
+`relayed N frames` 增长(成功),要么 hilog 给出确切的编译/扩展
+报错——若 GL 扩展表里两个 external 变体都没有,则 GPU 采样路线
+在该驱动不可行,转入垫片内置软解(libde265/ffmpeg hevc)。
+
 
 
 
