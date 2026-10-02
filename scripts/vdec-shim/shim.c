@@ -132,8 +132,15 @@ static void dumpAndFix(OH_AVFormat *format)
         return;
     }
     if (!hasPf) {
-        SHIM_LOGI("pixel_format absent -> injecting NV12 (surface mode follows)");
-        gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
+        /* Round 96g order: SURFACE_FORMAT first. Round 96f evidence: with
+           NV12 the codec decodes AND the bridge consumes output buffers,
+           yet Chromium still tears the decoder down (~100ms) and errors -
+           consistent with the bridge's surface queue expecting the
+           format IT negotiated, not a forced NV12. SURFACE_FORMAT lets
+           the HAL follow the surface's native format. NV12 remains the
+           fallback (it did pass Configure at 1080p). */
+        SHIM_LOGI("pixel_format absent -> injecting SURFACE_FORMAT (try 1)");
+        gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_SURFACE_FORMAT);
     }
 }
 
@@ -222,16 +229,12 @@ OH_AVErrCode OH_VideoDecoder_Configure(OH_AVCodec *codec, OH_AVFormat *format)
     dumpAndFix(format);
     OH_AVErrCode r = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
     if (r != AV_ERR_OK && gSetIntValue != NULL) {
-        /* Round 96f: 8K (7680x4320) HEVC fails with NV12 on this device -
-           the HAL likely caps NV12 buffer allocation below 8K, while
-           SURFACE_FORMAT lets the surface's own (possibly compressed /
-           tiled) format carry it. Retry once with pixel_format=4 before
-           giving up; the dict is stateless per Configure call, so setting
-           the key again is safe. */
-        SHIM_LOGI("Configure with NV12 failed (%{public}d) - retrying with SURFACE_FORMAT", r);
-        gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_SURFACE_FORMAT);
+        /* Fallback order (96g): SURFACE_FORMAT failed -> try NV12 (it
+           passed Configure at 1080p in round 96f). */
+        SHIM_LOGI("Configure with SURFACE_FORMAT failed (%{public}d) - retrying with NV12", r);
+        gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
         OH_AVErrCode r2 = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
-        SHIM_LOGI("Configure(SURFACE_FORMAT) -> %{public}d", r2);
+        SHIM_LOGI("Configure(NV12) -> %{public}d", r2);
         if (r2 == AV_ERR_OK) {
             return AV_ERR_OK;
         }

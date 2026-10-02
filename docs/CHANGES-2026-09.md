@@ -4037,6 +4037,36 @@ hilog 是既有事实);补丁 v17→v18 增加两条通道,命令面板
    与路由无关),垫片本身不依赖该开关——垫片始终生效,删除包内
    文件即回退。
 
+**第 96 轮补充(96g):第二层引擎缺陷定位——解码成功但不渲染;垫片
+v3 改 SURFACE_FORMAT 优先**
+
+用户以含 v2 垫片的构建播放 1080p HEVC(00:07 hilog,3505 行):
+仍黑屏 + 进度条 + 转圈后停止,渲染层 Notice 触发。日志裁决:
+
+1. **编解码层完全正常**:12 次 CreateByMime(video/hevc),8 次
+   Configure 成功(垫片注入后),SetSurface/Prepare/Start 全 0;
+   **输入输出缓冲都在流动**——[in] GetBuffer(码流送入)与
+   [out] UpdateOutputCache/GetBuffer(解码帧产出且被引擎取走)。
+2. **但 Chromium ~100ms 即销毁解码器并重建**(00:07:54→58→08:02→
+   08:29 循环,MutePlaying 两段),最终渲染层报解码错误。解码帧
+   已产出且被消费,屏幕仍黑 → 断裂点在**闭源桥接的帧→surface
+   渲染路径**(或 HEVC 位流转换层,libelectron 内有
+   h265_annex_b_to_hevc_bitstream_converter 与"必须填写
+   description 字段"的字符串证据)。这是第二层引擎缺陷,Configure
+   垫片(已修复的第一层)不可达。
+3. **8K 双格式均拒**(NV12→3,SURFACE_FORMAT→3)= 设备能力上限,
+   归入上游能力矩阵问题。
+4. **垫片 v3**(最后一个编解码层可调变量):pixel_format 注入顺序
+   改为 **SURFACE_FORMAT 优先**(HAL 按 surface 队列原生格式输出,
+   消除"HAL 强制 NV12 vs 桥接 surface 期望格式"的失配假设——
+   与输出格式 video_graphic_pixel_format=24 的观察一致),
+   Configure 失败回退 NV12(96f 已证 1080p 可过)。
+5. **判读**:v3 下 1080p 若能播放 = 格式失配假设成立,收工;若仍
+   黑屏 = 渲染路径缺陷确证,垫片层无更多杠杆——转 H.264 软解
+   (现状可播)或以两层缺陷的完整证据链(本登记表 95b-96g)向
+   SIG/华为反馈;对闭源渲染路径做 arm64 盲改不建议(证据面不足,
+   无日志可视性)。
+
 **第 96 轮补充(96e):探针改为应用内 N-API 插件(shell 域被 SELinux 拦截)**
 
 hdc 部署 /data/local/tmp/ohprobe 实测失败:`ls -laZ` 显示标签正确
