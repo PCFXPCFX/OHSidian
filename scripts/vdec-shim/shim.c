@@ -67,11 +67,6 @@
 #define EGL_OPENGL_ES3_BIT 0x0040
 #endif
 
-/* gl2ext.h only declares this under GL_GLEXT_PROTOTYPES; declare it here -
-   the symbol is exported by libGLESv2.so (verified in the NDK stub). */
-GL_APICALL void GL_APIENTRY glEGLImageTargetTexture2DOES(GLenum target,
-    GLeglImageOES image);
-
 #undef LOG_DOMAIN
 #undef LOG_TAG
 #define LOG_DOMAIN 0x0000
@@ -219,6 +214,135 @@ static GLint gScaleLoc = -1;
 static int gEglReady = 0;
 static int gIsES3 = 0;
 static int gGpuDead = 0;
+
+/* ===== GLES entry points via eglGetProcAddress (round 98c). Direct
+   linkage to libGLESv2.so is INERT on this stack: eglCreateContext and
+   eglMakeCurrent succeed, but every directly-linked gl* call no-ops
+   (glCreateShader -> 0 with err 0x0; device log 02:38) - the front
+   library is not wired to the loaded vendor driver for our client.
+   EGL_KHR_get_all_proc_addresses IS advertised (device dump), so resolve
+   the whole set through EGL, exactly like the engine does. ===== */
+typedef GLuint (*PFN_glCreateShader)(GLenum type);
+typedef void (*PFN_glShaderSource)(GLuint shader, GLsizei count,
+    const GLchar *const *string, const GLint *length);
+typedef void (*PFN_glCompileShader)(GLuint shader);
+typedef void (*PFN_glGetShaderiv)(GLuint shader, GLenum pname, GLint *params);
+typedef void (*PFN_glGetShaderInfoLog)(GLuint shader, GLsizei bufSize,
+    GLsizei *length, GLchar *infoLog);
+typedef void (*PFN_glDeleteShader)(GLuint shader);
+typedef GLenum (*PFN_glGetError)(void);
+typedef GLuint (*PFN_glCreateProgram)(void);
+typedef void (*PFN_glAttachShader)(GLuint program, GLuint shader);
+typedef void (*PFN_glLinkProgram)(GLuint program);
+typedef void (*PFN_glGetProgramiv)(GLuint program, GLenum pname, GLint *params);
+typedef void (*PFN_glGetProgramInfoLog)(GLuint program, GLsizei bufSize,
+    GLsizei *length, GLchar *infoLog);
+typedef void (*PFN_glDeleteProgram)(GLuint program);
+typedef GLint (*PFN_glGetAttribLocation)(GLuint program, const GLchar *name);
+typedef GLint (*PFN_glGetUniformLocation)(GLuint program, const GLchar *name);
+typedef void (*PFN_glGenTextures)(GLsizei n, GLuint *textures);
+typedef void (*PFN_glBindTexture)(GLenum target, GLuint texture);
+typedef void (*PFN_glTexParameteri)(GLenum target, GLenum pname, GLint param);
+typedef void (*PFN_glEGLImageTargetTexture2DOES)(GLenum target,
+    GLeglImageOES image);
+typedef void (*PFN_glGenFramebuffers)(GLsizei n, GLuint *framebuffers);
+typedef void (*PFN_glBindFramebuffer)(GLenum target, GLuint framebuffer);
+typedef void (*PFN_glFramebufferTexture2D)(GLenum target, GLenum attachment,
+    GLenum textarget, GLuint texture, GLint level);
+typedef GLenum (*PFN_glCheckFramebufferStatus)(GLenum target);
+typedef void (*PFN_glViewport)(GLint x, GLint y, GLsizei w, GLsizei h);
+typedef void (*PFN_glUseProgram)(GLuint program);
+typedef void (*PFN_glUniform2f)(GLint location, GLfloat x, GLfloat y);
+typedef void (*PFN_glVertexAttribPointer)(GLuint index, GLint size,
+    GLenum type, GLboolean normalized, GLsizei stride, const void *pointer);
+typedef void (*PFN_glEnableVertexAttribArray)(GLuint index);
+typedef void (*PFN_glDrawArrays)(GLenum mode, GLint first, GLsizei count);
+typedef void (*PFN_glFinish)(void);
+typedef const GLubyte *(*PFN_glGetString)(GLenum name);
+
+static PFN_glCreateShader pglCreateShader;
+static PFN_glShaderSource pglShaderSource;
+static PFN_glCompileShader pglCompileShader;
+static PFN_glGetShaderiv pglGetShaderiv;
+static PFN_glGetShaderInfoLog pglGetShaderInfoLog;
+static PFN_glDeleteShader pglDeleteShader;
+static PFN_glGetError pglGetError;
+static PFN_glCreateProgram pglCreateProgram;
+static PFN_glAttachShader pglAttachShader;
+static PFN_glLinkProgram pglLinkProgram;
+static PFN_glGetProgramiv pglGetProgramiv;
+static PFN_glGetProgramInfoLog pglGetProgramInfoLog;
+static PFN_glDeleteProgram pglDeleteProgram;
+static PFN_glGetAttribLocation pglGetAttribLocation;
+static PFN_glGetUniformLocation pglGetUniformLocation;
+static PFN_glGenTextures pglGenTextures;
+static PFN_glBindTexture pglBindTexture;
+static PFN_glTexParameteri pglTexParameteri;
+static PFN_glEGLImageTargetTexture2DOES pglEGLImageTargetTexture2DOES;
+static PFN_glGenFramebuffers pglGenFramebuffers;
+static PFN_glBindFramebuffer pglBindFramebuffer;
+static PFN_glFramebufferTexture2D pglFramebufferTexture2D;
+static PFN_glCheckFramebufferStatus pglCheckFramebufferStatus;
+static PFN_glViewport pglViewport;
+static PFN_glUseProgram pglUseProgram;
+static PFN_glUniform2f pglUniform2f;
+static PFN_glVertexAttribPointer pglVertexAttribPointer;
+static PFN_glEnableVertexAttribArray pglEnableVertexAttribArray;
+static PFN_glDrawArrays pglDrawArrays;
+static PFN_glFinish pglFinish;
+static PFN_glGetString pglGetString;
+
+#define GLPROC(var, name) \
+    do { \
+        (var) = (typeof(var))(void *)eglGetProcAddress(name); \
+        if ((var) == NULL) { \
+            SHIM_LOGE("gpu: eglGetProcAddress(%{public}s) -> NULL", name); \
+            return 0; \
+        } \
+    } while (0)
+
+static int gpuResolveProcs(void)
+{
+    static int done = 0;
+    if (done) {
+        return 1;
+    }
+    GLPROC(pglCreateShader, "glCreateShader");
+    GLPROC(pglShaderSource, "glShaderSource");
+    GLPROC(pglCompileShader, "glCompileShader");
+    GLPROC(pglGetShaderiv, "glGetShaderiv");
+    GLPROC(pglGetShaderInfoLog, "glGetShaderInfoLog");
+    GLPROC(pglDeleteShader, "glDeleteShader");
+    GLPROC(pglGetError, "glGetError");
+    GLPROC(pglCreateProgram, "glCreateProgram");
+    GLPROC(pglAttachShader, "glAttachShader");
+    GLPROC(pglLinkProgram, "glLinkProgram");
+    GLPROC(pglGetProgramiv, "glGetProgramiv");
+    GLPROC(pglGetProgramInfoLog, "glGetProgramInfoLog");
+    GLPROC(pglDeleteProgram, "glDeleteProgram");
+    GLPROC(pglGetAttribLocation, "glGetAttribLocation");
+    GLPROC(pglGetUniformLocation, "glGetUniformLocation");
+    GLPROC(pglGenTextures, "glGenTextures");
+    GLPROC(pglBindTexture, "glBindTexture");
+    GLPROC(pglTexParameteri, "glTexParameteri");
+    GLPROC(pglEGLImageTargetTexture2DOES, "glEGLImageTargetTexture2DOES");
+    GLPROC(pglGenFramebuffers, "glGenFramebuffers");
+    GLPROC(pglBindFramebuffer, "glBindFramebuffer");
+    GLPROC(pglFramebufferTexture2D, "glFramebufferTexture2D");
+    GLPROC(pglCheckFramebufferStatus, "glCheckFramebufferStatus");
+    GLPROC(pglViewport, "glViewport");
+    GLPROC(pglUseProgram, "glUseProgram");
+    GLPROC(pglUniform2f, "glUniform2f");
+    GLPROC(pglVertexAttribPointer, "glVertexAttribPointer");
+    GLPROC(pglEnableVertexAttribArray, "glEnableVertexAttribArray");
+    GLPROC(pglDrawArrays, "glDrawArrays");
+    GLPROC(pglFinish, "glFinish");
+    GLPROC(pglGetString, "glGetString");
+    done = 1;
+    SHIM_LOGI("gpu: %d GLES entry points resolved via eglGetProcAddress", 31);
+    return 1;
+}
+
 static pthread_t gEglOwner;
 static int gEglOwnerValid = 0;
 
@@ -297,27 +421,27 @@ static void gpuLogText(const char *what, const char *s)
 
 static GLuint gpuCompile(GLenum type, const char *src)
 {
-    GLuint sh = glCreateShader(type);
+    GLuint sh = pglCreateShader(type);
     if (sh == 0) {
-        SHIM_LOGE("gpu: glCreateShader(%{public}u) -> 0 (err 0x%{public}x)",
-            (unsigned)type, (unsigned)glGetError());
+        SHIM_LOGE("gpu: pglCreateShader(%{public}u) -> 0 (err 0x%{public}x)",
+            (unsigned)type, (unsigned)pglGetError());
         return 0;
     }
-    glShaderSource(sh, 1, &src, NULL);
-    glCompileShader(sh);
+    pglShaderSource(sh, 1, &src, NULL);
+    pglCompileShader(sh);
     GLint ok = 0;
-    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    pglGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
     if (!ok) {
         char log[1024];
         GLsizei n = 0;
         log[0] = '\0';
-        glGetShaderInfoLog(sh, (GLsizei)sizeof(log) - 1, &n, log);
+        pglGetShaderInfoLog(sh, (GLsizei)sizeof(log) - 1, &n, log);
         if (n < 0 || n >= (GLsizei)sizeof(log)) {
             n = (GLsizei)sizeof(log) - 1;
         }
         log[n] = '\0';
         gpuLogText(type == GL_VERTEX_SHADER ? "VS compile" : "FS compile", log);
-        glDeleteShader(sh);
+        pglDeleteShader(sh);
         return 0;
     }
     return sh;
@@ -330,34 +454,34 @@ static GLuint gpuBuildProgram(int es3)
     GLuint vs = gpuCompile(GL_VERTEX_SHADER, vsh);
     GLuint fs = gpuCompile(GL_FRAGMENT_SHADER, fsh);
     if (vs == 0 || fs == 0) {
-        if (vs != 0) glDeleteShader(vs);
-        if (fs != 0) glDeleteShader(fs);
+        if (vs != 0) pglDeleteShader(vs);
+        if (fs != 0) pglDeleteShader(fs);
         return 0;
     }
-    GLuint prog = glCreateProgram();
+    GLuint prog = pglCreateProgram();
     if (prog == 0) {
-        glDeleteShader(vs);
-        glDeleteShader(fs);
+        pglDeleteShader(vs);
+        pglDeleteShader(fs);
         return 0;
     }
-    glAttachShader(prog, vs);
-    glAttachShader(prog, fs);
-    glLinkProgram(prog);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
+    pglAttachShader(prog, vs);
+    pglAttachShader(prog, fs);
+    pglLinkProgram(prog);
+    pglDeleteShader(vs);
+    pglDeleteShader(fs);
     GLint ok = 0;
-    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    pglGetProgramiv(prog, GL_LINK_STATUS, &ok);
     if (!ok) {
         char log[1024];
         GLsizei n = 0;
         log[0] = '\0';
-        glGetProgramInfoLog(prog, (GLsizei)sizeof(log) - 1, &n, log);
+        pglGetProgramInfoLog(prog, (GLsizei)sizeof(log) - 1, &n, log);
         if (n < 0 || n >= (GLsizei)sizeof(log)) {
             n = (GLsizei)sizeof(log) - 1;
         }
         log[n] = '\0';
         gpuLogText("program link", log);
-        glDeleteProgram(prog);
+        pglDeleteProgram(prog);
         return 0;
     }
     return prog;
@@ -393,7 +517,7 @@ static int gpuSetup(EGLConfig cfg, int es3)
     static int gGlExtLogged = 0;
     if (!gGlExtLogged) {
         gGlExtLogged = 1;
-        const GLubyte *glext = glGetString(GL_EXTENSIONS);
+        const GLubyte *glext = pglGetString(GL_EXTENSIONS);
         gpuLogText("GL_EXTENSIONS", glext != NULL ? (const char *)glext : "(null)");
     }
     gProg = gpuBuildProgram(es3);
@@ -401,11 +525,11 @@ static int gpuSetup(EGLConfig cfg, int es3)
         SHIM_LOGE("gpu: program build failed (ES%{public}d)", es3 ? 3 : 2);
         return 0;
     }
-    gAPos = glGetAttribLocation(gProg, "aPos");
-    gScaleLoc = glGetUniformLocation(gProg, "uScale");
-    glGenTextures(1, &gSrcTex);
-    glGenTextures(1, &gDstTex);
-    glGenFramebuffers(1, &gFbo);
+    gAPos = pglGetAttribLocation(gProg, "aPos");
+    gScaleLoc = pglGetUniformLocation(gProg, "uScale");
+    pglGenTextures(1, &gSrcTex);
+    pglGenTextures(1, &gDstTex);
+    pglGenFramebuffers(1, &gFbo);
     gIsES3 = es3;
     return 1;
 }
@@ -451,6 +575,10 @@ static int gpuInit(void)
             gEglExtLogged = 1;
             const char *eglext = eglQueryString(gEglDpy, EGL_EXTENSIONS);
             gpuLogText("EGL_EXTENSIONS", eglext != NULL ? eglext : "(null)");
+        }
+        if (!gpuResolveProcs()) {
+            gGpuDead = 1;
+            return 0;
         }
     }
     if (gEglCreateImage == NULL) {
@@ -661,7 +789,7 @@ static void relayOnFrame(void *context)
         gImageRelBuf(gConsumer, srcWinBuf, srcFence);
         return;
     }
-    glUseProgram(gProg);
+    pglUseProgram(gProg);
     float scaleX = 1.0f;
     float scaleY = 1.0f;
     int stride = queryFmtInt("stride", 0);
@@ -672,41 +800,41 @@ static void relayOnFrame(void *context)
     if (sliceH > gRelayH && gRelayH > 0) {
         scaleY = (float)gRelayH / (float)sliceH;
     }
-    glUniform2f(gScaleLoc, scaleX, scaleY);
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, gSrcTex);
-    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)srcImg);
-    glBindTexture(GL_TEXTURE_2D, gDstTex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)dstImg);
-    glBindFramebuffer(GL_FRAMEBUFFER, gFbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+    pglUniform2f(gScaleLoc, scaleX, scaleY);
+    pglBindTexture(GL_TEXTURE_EXTERNAL_OES, gSrcTex);
+    pglTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    pglTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    pglTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    pglTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    pglEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)srcImg);
+    pglBindTexture(GL_TEXTURE_2D, gDstTex);
+    pglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    pglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    pglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    pglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    pglEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)dstImg);
+    pglBindFramebuffer(GL_FRAMEBUFFER, gFbo);
+    pglFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
         gDstTex, 0);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+    if (pglCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         SHIM_LOGE("gpu: FBO incomplete");
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        pglBindFramebuffer(GL_FRAMEBUFFER, 0);
         gEglDestroyImage(gEglDpy, srcImg);
         gEglDestroyImage(gEglDpy, dstImg);
         gImageRelBuf(gConsumer, srcWinBuf, srcFence);
         return;
     }
-    glViewport(0, 0, gRelayW, gRelayH);
+    pglViewport(0, 0, gRelayW, gRelayH);
     {
         static const float quad[8] = {
             -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f
         };
-        glVertexAttribPointer(gAPos, 2, GL_FLOAT, GL_FALSE, 0, quad);
-        glEnableVertexAttribArray(gAPos);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        pglVertexAttribPointer(gAPos, 2, GL_FLOAT, GL_FALSE, 0, quad);
+        pglEnableVertexAttribArray(gAPos);
+        pglDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
-    glFinish();
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    pglFinish();
+    pglBindFramebuffer(GL_FRAMEBUFFER, 0);
     gEglDestroyImage(gEglDpy, srcImg);
     gEglDestroyImage(gEglDpy, dstImg);
 
@@ -761,7 +889,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7b loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7c loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());

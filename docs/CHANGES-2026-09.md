@@ -4365,6 +4365,32 @@ require` 在该驱动的 ESSL 1.00 编译器不通过(扩展不存在,或仅以
 报错——若 GL 扩展表里两个 external 变体都没有,则 GPU 采样路线
 在该驱动不可行,转入垫片内置软解(libde265/ffmpeg hevc)。
 
+**第 98 轮修订(98c,02:38 日志):根因反转——不是着色器问题,是
+直接链接的 GLES 入口整组惰性;全部改经 eglGetProcAddress 解析**
+
+02:38 实测(进程 17994,shim v7b)拿到了决定性诊断:EGL 扩展表
+完整(含 `EGL_KHR_get_all_proc_addresses`、`EGL_KHR_image_base`、
+`EGL_KHR_surfaceless_context`),EGL 侧 eglCreateContext/pbuffer/
+makeCurrent 全部成功,但 `glGetString(GL_EXTENSIONS)` 返回 null,
+**`glCreateShader` 对 ES2/ES3 两路都返回 0 且 `glGetError()==0x0`
+(无错误!)**——这不是编译/扩展问题,是直接链接到 libGLESv2.so 的
+入口在本客户端进程内没有接线到已加载的 GPU 驱动,调用静默空操作
+(前置分发库未为本客户端安装驱动钩子;引擎自身经 EGL 取 GL 入口,
+所以引擎的 GL 正常)。
+
+修复(98c):删掉 `-lGLESv2` 直接链接与 glEGLImageTargetTexture2DOES
+原型声明,31 个 GLES 入口(glCreateShader…glFinish,含外部纹理
+扩展入口)全部改为 gpuInit 时经 `eglGetProcAddress` 逐个解析,
+任一为 NULL 即报错退出;DT_NEEDED 只剩 libhilog/libnative_media_
+core/libEGL/libc(readelf 验证 0 个 GL 未定义导入)。EGL 侧保持
+直接链接(设备已证明可用)。产物 40.9KB(shim v7c)。
+
+判定(重测):`shim v7c loaded` → `gpu: N GLES entry points
+resolved` → `relay engaged` → `gpu: EGL+GLES ES2/ES3 ready on
+frame thread` → `relayed N frames (..., gpu yuv->rgba)` 增长 +
+画面正常 = 应用内 HEVC 播放打通。若再失败,日志会给出确切的
+着色器编译报错或 eglGetProcAddress 缺口,不再有猜测空间。
+
 
 
 
