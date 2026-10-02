@@ -4453,6 +4453,41 @@ GRALLOC `Plateform not support noipc` 警告恰在首次 RequestBuffer
 `relayed N frames` 增长 + 画面正常(内容对但颠倒→改顶点着色器
 一行;颜色偏紫/绿→10-bit 采样路径需再查)。
 
+**第 98 轮修订(98f,02:57 日志):首帧打通但只有 1 帧——fd 生命周期
+bug:ReleaseNativeWindowBuffer 收到已 close 的 fence,HAL 等不到
+释放信号永远不解码帧 2;修复 + 输出槽释放诊断**
+
+02:57 实测(进程 29815,v7e):**`relayed 1 frames` 首次出现**——
+EGLImage 导入→GL 绘制→glFinish→FlushBuffer 全链 7ms 完成,GPU
+转换管线正式打通。但 worker 泵完预算(3 次 acquire,后两次
+"no dirty buffer")后,**帧 2 的回调永远没来**,265ms 后音频
+drain+stop、解码器被拆(与历次 ~300ms 提前中止一致)。
+
+根因(98e 引入):relayOneFrame 在 waitFence(srcFence) 后立即
+`close(srcFence)`,但后续所有路径(包括成功路径)仍把该已关闭的
+fd 传给 `OH_NativeImage_ReleaseNativeWindowBuffer`。该 fence 是
+消费者归还缓冲给生产者(解码器 HAL)的同步信号——HAL 等一个悬空
+fd 号,帧 1 的输出槽永不释放,HAL 不解码帧 2(若 fd 号被复用则
+更糟)。这与"帧回调只来一次"完美吻合;也解释了 v7d 前各轮从未
+见过 relayed>1(此前帧 1 都没走完)。
+
+修复(98f,shim v7f,42.2KB):
+1. fence 生命周期理顺:waitFence 后 close 并置 -1,Release 一律
+   传 -1(我们已自行等待,与 OHOS surface_image.cpp 同模式);
+2. FlushBuffer 的 damage region 从空改为全画面 Rect(部分
+   BufferQueue 脏缓冲记账依赖非空 region,02:57 的
+   "no dirty buffer" 缓存日志为旁证),并记录 flush 返回值;
+3. 决定性诊断:垫片转发层记录 RenderOutputData/RenderOutputBuffer/
+   FreeOutputData 调用计数(前 8 次全打,此后每 120 次打一次)——
+   桥接侧若持续放行输出槽,`RenderOutputData #N` 会随帧增长;
+   若停在 #1,则桥接侧在帧 1 的 VideoFrame 交付前卡住,问题
+   在我们的 flush 与桥接帧工厂之间。
+
+判定(重测):`relayed N frames` 增长且 `RenderOutputData #N`
+同步增长 = 管线循环闭合,画面正常即成功;若 relayed 停在 1 且
+RenderOutputData 停在 1,把日志贴来——那说明桥接的帧工厂没吃下
+我们 flush 的缓冲,需对照其 NativeImage 更新路径再修。
+
 
 
 

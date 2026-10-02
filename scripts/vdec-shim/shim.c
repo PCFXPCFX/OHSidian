@@ -718,13 +718,14 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
     }
     waitFence(srcFence);
     close(srcFence);
+    srcFence = -1;
 
     if (!gGeomSet && gRelayW > 0 && gRelayH > 0) {
         gHandleOpt(origWin, SET_BUFFER_GEOMETRY, gRelayW, gRelayH);
         gGeomSet = 1;
     }
     if (!gpuInit()) {
-        gImageRelBuf(consumer, srcWinBuf, srcFence);
+        gImageRelBuf(consumer, srcWinBuf, -1);
         return 1;
     }
 
@@ -732,7 +733,7 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
     int dstFence = -1;
     if (gReqBuffer == NULL ||
         gReqBuffer(origWin, &dstWinBuf, &dstFence) != 0 || dstWinBuf == NULL) {
-        gImageRelBuf(consumer, srcWinBuf, srcFence);
+        gImageRelBuf(consumer, srcWinBuf, -1);
         return 1;
     }
     waitFence(dstFence);
@@ -762,7 +763,7 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
         if (dstImg != EGL_NO_IMAGE_KHR) {
             gEglDestroyImage(gEglDpy, dstImg);
         }
-        gImageRelBuf(consumer, srcWinBuf, srcFence);
+        gImageRelBuf(consumer, srcWinBuf, -1);
         return 1;
     }
     pglUseProgram(gProg);
@@ -787,7 +788,7 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
         pglBindFramebuffer(GL_FRAMEBUFFER, 0);
         gEglDestroyImage(gEglDpy, srcImg);
         gEglDestroyImage(gEglDpy, dstImg);
-        gImageRelBuf(consumer, srcWinBuf, srcFence);
+        gImageRelBuf(consumer, srcWinBuf, -1);
         return 1;
     }
     pglViewport(0, 0, gRelayW, gRelayH);
@@ -804,15 +805,27 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
     gEglDestroyImage(gEglDpy, srcImg);
     gEglDestroyImage(gEglDpy, dstImg);
 
+    /* Full-rect damage region: some BufferQueue dirty-accounting paths
+       need a non-empty region for the buffer to become acquirable by the
+       bridge's consumer (the "no dirty buffer" cache log at 02:57). */
+    struct Rect dmg;
+    dmg.x = 0;
+    dmg.y = 0;
+    dmg.w = gRelayW;
+    dmg.h = gRelayH;
     Region region;
-    region.rects = NULL;
-    region.rectNumber = 0;
-    gFlushBuffer(origWin, dstWinBuf, -1, region);
-    gImageRelBuf(consumer, srcWinBuf, srcFence);
+    region.rects = &dmg;
+    region.rectNumber = 1;
+    int flushRet = gFlushBuffer(origWin, dstWinBuf, -1, region);
+    /* fence -1: we waited and closed the acquire fence ourselves; the
+       release must NOT hand a stale/closed fd to the producer or the HAL
+       blocks before decoding frame 2 (98f root cause: only 1 frame ever
+       relayed) */
+    gImageRelBuf(consumer, srcWinBuf, -1);
     gRelayFrames++;
     if ((gRelayFrames % 60) == 1) {
-        SHIM_LOGI("relayed %{public}ld frames (%{public}dx%{public}d, gpu yuv->rgba)",
-            gRelayFrames, gRelayW, gRelayH);
+        SHIM_LOGI("relayed %{public}ld frames (%{public}dx%{public}d, gpu yuv->rgba, flush %{public}d)",
+            gRelayFrames, gRelayW, gRelayH, flushRet);
     }
     return 1;
 }
@@ -914,7 +927,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7e loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7f loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());
@@ -1203,18 +1216,35 @@ OH_AVErrCode OH_VideoDecoder_PushInputBuffer(OH_AVCodec *codec, uint32_t index)
     return gPushInputBuffer ? gPushInputBuffer(codec, index) : AV_ERR_UNKNOWN;
 }
 
+/* Output-slot release diagnostics (98f): the codec produces frame N+1 only
+   after the bridge releases frame N's slot via RenderOutputData. Logging
+   these shows exactly where the pipeline stalls. */
+static long gRenderCalls = 0;
+
 OH_AVErrCode OH_VideoDecoder_RenderOutputData(OH_AVCodec *codec, uint32_t index)
 {
+    gRenderCalls++;
+    if (gRenderCalls <= 8 || (gRenderCalls % 120) == 0) {
+        SHIM_LOGI("RenderOutputData #%{public}ld idx=%{public}u", gRenderCalls, index);
+    }
     return gRenderOutputData ? gRenderOutputData(codec, index) : AV_ERR_UNKNOWN;
 }
 
 OH_AVErrCode OH_VideoDecoder_RenderOutputBuffer(OH_AVCodec *codec, uint32_t index)
 {
+    gRenderCalls++;
+    if (gRenderCalls <= 8 || (gRenderCalls % 120) == 0) {
+        SHIM_LOGI("RenderOutputBuffer #%{public}ld idx=%{public}u", gRenderCalls, index);
+    }
     return gRenderOutputBuffer ? gRenderOutputBuffer(codec, index) : AV_ERR_UNKNOWN;
 }
 
 OH_AVErrCode OH_VideoDecoder_FreeOutputData(OH_AVCodec *codec, uint32_t index)
 {
+    gRenderCalls++;
+    if (gRenderCalls <= 8 || (gRenderCalls % 120) == 0) {
+        SHIM_LOGI("FreeOutputData #%{public}ld idx=%{public}u", gRenderCalls, index);
+    }
     return gFreeOutputData ? gFreeOutputData(codec, index) : AV_ERR_UNKNOWN;
 }
 
