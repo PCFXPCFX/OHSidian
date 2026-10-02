@@ -3960,6 +3960,41 @@ hilog 是既有事实);补丁 v17→v18 增加两条通道,命令面板
    (95c 的证据包可直接引用);若引擎上游修复 Configure,直接删除
    垫片文件即可回到干净状态。
 
+**第 96 轮补充(96d):垫片遮蔽被引擎绕过——真机日志裁决与探针路线**
+
+用户以 1.3.0 构建(含垫片)真机测试,双份 hilog(23:26/23:27)裁决:
+
+1. **同名遮蔽方案失效**:hilog 全程无 `VdecShim` 行,且出现
+   `load absolute_path /system/lib64/libnative_media_vdec.so`——
+   引擎对 vdec 不是按 soname 常规链接(libelectron 的 DT_NEEDED
+   无此项),而是**硬编码系统绝对路径 dlopen**(字符串
+   "libnative_media_vdec.so" 在 libelectron 中仅一处,目录前缀
+   拼接构造),包内同名垫片从不参与解析。
+2. **重要记录修正**:Configure invalid argument 在**未开启任何
+   旗标**的构建上依旧出现——证明平台硬解路由是**引擎默认行为**,
+   95b/95c 的 enable-features 旗标与路由开关无关(95c"撤旗标保护
+   H.264"的前提不成立;H.264 能播是 avc 的 Configure 恰好被 HAL
+   接受)。双 codec 实例([559]/[560])同败于 Configure。
+3. **改写绝对路径串不可行**:该串由目录前缀+文件名拼接构造,文件名
+   串仅 23 字符 + null,任何可控的绝对路径(应用沙箱/包内 libs 均
+   37+ 字符)都放不下;链接器命名空间亦拦截相对路径搜索
+   (moduleNs_default 未含包内 libs 目录)。
+4. **Plan C:设备端探针(scripts/vdec-shim/probe.c → ohprobe)**。
+   在投入 libelectron arm64 调用点补丁(需 code cave 精准插桩,高风险)
+   之前,先用独立 NDK 探针在真机上实测修复假设:以引擎同款方式
+   dlopen 系统 vdec/core,对 video/hevc 与 video/avc 各做 5 组
+   Configure 实验(仅 w/h=引擎现状;+NV12;+SURFACE_FORMAT;
+   +YUVI420;+RGBA),另打印能力对象的 hardware 属性。构建
+   (本机 DevEco NDK):`clang --target=aarch64-linux-ohos
+   --sysroot=<NDK>/sysroot -O2 probe.c -o ohprobe`。
+   运行:`hdc file send ohprobe /data/local/tmp/ohprobe &&
+   hdc shell chmod +x ... && hdc shell ...`。
+5. **判读决策树**:①hevc 仅 w/h 失败、+NV12 成功 → 假设成立,
+   投入 arm64 调用点补丁(精确插入 SetIntValue)或以完整证据向
+   SIG/华为反馈;②所有 pixel_format 变体均失败 → 桥接缺陷更深
+   (profile/尺寸对齐等),探针逐键扩展试错;③hevc 全部通过 →
+   问题在引擎传入的具体码流参数(尺寸/元数据),属引擎侧调试范畴。
+
 ---
 
 ## 窗口专题总览(第 87-93 轮,2026-10-01)
