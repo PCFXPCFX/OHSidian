@@ -697,26 +697,6 @@ static void cfgDrop(OH_AVCodec *codec)
     }
 }
 
-/* Query the codec's reported stride / slice height from
-   GetOutputDescription. Used to trim codec padding when the EGLImage view
-   of the buffer is larger than the picture (this device reports
-   stride==width, slice==height, so the trim is a no-op here - kept for
-   devices that pad). */
-static int queryFmtInt(const char *key, int fallback)
-{
-    int v = fallback;
-    if (gRelayCodec != NULL && gGetOutputDescription != NULL && gGetIntValue != NULL) {
-        OH_AVFormat *fmt = gGetOutputDescription(gRelayCodec);
-        if (fmt != NULL) {
-            int32_t got = 0;
-            if (gGetIntValue(fmt, key, &got) && got > 0) {
-                v = (int)got;
-            }
-        }
-    }
-    return v;
-}
-
 static void waitFence(int fd)
 {
     if (fd < 0) return;
@@ -726,35 +706,34 @@ static void waitFence(int fd)
     (void)poll(&p, 1, 300);
 }
 
-/* Per-frame relay: runs on the consumer's frame-available thread. */
-static void relayOnFrame(void *context)
+/* Convert one frame on the relay worker thread. Returns 1 when a buffer
+   was consumed from the queue (converted or dropped), 0 when the queue is
+   empty. Parameters are snapshotted under gRelayLock by the pump loop. */
+static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
 {
-    (void)context;
-    if (!gRelayActive || gOrigWin == NULL || gConsumer == NULL) {
-        return;
-    }
     OHNativeWindowBuffer *srcWinBuf = NULL;
     int srcFence = -1;
-    if (gImageAcqBuf(gConsumer, &srcWinBuf, &srcFence) != 0 || srcWinBuf == NULL) {
-        return;
+    if (gImageAcqBuf(consumer, &srcWinBuf, &srcFence) != 0 || srcWinBuf == NULL) {
+        return 0;
     }
     waitFence(srcFence);
+    close(srcFence);
 
     if (!gGeomSet && gRelayW > 0 && gRelayH > 0) {
-        gHandleOpt(gOrigWin, SET_BUFFER_GEOMETRY, gRelayW, gRelayH);
+        gHandleOpt(origWin, SET_BUFFER_GEOMETRY, gRelayW, gRelayH);
         gGeomSet = 1;
     }
     if (!gpuInit()) {
-        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
-        return;
+        gImageRelBuf(consumer, srcWinBuf, srcFence);
+        return 1;
     }
 
     OHNativeWindowBuffer *dstWinBuf = NULL;
     int dstFence = -1;
     if (gReqBuffer == NULL ||
-        gReqBuffer(gOrigWin, &dstWinBuf, &dstFence) != 0 || dstWinBuf == NULL) {
-        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
-        return;
+        gReqBuffer(origWin, &dstWinBuf, &dstFence) != 0 || dstWinBuf == NULL) {
+        gImageRelBuf(consumer, srcWinBuf, srcFence);
+        return 1;
     }
     waitFence(dstFence);
     close(dstFence);
@@ -764,9 +743,12 @@ static void relayOnFrame(void *context)
        FBO. EGL_NATIVE_BUFFER_OHOS takes the OHNativeWindowBuffer ITSELF
        (the driver dereferences it via GetBufferHandleFromNative; passing
        the derived OH_NativeBuffer instead crashes there - device crash
-       02:45, this is the same pattern OHOS's own NativeImage uses). The
-       bridge queue's format/usage is the bridge's own (96g proved its RGBA
-       buffers allocate and import fine) - only the geometry is set once. */
+       02:45). The bridge queue keeps its own format/usage (98e removed a
+       SET_USAGE override: with CPU_READ|MEM_DMA forced on, the first
+       RequestBuffer hit the gralloc "noipc" slow path and blocked ~10s).
+       UV is always 0..1: the external-OES sampler normalizes to the
+       buffer's embedded crop/geometry, which already accounts for the
+       10-bit P010 stride (2x width) this codec emits. */
     EGLImageKHR srcImg = gEglCreateImage(gEglDpy, EGL_NO_CONTEXT,
         EGL_NATIVE_BUFFER_OHOS, (EGLClientBuffer)srcWinBuf, NULL);
     EGLImageKHR dstImg = gEglCreateImage(gEglDpy, EGL_NO_CONTEXT,
@@ -780,21 +762,11 @@ static void relayOnFrame(void *context)
         if (dstImg != EGL_NO_IMAGE_KHR) {
             gEglDestroyImage(gEglDpy, dstImg);
         }
-        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
-        return;
+        gImageRelBuf(consumer, srcWinBuf, srcFence);
+        return 1;
     }
     pglUseProgram(gProg);
-    float scaleX = 1.0f;
-    float scaleY = 1.0f;
-    int stride = queryFmtInt("stride", 0);
-    int sliceH = queryFmtInt("video_slice_height", 0);
-    if (stride > gRelayW && gRelayW > 0) {
-        scaleX = (float)gRelayW / (float)stride;
-    }
-    if (sliceH > gRelayH && gRelayH > 0) {
-        scaleY = (float)gRelayH / (float)sliceH;
-    }
-    pglUniform2f(gScaleLoc, scaleX, scaleY);
+    pglUniform2f(gScaleLoc, 1.0f, 1.0f);
     pglBindTexture(GL_TEXTURE_EXTERNAL_OES, gSrcTex);
     pglTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     pglTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -815,8 +787,8 @@ static void relayOnFrame(void *context)
         pglBindFramebuffer(GL_FRAMEBUFFER, 0);
         gEglDestroyImage(gEglDpy, srcImg);
         gEglDestroyImage(gEglDpy, dstImg);
-        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
-        return;
+        gImageRelBuf(consumer, srcWinBuf, srcFence);
+        return 1;
     }
     pglViewport(0, 0, gRelayW, gRelayH);
     {
@@ -835,13 +807,72 @@ static void relayOnFrame(void *context)
     Region region;
     region.rects = NULL;
     region.rectNumber = 0;
-    gFlushBuffer(gOrigWin, dstWinBuf, -1, region);
-    gImageRelBuf(gConsumer, srcWinBuf, srcFence);
+    gFlushBuffer(origWin, dstWinBuf, -1, region);
+    gImageRelBuf(consumer, srcWinBuf, srcFence);
     gRelayFrames++;
     if ((gRelayFrames % 60) == 1) {
-        SHIM_LOGI("relayed %{public}ld frames (%{public}dx%{public}d, gpu yuv->rgba, scale %.3f/%.3f)",
-            gRelayFrames, gRelayW, gRelayH, scaleX, scaleY);
+        SHIM_LOGI("relayed %{public}ld frames (%{public}dx%{public}d, gpu yuv->rgba)",
+            gRelayFrames, gRelayW, gRelayH);
     }
+    return 1;
+}
+
+/* ===== Relay worker (round 98e). The frame-available callback runs on a
+   BINDER IPC worker thread of the consumer surface (the 02:45 crash and
+   the 02:49 log both show OS_IPC_* as the callback thread). Doing queue
+   requests / gralloc allocation / GPU work from there nests IPC inside
+   IPC delivery and blocked ~10s on the first frame (DFX_BlockMonitor cost
+   5003ms, then the engine watchdog tore the pipeline down at 8s). So the
+   callback only signals this dedicated thread; all conversion work runs
+   here. The thread is created once at first engage and lives for the
+   process (it idles on the condition variable between decoders; the EGL
+   context therefore also survives across decoders on this same
+   thread). ===== */
+static pthread_mutex_t gWakeLock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gWakeCond = PTHREAD_COND_INITIALIZER;
+static int gWake = 0;
+static pthread_mutex_t gPumpLock = PTHREAD_MUTEX_INITIALIZER;
+static int gWorkerStarted = 0;
+
+static void *relayWorkerMain(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&gWakeLock);
+        while (!gWake) {
+            pthread_cond_wait(&gWakeCond, &gWakeLock);
+        }
+        gWake = 0;
+        pthread_mutex_unlock(&gWakeLock);
+
+        pthread_mutex_lock(&gPumpLock);
+        int budget = 3;
+        while (budget-- > 0) {
+            pthread_mutex_lock(&gRelayLock);
+            OH_NativeImage *consumer = gConsumer;
+            OHNativeWindow *origWin = gOrigWin;
+            int active = gRelayActive;
+            pthread_mutex_unlock(&gRelayLock);
+            if (!active || consumer == NULL || origWin == NULL) {
+                break;
+            }
+            if (!relayOneFrame(consumer, origWin)) {
+                break;
+            }
+        }
+        pthread_mutex_unlock(&gPumpLock);
+    }
+    return NULL;
+}
+
+/* Frame-available callback (binder IPC thread): wake the worker only. */
+static void relayOnFrame(void *context)
+{
+    (void)context;
+    pthread_mutex_lock(&gWakeLock);
+    gWake = 1;
+    pthread_cond_signal(&gWakeCond);
+    pthread_mutex_unlock(&gWakeLock);
 }
 
 /* Format-key dump + fix helper (rounds 96c-96h). */
@@ -883,7 +914,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7d loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7e loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());
@@ -967,7 +998,10 @@ OH_AVErrCode OH_VideoDecoder_Destroy(OH_AVCodec *codec)
         /* let an in-flight frame callback finish before tearing the queue
            down (the callback thread may be mid-conversion) */
         usleep(120000);
-        pthread_mutex_lock(&gRelayLock);
+        /* gPumpLock handshake: waits for any in-flight worker pump to exit
+           before the consumer queue dies (a pump stuck in a slow gralloc
+           IPC must not touch a freed consumer) */
+        pthread_mutex_lock(&gPumpLock);
         if (gConsumer != NULL && gImageDestroy != NULL) {
             gImageDestroy(&gConsumer);
         }
@@ -975,6 +1009,7 @@ OH_AVErrCode OH_VideoDecoder_Destroy(OH_AVCodec *codec)
         gOrigWin = NULL;
         gRelayCodec = NULL;
         gGeomSet = 0;
+        pthread_mutex_unlock(&gPumpLock);
         SHIM_LOGI("relay torn down with codec");
     }
     cfgDrop(codec);
@@ -1074,8 +1109,17 @@ OH_AVErrCode OH_VideoDecoder_SetSurface(OH_AVCodec *codec, OHNativeWindow *windo
     gGeomSet = 0;
     gRelayFrames = 0;
     gRelayActive = 1;
+    if (!gWorkerStarted) {
+        pthread_t worker;
+        if (pthread_create(&worker, NULL, relayWorkerMain, NULL) == 0) {
+            gWorkerStarted = 1;
+        } else {
+            SHIM_LOGE("relay worker thread create failed - frames will stall");
+        }
+    }
     pthread_mutex_unlock(&gRelayLock);
-    SHIM_LOGI("relay engaged: %{public}dx%{public}d NV12 -> RGBA into bridge window", w, h);
+    SHIM_LOGI("relay engaged: %{public}dx%{public}d NV12 -> RGBA into bridge window (worker %{public}d)",
+        w, h, gWorkerStarted);
     return r;
 }
 

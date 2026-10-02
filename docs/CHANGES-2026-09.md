@@ -4422,6 +4422,37 @@ waitFence 顺位提前。产物 40.8KB(shim v7d)。
 pixel_format 注入、队列格式、中继接管、GLES 入口解析、着色器、
 EGLImage 导入)。画面若上下颠倒,改顶点着色器 Y 映射一行即可。
 
+**第 98 轮修订(98e,02:49 日志):崩溃已修;新症结是帧回调跑在
+binder IPC 线程上做重活导致 10 秒嵌套 IPC 阻塞——改专职中继线程,
+并撤销对桥接窗口的 SET_USAGE、固定 UV=1(10-bit 发现)**
+
+02:49 实测(进程 24295,v7d):无崩溃,`ES2 ready` 落地,但帧回调
+线程(24447,即崩溃报告里的 OS_IPC_3——**消费者表面回调跑在 binder
+IPC 工作线程上**)在首次 RequestBuffer 后沉默约 10 秒,
+`DFX_BlockMonitor cost 5003 ms`(嵌套 IPC 超时)+ 紧随
+`BufferConverter stride<=0`;无 relayed 帧,引擎 8s 看门狗拆管线。
+GRALLOC `Plateform not support noipc` 警告恰在首次 RequestBuffer
+处出现。另一发现:**该 1080p 文件是 10-bit HEVC**
+(`pixel_format_string = NV12_10bit`,P010,第二份格式 stride=3840
+=2 倍宽)——EXTERNAL_OES 按缓冲元数据归一化坐标,10-bit 可直接
+采样,但 v7 的 stride 修剪会算出 1920/3840=0.5 只采左半边。
+
+修复(98e,shim v7e):
+1. **专职中继工作线程**:relayOnFrame(IPC 线程)只发条件变量唤醒;
+   常驻 worker 线程(gPumpLock 保护,每次唤醒最多泵 3 帧)做全部
+   acquire/RequestBuffer/EGL/FlushBuffer——消除嵌套 IPC 死锁,
+   EGL 上下文也随常驻线程跨解码器存活;Destroy 侧改为 gPumpLock
+   握手等待在飞行泵退出再销毁消费者;
+2. **撤销对桥接窗口的 SET_USAGE**(98 遗留):CPU_READ|MEM_DMA 组合
+   把首次分配推入 noipc 慢速路径;96g 早已证明默认 usage 可分配
+   可导入;
+3. **UV 恒 1.0**(删 queryFmtInt 修剪):外部纹理按缓冲自带
+   crop/geometry 归一化,10-bit P010 双倍 stride 由驱动消化;
+   另补 srcFence 的 close(修每帧 fd 泄漏)。
+产物 41.6KB。判定:`relay engaged (worker 1)` → `ES2 ready` →
+`relayed N frames` 增长 + 画面正常(内容对但颠倒→改顶点着色器
+一行;颜色偏紫/绿→10-bit 采样路径需再查)。
+
 
 
 
