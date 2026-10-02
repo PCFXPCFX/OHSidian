@@ -3783,6 +3783,40 @@ UI 可操作,文件延迟落位无 ANR;⑦文件管理器拖入同一文件:行�
 修改前一致(直通不复制);⑧hilog 观察 `BackPressBridge: back press
 published` seq 单调递增。
 
+**第 96 轮复核(自查审计,与本登记表同等标准)**:
+
+1. **跨提交交叉影响排查(94→96)**:BackPressBridge 的 `.bp.tmp`
+   与 round 94 几何写者的 `.tmp` 后缀隔离,多进程若成立也不互踩;
+   backPress 字段对 mode.json 全部既有读者透明(ArkTS 几何写者的
+   unchanged 比对、渲染层各消费者、主进程 default-vault/清理读取
+   均按键取值,无结构校验);95b 与 96 的 extraFlags 两项并存
+   (--enable-features 与 --disable-features 独立解析);verify-asar
+   标记链 v16 完整;原子发布(rename)保证渲染层 200ms 轮询读不到
+   撕裂内容。
+2. **返回手势覆盖边界(补记)**:onBackPress 覆盖 Index(Entry+Stateless
+   两类窗口)与 WindowNode(BrowserAbility)页面;Login、
+   EmbeddedWindow、StatusBarPage 等辅助页面保持系统默认行为(它们
+   不是"笔记窗口",退出语义可接受);原生子窗口(MessageBox 等)
+   聚焦时的返回分发目标未确认——最坏情况是手势被消费但无动作
+   (窗口不再被销毁),已列入真机回归④的观察项。
+3. **分区旗标的隐私权衡(补记)**:关闭 ThirdPartyStoragePartitioning
+   恢复 Chromium 115 前的行为——内嵌第三方 frame 与其顶层站点共享
+   存储,这是登录持久化的机制本身,代价是嵌入内容可跨所嵌入页面
+   跟踪;旗标在打包 JSON 中,可按行删除回退,用户层
+   ohsidian-flags-user.json 可覆盖。未注入 --disable-site-isolation
+   等更强的降安全开关(方案的安全边界要求)。
+4. **异步复制语义确认**:copyFile Promise 在内部线程执行,fd 于
+   await 落定后在 finally 关闭;多文件保持串行(await 循环),内存
+   峰值不变;复制期间的第二次拖入会得到独立的 destPath(Date.now()
+   命名),无互踩;错误路径保持原语义(resolve 失败 → 保留原始
+   uri → 引擎降级为链接行为)。
+5. **其余确认无问题**:lastBackSeq 启动播种 + ArkTS 写侧对已发布
+   文件单调,跨重启无幽灵返回且首手势不丢;多窗口消费按焦点路由,
+   非聚焦窗口的 lastBackSeq 推进不影响聚焦窗口;引擎 flags 用户层
+   在打包 JSON 损坏时仍可用(packaged 失败重置与用户层加载相互
+   独立);用户层文件变更需重启生效(每进程读取一次,已补记入
+   flags JSON 注释)。
+
 ---
 
 ## 窗口专题总览(第 87-93 轮,2026-10-01)
