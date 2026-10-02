@@ -4284,6 +4284,26 @@ into bridge window`、Prepare/Start 全 0——中继正式接管。
 UV 紧随 Y)手工计算 NV12 布局;目标 RGBA 缓冲同理回退
 (stride=width×4)。27.9KB。
 
+**第 97 轮修订(97d,01:56 日志):MapPlanes 失败确认 + Map 回退未
+生效——根因是硬件视频缓冲默认不可 CPU 映射;给中继队列加 CPU
+usage 位**
+
+97c 日志分析:回退链、中继接管全就位,但 MapPlanes 失败后新增的
+Map 回退日志未出现——`OH_NativeBuffer_Map` 对解码器输出的
+NV12 缓冲**同样失败**:该类缓冲按硬件视频用途分配,默认不给 CPU
+映射权限。CPU 转换通路被缓冲属性挡住(非代码 bug)。
+
+修复(97d,5 行):SetSurface 时对中继窗口执行
+`SET_USAGE(CPU_READ | CPU_WRITE | CPU_READ_OFTEN | MEM_DMA)`——
+消费者侧追加 CPU 用途位,促使队列分配**可 CPU 映射**的 NV12
+缓冲(HAL 写入内容不变,仍是 NV12)。`CPU_READ_OFTEN` 同时避免
+逐帧重映射开销。判定:hilog `src layout via Map fallback:
+stride=1920 sliceH=1080` 出现 = Map 回退生效;随后 `relayed N
+frames` 增长 + 画面正常 = 成功。若 Map 仍失败(硬件强制用途
+无法覆盖),CPU 转换路线终结,后备方案为垫片内置软解
+(libde265/ffmpeg hevc,Main10 支持需 ffmpeg)或 GL shader 转换。
+
+
 
 
 

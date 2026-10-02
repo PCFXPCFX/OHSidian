@@ -596,6 +596,15 @@ OH_AVErrCode OH_VideoDecoder_SetSurface(OH_AVCodec *codec, OHNativeWindow *windo
         return r;
     }
     (void)gHandleOpt(relayWin, SET_FORMAT, (int32_t)NATIVEBUFFER_PIXEL_FMT_YCBCR_420_SP);
+    /* Round 97d: request CPU-readable buffer allocation on the relay queue.
+       The codec's output buffers defaulted to hardware-only usage and
+       OH_NativeBuffer_Map failed (CPU conversion impossible). Adding the
+       CPU usage bits at the CONSUMER side makes the queue allocate
+       CPU-mappable NV12 buffers (the HAL writes NV12 content either way).
+       CPU_READ_OFTEN additionally avoids remap cost per frame. */
+    (void)gHandleOpt(relayWin, SET_USAGE,
+        (int64_t)(NATIVEBUFFER_USAGE_CPU_READ | NATIVEBUFFER_USAGE_CPU_WRITE |
+                  NATIVEBUFFER_USAGE_CPU_READ_OFTEN | NATIVEBUFFER_USAGE_MEM_DMA));
     OH_OnFrameAvailableListener listener;
     listener.context = NULL;
     listener.onFrameAvailable = relayOnFrame;
