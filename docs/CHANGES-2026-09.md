@@ -4303,6 +4303,43 @@ frames` 增长 + 画面正常 = 成功。若 Map 仍失败(硬件强制用途
 无法覆盖),CPU 转换路线终结,后备方案为垫片内置软解
 (libde265/ffmpeg hevc,Main10 支持需 ffmpeg)或 GL shader 转换。
 
+**第 97 轮修订(98,02:25 构建):CPU 映射路线终结——设备实测 97d
+日志证明 Map 回退未执行即 `OH_NativeBuffer_Map` 也失败;转换为
+GPU 着色器通路(shim v7)**
+
+97d 设备日志(进程 62987):中继接管、几何设置全部就位,但仅有一次
+`MapPlanes failed`,**Map 回退日志从未出现**——给队列加 CPU usage
+位后 `OH_NativeBuffer_Map` 对硬件视频缓冲仍失败:该类缓冲物理上
+不可 CPU 映射(消费端 usage 位无法覆盖生产端分配)。CPU 转换路线
+在设备上无执行可能,97c/97d 的双路径 CPU 转换代码删除。
+
+转 GPU 通路(96g 反向利用):96g 曾证明引擎能把该类 NV12 缓冲按
+RGBA 导入 EGLImage 并渲染(内容错但通路通)——即 **GPU 可以采样
+这些缓冲**。shim v7 在帧回调线程上惰性建 EGL 上下文(pbuffer,
+GLES2),每帧:
+1. 源 NV12 缓冲经 `eglCreateImage(EGL_NATIVE_BUFFER_OHOS)` 导入,
+   绑 `GL_TEXTURE_EXTERNAL_OES`——驱动按缓冲自带的色彩元数据
+   (matrix_coefficients=1,BT.709)在采样时完成 YUV→RGB;
+2. 桥接窗口 RequestBuffer 取 RGBA 缓冲,同样导入 EGLImage 绑
+   `GL_TEXTURE_2D` 挂 FBO,画全屏 quad(顶点着色器做 Y 翻转,
+   uScale 按 stride/sliceH 裁掉编码器 padding,本机两者=宽高,
+   实际为 1.0);
+3. `glFinish` 后 FlushBuffer,保证消费方读到完成像素。
+
+细节:eglCreateImage 运行时解析(KHR 后缀优先,EGL 1.5 core 名
+兜底——NDK stub 只导出 core 名);`glEGLImageTargetTexture2DOES`
+由 libGLESv2.so 直接导出(NDK stub 已验证);帧线程随消费队列销毁
+重建时 EGL 上下文在新线程重建(旧上下文/对象随死线程消亡);
+Y 方向按 GL 纹理约定翻转,若真机画面颠倒则只需改顶点着色器一行。
+产物 35.5KB(shim v7),DT_NEEDED 增加 libEGL.so/libGLESv2.so,
+20 个 OH_VideoDecoder_* 导出不变。
+
+判定(重建 HAP 后 hilog):`shim v7 loaded` → `relay engaged` →
+`gpu: EGL+GLES ready on frame thread` → `relayed N frames
+(..., gpu yuv->rgba)` 增长 + 画面正常 = 应用内 HEVC 播放打通。
+若 `gpu: eglCreateImage failed`/`FBO incomplete` 则 GPU 导入被
+驱动拒绝——后备方案仍为垫片内置软解。
+
 
 
 

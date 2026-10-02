@@ -1,5 +1,5 @@
 /*
- * libnative_media_vdec.so shim v6 (round 97) - OHSidian HEVC compat layer.
+ * libnative_media_vdec.so shim v7 (round 98) - OHSidian HEVC compat layer.
  *
  * Root cause chain (proven across rounds 95b-96k, see docs/CHANGES-2026-09.md):
  *  1. The closed-source bridge configures the decoder with width/height only;
@@ -12,13 +12,26 @@
  *     NV12 queue still yields "Failed to create VideoFrame" and the decoder
  *     is torn down ~70ms after start.
  *
- * Round 97 compat layer: a SURFACE RELAY. SetSurface is intercepted; the
+ * Round 97/98 compat layer: a SURFACE RELAY. SetSurface is intercepted; the
  * codec gets a private NV12 consumer queue (OH_ConsumerSurface_Create), and
- * the frame-available callback converts each decoded frame NV12->RGBA
- * (CPU, fixed-point BT.601) into the bridge's original RGBA window. The
- * bridge's frame factory then imports a correctly-filled RGBA buffer - the
- * exact configuration that rendered (garbage) in round 96g, now with
- * correct content.
+ * the frame-available callback converts each decoded frame NV12->RGBA into
+ * the bridge's original RGBA window. The bridge's frame factory then imports
+ * a correctly-filled RGBA buffer - the exact configuration that rendered
+ * (garbage) in round 96g, now with correct content.
+ *
+ * Round 98: the conversion runs ON THE GPU. Device-proven in 97d: the
+ * codec's hardware video buffers cannot be CPU-mapped (OH_NativeBuffer_Map
+ * and MapPlanes both fail even with CPU usage bits requested), so the
+ * fixed-point CPU converter never executed. But the GPU CAN sample those
+ * same buffers (96g rendered their NV12 content through the engine's own
+ * RGBA EGLImage import). So the relay imports the NV12 buffer as an
+ * EGLImage (EGL_NATIVE_BUFFER_OHOS), binds it to a GL_TEXTURE_EXTERNAL_OES
+ * sampler - the driver converts YUV->RGB from the buffer's own color
+ * metadata during sampling - and renders a fullscreen quad through an FBO
+ * into the bridge's RGBA buffer, imported as a 2D-texture EGLImage.
+ * glFinish before FlushBuffer guarantees the consumer reads completed
+ * pixels. eglCreateImage is resolved at runtime (KHR suffix first, EGL 1.5
+ * core name second) because the NDK stub only exports the core name.
  *
  * Everything else forwards 1:1 to the real system libnative_media_vdec.so
  * (dlopen by absolute path). Delete this file from the HAP to remove the
@@ -39,6 +52,22 @@
 #include <native_buffer/native_buffer.h>
 #include <native_window/external_window.h>
 #include <native_image/native_image.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+
+#ifndef EGL_NATIVE_BUFFER_OHOS
+#define EGL_NATIVE_BUFFER_OHOS 0x34E1
+#endif
+#ifndef GL_TEXTURE_EXTERNAL_OES
+#define GL_TEXTURE_EXTERNAL_OES 0x8D65
+#endif
+
+/* gl2ext.h only declares this under GL_GLEXT_PROTOTYPES; declare it here -
+   the symbol is exported by libGLESv2.so (verified in the NDK stub). */
+GL_APICALL void GL_APIENTRY glEGLImageTargetTexture2DOES(GLenum target,
+    GLeglImageOES image);
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -161,6 +190,167 @@ static void *libSym(void **handle, const char *soname, const char *name)
     return sym;
 }
 
+/* ===== GPU conversion (round 98). The codec's NV12 output buffers cannot
+   be CPU-mapped (97d device-proven), but the GPU can sample them (96g). So
+   the relay converts on the GPU: NV12 buffer -> EGLImage -> EXTERNAL_OES
+   sample (driver does YUV->RGB from the buffer's color metadata) -> FBO
+   render into the bridge's RGBA buffer. All GL/EGL objects are created
+   lazily on the frame-available thread; if the frame thread dies with one
+   consumer and a new one appears, the context is rebuilt on the new
+   thread. ===== */
+typedef EGLImageKHR (*PFN_eglCreateImageAny)(EGLDisplay dpy, EGLContext ctx,
+    EGLenum target, EGLClientBuffer buffer, const EGLint *attribs);
+typedef EGLBoolean (*PFN_eglDestroyImageAny)(EGLDisplay dpy, EGLImageKHR image);
+static PFN_eglCreateImageAny gEglCreateImage;
+static PFN_eglDestroyImageAny gEglDestroyImage;
+
+static EGLDisplay gEglDpy = EGL_NO_DISPLAY;
+static EGLContext gEglCtx = EGL_NO_CONTEXT;
+static EGLSurface gEglPbuf = EGL_NO_SURFACE;
+static GLuint gProg = 0;
+static GLuint gSrcTex = 0;
+static GLuint gDstTex = 0;
+static GLuint gFbo = 0;
+static GLint gAPos = -1;
+static GLint gScaleLoc = -1;
+static int gEglReady = 0;
+static pthread_t gEglOwner;
+static int gEglOwnerValid = 0;
+
+static const char *G_VSH =
+    "attribute vec2 aPos;\n"
+    "uniform vec2 uScale;\n"
+    "varying vec2 vUV;\n"
+    "void main() {\n"
+    /* Y is flipped: FBO row 0 (first bytes, which the bridge samples as
+       GL texel (0,0) = bottom) must hold the video's BOTTOM row, i.e. the
+       END of the NV12 buffer. uScale trims codec padding when the output
+       description reports stride/slice height larger than the picture. */
+    "  vUV = vec2((aPos.x * 0.5 + 0.5) * uScale.x, (0.5 - aPos.y * 0.5) * uScale.y);\n"
+    "  gl_Position = vec4(aPos, 0.0, 1.0);\n"
+    "}\n";
+
+/* The driver converts YUV->RGB during the external-OES sample (BT.709 per
+   the buffer's own metadata: matrix_coefficients=1 in the device dump), so
+   the shader is a passthrough. */
+static const char *G_FSH =
+    "#extension GL_OES_EGL_image_external : require\n"
+    "precision mediump float;\n"
+    "varying vec2 vUV;\n"
+    "uniform samplerExternalOES sTex;\n"
+    "void main() {\n"
+    "  gl_FragColor = vec4(texture2D(sTex, vUV).rgb, 1.0);\n"
+    "}\n";
+
+static GLuint gpuCompile(GLenum type, const char *src)
+{
+    GLuint sh = glCreateShader(type);
+    glShaderSource(sh, 1, &src, NULL);
+    glCompileShader(sh);
+    return sh;
+}
+
+static int gpuInit(void)
+{
+    if (gEglReady && gEglOwnerValid && pthread_equal(gEglOwner, pthread_self())) {
+        return 1;
+    }
+    if (gEglReady) {
+        /* the previous frame thread died with its consumer; its context and
+           GL objects die with it - rebuild everything on this thread */
+        SHIM_LOGI("gpu: frame thread changed - rebuilding EGL context");
+        if (gEglDpy != EGL_NO_DISPLAY) {
+            if (gEglPbuf != EGL_NO_SURFACE) {
+                eglDestroySurface(gEglDpy, gEglPbuf);
+            }
+            if (gEglCtx != EGL_NO_CONTEXT) {
+                eglDestroyContext(gEglDpy, gEglCtx);
+            }
+        }
+        gEglPbuf = EGL_NO_SURFACE;
+        gEglCtx = EGL_NO_CONTEXT;
+        gProg = 0;
+        gSrcTex = 0;
+        gDstTex = 0;
+        gFbo = 0;
+        gEglReady = 0;
+        gEglOwnerValid = 0;
+    }
+    if (gEglDpy == EGL_NO_DISPLAY) {
+        gEglDpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        if (gEglDpy == EGL_NO_DISPLAY || !eglInitialize(gEglDpy, NULL, NULL)) {
+            SHIM_LOGE("gpu: eglGetDisplay/Initialize failed");
+            gEglDpy = EGL_NO_DISPLAY;
+            return 0;
+        }
+    }
+    if (gEglCreateImage == NULL) {
+        /* the NDK stub exports only the EGL 1.5 core name; the runtime
+           driver is usually EGL 1.4 with the KHR extension - try both */
+        gEglCreateImage = (PFN_eglCreateImageAny)(void *)eglGetProcAddress("eglCreateImageKHR");
+        if (gEglCreateImage == NULL) {
+            gEglCreateImage = (PFN_eglCreateImageAny)(void *)eglGetProcAddress("eglCreateImage");
+        }
+        gEglDestroyImage = (PFN_eglDestroyImageAny)(void *)eglGetProcAddress("eglDestroyImageKHR");
+        if (gEglDestroyImage == NULL) {
+            gEglDestroyImage = (PFN_eglDestroyImageAny)(void *)eglGetProcAddress("eglDestroyImage");
+        }
+        if (gEglCreateImage == NULL || gEglDestroyImage == NULL) {
+            SHIM_LOGE("gpu: no eglCreateImage/eglDestroyImage entry points");
+            return 0;
+        }
+    }
+    const EGLint cfgAttr[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_NONE
+    };
+    EGLConfig cfg = NULL;
+    EGLint n = 0;
+    if (!eglChooseConfig(gEglDpy, cfgAttr, &cfg, 1, &n) || n < 1) {
+        SHIM_LOGE("gpu: eglChooseConfig failed");
+        return 0;
+    }
+    const EGLint ctxAttr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+    gEglCtx = eglCreateContext(gEglDpy, cfg, EGL_NO_CONTEXT, ctxAttr);
+    if (gEglCtx == EGL_NO_CONTEXT) {
+        SHIM_LOGE("gpu: eglCreateContext failed");
+        return 0;
+    }
+    const EGLint pbAttr[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+    gEglPbuf = eglCreatePbufferSurface(gEglDpy, cfg, pbAttr);
+    if (gEglPbuf == EGL_NO_SURFACE ||
+        !eglMakeCurrent(gEglDpy, gEglPbuf, gEglPbuf, gEglCtx)) {
+        SHIM_LOGE("gpu: pbuffer/makeCurrent failed");
+        return 0;
+    }
+    GLuint vs = gpuCompile(GL_VERTEX_SHADER, G_VSH);
+    GLuint fs = gpuCompile(GL_FRAGMENT_SHADER, G_FSH);
+    gProg = glCreateProgram();
+    glAttachShader(gProg, vs);
+    glAttachShader(gProg, fs);
+    glLinkProgram(gProg);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    GLint linked = 0;
+    glGetProgramiv(gProg, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        SHIM_LOGE("gpu: program link failed");
+        return 0;
+    }
+    gAPos = glGetAttribLocation(gProg, "aPos");
+    gScaleLoc = glGetUniformLocation(gProg, "uScale");
+    glGenTextures(1, &gSrcTex);
+    glGenTextures(1, &gDstTex);
+    glGenFramebuffers(1, &gFbo);
+    gEglOwner = pthread_self();
+    gEglOwnerValid = 1;
+    gEglReady = 1;
+    SHIM_LOGI("gpu: EGL+GLES ready on frame thread (program %u)", gProg);
+    return 1;
+}
+
 /* ===== relay state (single active video surface; the first decoder that
    reaches SetSurface claims it - matches the one-playing-video case; extra
    decoders keep the old direct path) ===== */
@@ -225,41 +415,11 @@ static void cfgDrop(OH_AVCodec *codec)
     }
 }
 
-/* ===== NV12 -> RGBA conversion, fixed-point BT.601 (libyuv-equivalent
-   coefficients). dst is RGBA byte order (R at byte 0) to match an
-   RGBA8888 shared image sampled by the compositor. ===== */
-static inline uint8_t clamp8(int v)
-{
-    if (v < 0) return 0;
-    if (v > 255) return 255;
-    return (uint8_t)v;
-}
-
-static void nv12ToRgba(uint8_t *dst, int dstStrideBytes,
-    const uint8_t *yPlane, int yStride,
-    const uint8_t *uvPlane, int uvStride,
-    int width, int height)
-{
-    for (int y = 0; y < height; y++) {
-        const uint8_t *yRow = yPlane + (size_t)y * yStride;
-        const uint8_t *uvRow = uvPlane + (size_t)(y >> 1) * uvStride;
-        uint8_t *dRow = dst + (size_t)y * dstStrideBytes;
-        for (int x = 0; x < width; x++) {
-            int Y = yRow[x];
-            int U = uvRow[(x & ~1)];
-            int V = uvRow[(x & ~1) + 1];
-            dRow[x * 4 + 0] = clamp8((298 * Y + 409 * V + 128) >> 8);
-            dRow[x * 4 + 1] = clamp8((298 * Y - 100 * U - 208 * V + 128) >> 8);
-            dRow[x * 4 + 2] = clamp8((298 * Y + 516 * U + 128) >> 8);
-            dRow[x * 4 + 3] = 255;
-        }
-    }
-}
-
 /* Query the codec's reported stride / slice height from
-   GetOutputDescription (round 97b fix: this buffer's GetImageLayout is
-   unsupported, so MapPlanes cannot provide the layout - compute the NV12
-   geometry from the values the decoder itself publishes). */
+   GetOutputDescription. Used to trim codec padding when the EGLImage view
+   of the buffer is larger than the picture (this device reports
+   stride==width, slice==height, so the trim is a no-op here - kept for
+   devices that pad). */
 static int queryFmtInt(const char *key, int fallback)
 {
     int v = fallback;
@@ -303,87 +463,99 @@ static void relayOnFrame(void *context)
     }
     waitFence(srcFence);
 
-    /* Plane layout, two paths (round 97c): MapPlanes when the buffer
-       carries layout metadata; otherwise plain Map + the NV12 geometry
-       the decoder publishes in its output format (stride /
-       video_slice_height - device dump shows stride==width,
-       slice==height, UV directly after Y). */
-    void *srcVir = NULL;
-    OH_NativeBuffer_Planes srcPlanes;
-    memset(&srcPlanes, 0, sizeof(srcPlanes));
-    const uint8_t *yPlane = NULL;
-    const uint8_t *uvPlane = NULL;
-    int yStride = 0;
-    int uvStride = 0;
-    int srcMapped = 0;
-    if (gMapPlanes(srcNB, &srcVir, &srcPlanes) == 0 && srcVir != NULL &&
-        srcPlanes.planeCount >= 2) {
-        yPlane = (const uint8_t *)srcVir + (size_t)srcPlanes.planes[0].offset;
-        uvPlane = (const uint8_t *)srcVir + (size_t)srcPlanes.planes[1].offset;
-        yStride = (int)srcPlanes.planes[0].rowStride;
-        uvStride = (int)srcPlanes.planes[1].rowStride;
-        srcMapped = 1;
-    } else if (gMap != NULL && gMap(srcNB, &srcVir) == 0 && srcVir != NULL) {
-        int st = queryFmtInt("stride", gRelayW);
-        int sliceH = queryFmtInt("video_slice_height", gRelayH);
-        if (st < gRelayW) st = gRelayW;
-        if (sliceH < gRelayH) sliceH = gRelayH;
-        yPlane = (const uint8_t *)srcVir;
-        uvPlane = (const uint8_t *)srcVir + (size_t)st * (size_t)sliceH;
-        yStride = st;
-        uvStride = st;
-        srcMapped = 1;
-        SHIM_LOGI("src layout via Map fallback: stride=%{public}d sliceH=%{public}d", st, sliceH);
-    }
-    if (!srcMapped) {
-        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
-        return;
-    }
-
     if (!gGeomSet && gRelayW > 0 && gRelayH > 0) {
         gHandleOpt(gOrigWin, SET_BUFFER_GEOMETRY, gRelayW, gRelayH);
         gGeomSet = 1;
+    }
+    if (!gpuInit()) {
+        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
+        return;
     }
 
     OHNativeWindowBuffer *dstWinBuf = NULL;
     int dstFence = -1;
     if (gReqBuffer == NULL ||
         gReqBuffer(gOrigWin, &dstWinBuf, &dstFence) != 0 || dstWinBuf == NULL) {
-        gUnmap(srcNB);
         gImageRelBuf(gConsumer, srcWinBuf, srcFence);
         return;
     }
     OH_NativeBuffer *dstNB = NULL;
     if (gFromNWB(dstWinBuf, &dstNB) != 0 || dstNB == NULL) {
-        gUnmap(srcNB);
         gImageRelBuf(gConsumer, srcWinBuf, srcFence);
         return;
     }
     waitFence(dstFence);
+    close(dstFence);
 
-    void *dstVir = NULL;
-    OH_NativeBuffer_Planes dstPlanes;
-    memset(&dstPlanes, 0, sizeof(dstPlanes));
-    uint8_t *dst = NULL;
-    int dstStride = 0;
-    if (gMapPlanes(dstNB, &dstVir, &dstPlanes) == 0 && dstVir != NULL &&
-        dstPlanes.planeCount >= 1) {
-        dst = (uint8_t *)dstVir + (size_t)dstPlanes.planes[0].offset;
-        dstStride = (int)dstPlanes.planes[0].rowStride;
-    } else if (gMap != NULL && gMap(dstNB, &dstVir) == 0 && dstVir != NULL) {
-        dst = (uint8_t *)dstVir;
-        dstStride = gRelayW * 4;
-    } else {
-        gUnmap(srcNB);
+    /* GPU convert: import both buffers as EGLImages, sample the NV12 one
+       through EXTERNAL_OES, render into the RGBA one through an FBO. The
+       bridge queue's format/usage is the bridge's own (96g proved its RGBA
+       buffers allocate and import fine) - only the geometry is set once. */
+    EGLImageKHR srcImg = gEglCreateImage(gEglDpy, EGL_NO_CONTEXT,
+        EGL_NATIVE_BUFFER_OHOS, (EGLClientBuffer)srcNB, NULL);
+    EGLImageKHR dstImg = gEglCreateImage(gEglDpy, EGL_NO_CONTEXT,
+        EGL_NATIVE_BUFFER_OHOS, (EGLClientBuffer)dstNB, NULL);
+    if (srcImg == EGL_NO_IMAGE_KHR || dstImg == EGL_NO_IMAGE_KHR) {
+        SHIM_LOGE("gpu: eglCreateImage failed src=%{public}d dst=%{public}d",
+            srcImg != EGL_NO_IMAGE_KHR, dstImg != EGL_NO_IMAGE_KHR);
+        if (srcImg != EGL_NO_IMAGE_KHR) {
+            gEglDestroyImage(gEglDpy, srcImg);
+        }
+        if (dstImg != EGL_NO_IMAGE_KHR) {
+            gEglDestroyImage(gEglDpy, dstImg);
+        }
         gImageRelBuf(gConsumer, srcWinBuf, srcFence);
         return;
     }
+    glUseProgram(gProg);
+    float scaleX = 1.0f;
+    float scaleY = 1.0f;
+    int stride = queryFmtInt("stride", 0);
+    int sliceH = queryFmtInt("video_slice_height", 0);
+    if (stride > gRelayW && gRelayW > 0) {
+        scaleX = (float)gRelayW / (float)stride;
+    }
+    if (sliceH > gRelayH && gRelayH > 0) {
+        scaleY = (float)gRelayH / (float)sliceH;
+    }
+    glUniform2f(gScaleLoc, scaleX, scaleY);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, gSrcTex);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)srcImg);
+    glBindTexture(GL_TEXTURE_2D, gDstTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)dstImg);
+    glBindFramebuffer(GL_FRAMEBUFFER, gFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+        gDstTex, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        SHIM_LOGE("gpu: FBO incomplete");
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gEglDestroyImage(gEglDpy, srcImg);
+        gEglDestroyImage(gEglDpy, dstImg);
+        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
+        return;
+    }
+    glViewport(0, 0, gRelayW, gRelayH);
+    {
+        static const float quad[8] = {
+            -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f
+        };
+        glVertexAttribPointer(gAPos, 2, GL_FLOAT, GL_FALSE, 0, quad);
+        glEnableVertexAttribArray(gAPos);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+    glFinish();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    gEglDestroyImage(gEglDpy, srcImg);
+    gEglDestroyImage(gEglDpy, dstImg);
 
-    nv12ToRgba(dst, dstStride, yPlane, yStride, uvPlane, uvStride,
-        gRelayW, gRelayH);
-
-    gUnmap(dstNB);
-    gUnmap(srcNB);
     Region region;
     region.rects = NULL;
     region.rectNumber = 0;
@@ -391,8 +563,8 @@ static void relayOnFrame(void *context)
     gImageRelBuf(gConsumer, srcWinBuf, srcFence);
     gRelayFrames++;
     if ((gRelayFrames % 60) == 1) {
-        SHIM_LOGI("relayed %{public}ld frames (%{public}dx%{public}d, rgba copy)",
-            gRelayFrames, gRelayW, gRelayH);
+        SHIM_LOGI("relayed %{public}ld frames (%{public}dx%{public}d, gpu yuv->rgba, scale %.3f/%.3f)",
+            gRelayFrames, gRelayW, gRelayH, scaleX, scaleY);
     }
 }
 
@@ -435,7 +607,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v6 loaded - surface-relay compat layer (round 97)");
+    SHIM_LOGI("shim v7 loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());
