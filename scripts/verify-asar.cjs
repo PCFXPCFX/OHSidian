@@ -25,7 +25,8 @@ try {
     process.exit(1);
   }
   const checks = {
-    'app touch patch v16': app.includes('__ohsidianTouchPatch==="16"'),
+    'app touch patch v17': app.includes('__ohsidianTouchPatch==="17"'),
+    'app media hang watchdog (round 95c)': app.includes('loadedmetadata') && app.includes('__ohsidianWatched'),
     'app back-press consumer (round 96)': app.includes('applyBackPress'),
     'app media codec guidance (round 95 bug 1)': app.includes('ohsidianOfferSystemPlayer'),
     'app atomic mode-file write (H1)': app.includes('writeModeFileSync'),

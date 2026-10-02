@@ -3817,6 +3817,56 @@ published` seq 单调递增。
    独立);用户层文件变更需重启生效(每进程读取一次,已补记入
    flags JSON 注释)。
 
+**第 95 轮补充(95c):视频硬解真机验证结论——路由已通,败在闭源
+桥接层 Configure;95b 旗标撤出打包默认值**
+
+用户真机日志(2026-10-02 22:42,hilog)对 95b 的验证给出决定性结论:
+
+1. **旗标生效,路由打通**:日志出现 `CodecClient [h.vdec]{Configure}
+   invalid argument` 与 `NativeVideoDecoder {OH_VideoDecoder_Configure}
+   configure failed`——`OH_VideoDecoder_*` 即鸿蒙 AVCodec NDK,证明
+   平台解码路由已被激活,且 `CreateByMime` 成功创建了硬件 vdec 实例
+   (设备有 HEVC 硬解)。95b 的诊断目标达成。
+2. **失败根因在闭源桥接层**:对 libelectron.so 的符号串取证显示,
+   桥接层 Configure 引用的 AVFormat 键**只有 OH_MD_KEY_WIDTH 和
+   OH_MD_KEY_HEIGHT 两个**(动态符号簇:OH_AVFormat_SetIntValue/
+   OH_MD_KEY_WIDTH/HEIGHT/OH_VideoDecoder_Configure 等),缺少
+   OH_MD_KEY_PIXEL_FORMAT/PROFILE 等键——设备 HAL 以 invalid
+   argument 拒绝 Configure;桥接层随后未向 Chromium 正确上报失败,
+   继续走 SetSurface/Start(连锁失败)并使 `<video>` 管线**悬挂**:
+   日志中 ~10s 的 MutePlaying(元素在"播放"但零解码帧、无 error
+   事件)。此为 libelectron.so 引擎级缺陷,本仓库无法修复。
+3. **处置**:
+   - **95b 旗标撤出打包默认值**(ohsidian-flags.json 仅保留分区
+     旗标):桥接层 Configure 既已证实损坏,放任路由会威胁原本
+     经 ffmpeg 软解正常播放的 H.264(悬挂不上报 = 无回退机会);
+     实验通道保留在 ohsidian-flags-user.json(注释中已写明禁用
+     原因与上游修复前提)。HEVC 应用内播放在上游修复前不可达,
+     用户侧方案:转码 H.264/MP4 或系统播放器。
+   - **渲染层 v17 卡死看门狗**:正是"悬挂不发 error"的场景让 95
+     轮的 error 监听失效——新增 loadedmetadata 捕获监听,本地嵌入
+     媒体(internal-embed 或 file:// 源)元数据就绪后 8s 仍无解码
+     帧(视频 videoWidth=0 / 音频 readyState<HAVE_CURRENT_DATA)
+     且无 error → 判定管线悬挂,触发与 error 路径相同的引导
+     Notice(转码建议 + 系统播放器按钮)。补丁 v16→v17,verify-asar
+     同步 hang-watchdog 标记。
+   - asar 已刷新至 v17(全部 marker 通过),随下一次构建分发。
+4. **上游问题材料(可直接引用)**:引擎 libelectron.so 内
+   MediaCodecDecoderBridgeImpl 创建 OHOS AVCodec 视频解码器后仅以
+   width/height 两键 Configure(无 pixel_format),HAL 返回
+   invalid argument;失败后不向 Chromium 上报初始化失败,<video>
+   管线悬挂不触发 error。附 hilog 片段:CodecClient
+   [h.vdec]{Configure} invalid argument / NativeVideoDecoder
+   {OH_VideoDecoder_Configure} configure failed / {SetSurface} /
+   {Start} failed。另音频侧 OHAudioRenderer 正常初始化(解封装与
+   音频链路无恙),佐证问题仅限视频 Configure。
+
+**待用户补充诊断(区分缺陷波及面)**:①播一个此前正常的 H.264
+视频——若也黑屏悬挂,说明旗标生效期间平台路由劫持了 avc(本次
+撤旗标即修复);②播一个 8-bit HEVC Main(无 HDR)转码片——若
+仍失败,桥接对 HEVC 完全不可用;若可播,则是 Main10/HDR 配置
+问题,上游 issue 可进一步聚焦。
+
 ---
 
 ## 窗口专题总览(第 87-93 轮,2026-10-01)

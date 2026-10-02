@@ -141,7 +141,7 @@ function isVersionLess(a, b) {
  *    migration, system fonts).
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
-if(window.__ohsidianTouchPatch==="16")return;window.__ohsidianTouchPatch="16";
+if(window.__ohsidianTouchPatch==="17")return;window.__ohsidianTouchPatch="17";
 /* Keep the renderer's view of the Electron major consistent with the main
    process shim: app.js requires >= 28.2.3 (Iie) before it stops showing the
    "manual update" notice. Replace the whole versions object - mutating the
@@ -702,6 +702,40 @@ document.addEventListener("error",function(ev){
     if(el.__ohsidianMediaNoticed)return;
     el.__ohsidianMediaNoticed=true;
     ohsidianOfferSystemPlayer(el);
+  }catch(e){}
+},true);
+/* Round 95c, device-log follow-up: with the platform codec bridge engaged
+   the engine's decoder init can HANG instead of reporting failure - the
+   element keeps "playing" muted with zero decoded frames and NEVER fires
+   an error event (hilog: OH_VideoDecoder_Configure invalid argument,
+   then ~10s of MutePlaying). The error listener above can therefore stay
+   silent for exactly the case it was built for. Watch local media after
+   metadata: 8s with metadata but no decoded frame (video: no videoWidth;
+   audio: readyState below HAVE_CURRENT_DATA) means the pipeline is hung -
+   fire the same guidance. Remote/buffering cases are filtered by the
+   internal-embed/file-source restriction and the 8s window. */
+document.addEventListener("loadedmetadata",function(ev){
+  try{
+    var el=ev.target;
+    if(!el||!el.tagName)return;
+    var tag=el.tagName.toUpperCase();
+    if(tag!=="VIDEO"&&tag!=="AUDIO")return;
+    if(el.__ohsidianWatched)return;
+    var local=!!(el.closest&&el.closest(".internal-embed"));
+    var src=(el.currentSrc||el.src||"");
+    if(src.indexOf("file://")===0)local=true;
+    if(!local)return;
+    el.__ohsidianWatched=true;
+    setTimeout(function(){
+      try{
+        if(!el.isConnected||el.error||el.__ohsidianMediaNoticed)return;
+        var hasFrame=(el.tagName.toUpperCase()==="VIDEO")?(el.videoWidth>0):(el.readyState>=2);
+        if(hasFrame)return;
+        if(el.readyState<1)return; /* metadata not even there - not the hang shape */
+        el.__ohsidianMediaNoticed=true;
+        ohsidianOfferSystemPlayer(el);
+      }catch(e){}
+    },8000);
   }catch(e){}
 },true);
 /* Back-press consumer (round 96). The @Entry pages (Index/WindowNode)
