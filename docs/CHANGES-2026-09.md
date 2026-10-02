@@ -4161,6 +4161,53 @@ h265_annex_b_to_hevc_bitstream_converter / VideoFrame 导入层)。
 H.264/MP4(软解现状可播,渲染层 Notice 已提供系统播放器入口);
 OHMSIDIAN 用户层 flags 实验开关保留。verify-asar 标记 v19 不变。
 
+**第 96 轮补充(96k):代码级根因——移植版帧工厂只实现 RGBA 纹理
+导入,无 NV12/YUV 路径(读源码+二进制证实,推测归零)**
+
+按"以代码为准"要求,本轮不再依赖推断:
+
+1. **上游 Chromium 132 源码(mirror 实读)**:平台视频解码器的输出
+   合同——`DequeueOutput` → `video_frame_factory_->CreateVideoFrame`;
+   `ForwardVideoFrame` 中 `if (!frame) { EnterTerminalState(
+   State::kError, {kFailed, "Could not create VideoFrame"}); }` →
+   `ReleaseCodec()` 并以失败状态取消全部 pending decode。
+   **null 帧 = 终态错误 = 解码器被释放**——与真机 ~70ms Release
+   完全同构。
+2. **引擎二进制(实读符号串)**:移植版解码器类为
+   `OhosVideoDecoder`(方法表齐全:StartLazyInit/CreateCodec/
+   QueueInput/DequeueOutput/CreateVideoFrame/EnterTerminalState/
+   ReleaseCodec...),其帧工厂邻域含:
+   `GpuSharedImageVideoFactory::CreateVideoFrame`、
+   `CopyRGBATextureToVideoFrame`(全库唯一)、
+   `Failed to create VideoFrame`、
+   `DecoderStatus::Codes::kFailedToGetVideoFrame`;
+   **全库检索 `CopyYUV/YUVTexture/NV12Texture/YUVVideoFrame` = 0 命中**
+   ——移植版帧输出只实现了 **RGBA 纹理导入**一条路,不存在任何
+   NV12/YUV 导入路径。
+3. **与全部真机现象互证**:
+   - HEVC HAL 输出格式硬绑 NV12(RGBA=unsupport interface,
+     SURFACE_FORMAT 仍输出 pixel_format=2);
+   - 队列=RGBA(v3):帧工厂按 RGBA 导入成功 → 上屏但内容错读
+     (乱码)——工厂对 RGBA 缓冲可用;
+   - 队列=NV12(v5b):缓冲布局终于正确,但工厂无 NV12 导入 →
+     `CreateVideoFrame` 返回 null → EnterTerminalState →
+     ReleaseCodec(~70ms)→ 解码失败 → Notice;
+   - AVC 之所以"能播":平台解码失败后 Chromium 回退 ffmpeg 软解
+     (AAC/H.264 在 branding 内),软解输出常规 CPU 帧,不经过
+     帧工厂的原生缓冲导入——全程不触碰该缺陷。
+4. **结论(代码级)**:HEVC 不可播的根因 = OHOS 移植版
+   `OhosVideoDecoder`/帧工厂**缺少 NV12 原生缓冲导入**(仅
+   CopyRGBATextureToVideoFrame 一条路),而 HEVC HAL 只出 NV12。
+   修复位置在移植版源码的帧工厂(增加 NV12 SharedImage 导入或
+   CPU 拷贝转换),垫片无法从编解码 API 边界影响它。附带发现:
+   上游 `h265_annex_b_to_hevc_bitstream_converter.cc` 的 PPS 数组
+   被 `id2sps_.size()` 守卫(copy-paste bug),一并写入 issue。
+5. **上游 issue 修复清单(终版)**:①Configure 补
+   OH_MD_KEY_PIXEL_FORMAT(垫片已证);②ConsumerSurface 队列
+   SET_FORMAT NV12(垫片已证);③帧工厂增加 NV12 导入路径
+   (本次代码级定位);④converter PPS 守卫笔误。
+
+
 
 
 **第 96 轮补充(96e):探针改为应用内 N-API 插件(shell 域被 SELinux 拦截)**
