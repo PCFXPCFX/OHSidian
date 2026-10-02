@@ -3867,6 +3867,56 @@ published` seq 单调递增。
 仍失败,桥接对 HEVC 完全不可用;若可播,则是 Main10/HDR 配置
 问题,上游 issue 可进一步聚焦。
 
+**第 96 轮补充(96b):引擎上游考证 + 渲染层日志导出通道**
+
+**引擎上游考证(回应"libelectron.so 还有没有别的上游")**。二进制
+取证:libelectron.so 源码树路径 `../../ohos/adapter/multiprocess/
+app_spawn_communication.cc`、`../../ohos/adapter/xcomponent/...`
+证实其身份为 **Chromium 鸿蒙化移植(Chromium 132.0.6834.161,
+自报版本 Electron/5.0.0-Release)**。公开上游渠道:
+
+- **openharmony-sig/electron**(OpenHarmony SIG"Electron 鸿蒙化"
+  指导项目,Gitee,镜像 GitCode)——社区移植主仓库,含环境搭建/
+  编译指导;深开鸿等厂商参与 SIG;
+- **ohosvscode/ohos_electron_hap**(GitHub)——鸿蒙 Electron HAP
+  工程模板与工具链文档;
+- **华为 HarmonyOS PC SDK 预编译产物**——部分教程(虹墨空间站等)
+  使用华为官方预编译 libelectron 直接装包,与 CHANGES 中"闭源中间
+  层为鸿蒙官方提供"的既有记载吻合。
+
+Electron 上游本体不支持 HarmonyOS(electron#47101:依赖 Chromium
+的 OHOS 支持),因此 MediaCodecDecoderBridgeImpl 的修复路径是:
+在 SIG 仓库/华为反馈渠道提 issue(95c 已备好证据材料),并关注
+SIG/SDK 是否发布更新的 libelectron 预编译(若更新构建已修复
+Configure 缺键问题,按版本整套替换 lib*.so 即可,无需改码)。
+
+**渲染层日志导出通道(回应"应用内 console log 能否以 hilog 显示/
+导出")**。渲染层 console 原生不进 hilog(渲染层 console 不落
+hilog 是既有事实);补丁 v17→v18 增加两条通道,命令面板
+"OHSidian: 运行日志捕获 开/关"选择加入(localStorage 持久,
+重启生效):
+
+1. **hilog 路径**:console 五方法 + window.onerror +
+   unhandledrejection 包装转发主进程(ipc `ohs-console`,限速
+   40 行/秒、单条 4000 字符截断),主进程以 `[OHSidian:web]` 前缀
+   重新打印——**若引擎把主进程 stderr 路由进 hilog**(与既有
+   `[OHSidian]` 主进程行同机制),即可 `hilog | grep OHSidian:web`
+   直接看到;不可见时走第 2 条;
+2. **文件路径**:主进程同步落盘
+   `<Documents|userData>/OHSidian/console.log`(documentsDir 优先,
+   单文件 512KB 轮转为 console.old.log),文件管理可见,或
+   `hdc file recv /storage/Users/currentUser/Documents/OHSidian/console.log`
+   拉取。用户层 flags 的 `--enable-logging=stderr` 可作为 Chromium
+   原生日志的补充实验。
+
+**验证**:refresh-app-patch 刷新 asar 至 v18(全量 marker 通过;
+自查发现 verify marker 针与补丁键名不一致(下划线差异)导致刷新
+末段校验误报,已修正);console 转发/命令/主进程桥三处 marker
+在位。真机验证:①命令面板开捕获 → 重启 → 操作应用 →
+`hilog | grep OHSidian:web` 与 文档/OHSidian/console.log 二者
+至少其一有内容;②HEVC 播放场景下日志应出现管线悬挂相关的渲染层
+报错行,补齐 95c 诊断材料。
+
 ---
 
 ## 窗口专题总览(第 87-93 轮,2026-10-01)

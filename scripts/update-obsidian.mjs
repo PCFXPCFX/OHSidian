@@ -141,7 +141,61 @@ function isVersionLess(a, b) {
  *    migration, system fonts).
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
-if(window.__ohsidianTouchPatch==="17")return;window.__ohsidianTouchPatch="17";
+if(window.__ohsidianTouchPatch==="18")return;window.__ohsidianTouchPatch="18";
+/* Console -> main bridge (round 96b): the renderer console never reaches
+   hilog natively. Opt-in via the command "OHSidian: 运行日志捕获 开/关"
+   (persisted in localStorage, takes effect on the next app start): the
+   console methods + global error traps are wrapped and each line is
+   forwarded to the main process (ipc 'ohs-console'), which re-prints it
+   with the [OHSidian:web] prefix (shows up in hilog IF the engine routes
+   main-process stderr there) and appends it to
+   <Documents|userData>/OHSidian/console.log (512KB single rotation,
+   pullable via 文件管理 or hdc file recv). Rate-limited to 40 lines/s. */
+var consoleCaptureOn=(function(){try{return localStorage.getItem("ohsidianConsoleCapture")==="1"}catch(e){return false}})();
+var consoleForward=null;
+if(consoleCaptureOn){
+  try{
+    var __ohIpc=require("@electron/remote").ipcRenderer;
+    if(__ohIpc&&typeof __ohIpc.send==="function"){
+      var __cfSent=0,__cfSec=0;
+      consoleForward=function(level,args){
+        try{
+          var now=Date.now();
+          if(now-__cfSec>=1000){__cfSec=now;__cfSent=0}
+          if(__cfSent++>=40)return;
+          var parts=[];
+          for(var i=0;i<args.length&&i<8;i++){
+            var a=args[i],s;
+            try{s=(typeof a==="string")?a:JSON.stringify(a)}catch(e1){s=String(a)}
+            if(typeof s!=="string")s=String(s);
+            parts.push(s.length>2000?s.substring(0,2000)+"…":s);
+          }
+          __ohIpc.send("ohs-console",{level:level,text:parts.join(" ")});
+        }catch(e2){}
+      };
+    }
+  }catch(e){}
+}
+["log","info","warn","error","debug"].forEach(function(m){
+  try{
+    var orig=console[m];
+    console[m]=function(){
+      try{if(consoleForward)consoleForward(m,Array.prototype.slice.call(arguments))}catch(eF){}
+      return orig.apply(console,arguments);
+    };
+  }catch(e){}
+});
+try{
+  window.addEventListener("error",function(ev){
+    try{if(consoleForward)consoleForward("error",["window.onerror: "+(ev.message||"")+" @"+(ev.filename||"")+":"+(ev.lineno||0)])}catch(e){}
+  },true);
+  window.addEventListener("unhandledrejection",function(ev){
+    try{
+      var r=ev&&ev.reason;
+      if(consoleForward)consoleForward("error",["unhandledrejection: "+((r&&(r.stack||r.message))||String(r))]);
+    }catch(e){}
+  },true);
+}catch(e){}
 /* Keep the renderer's view of the Electron major consistent with the main
    process shim: app.js requires >= 28.2.3 (Iie) before it stops showing the
    "manual update" notice. Replace the whole versions object - mutating the
@@ -1337,6 +1391,15 @@ var install=function(app){
       callback:function(){migrateVaultToVisibleFolder()}});
     app.commands.addCommand({id:"ohsidian-system-fonts",name:"OHSidian: 恢复系统字体 (HarmonyOS Sans)",
       callback:function(){restoreSystemFonts()}});
+    app.commands.addCommand({id:"ohsidian-console-capture",name:"OHSidian: 运行日志捕获 开/关 (重启生效)",
+      callback:function(){
+        try{
+          var on=localStorage.getItem("ohsidianConsoleCapture")==="1";
+          if(on)localStorage.removeItem("ohsidianConsoleCapture");
+          else localStorage.setItem("ohsidianConsoleCapture","1");
+          try{new Notice("OHSidian 运行日志捕获 → "+(on?"关闭":"开启")+" (重启应用后生效)")}catch(e){}
+        }catch(e){}
+      }});
     /* Zoom-style font scale chooser: cycles 跟随系统 → 100% → 110% → 125% →
        150% → 100%... Written into the mode file as cfg.fontScaleOverride;
        the effective scale = override || cfg.fontScale (system). This gives
@@ -1588,6 +1651,54 @@ var __ohDvRegister=function(){
   }catch(e){}
 };
 if(__ohDvApp.isReady()){__ohDvRegister()}else{__ohDvApp.on("ready",__ohDvRegister)}
+}catch(e){}})();
+/* Console bridge main-process side (round 96b): receives renderer console
+   lines (opt-in, see the TOUCH patch) and (1) re-prints them with the
+   [OHSidian:web] prefix on the main process console - visible in hilog
+   whenever the engine routes main stderr there, same as the other
+   [OHSidian] main lines - and (2) appends them to
+   <Documents|userData>/OHSidian/console.log (single 512KB rotation to
+   console.old.log), pullable from 文件管理 or `hdc file recv` on the
+   public Documents path. */
+;(function(){try{
+if(globalThis.__ohsidianConsoleBridge)return;globalThis.__ohsidianConsoleBridge=true;
+var __cbEl=require("electron"),__cbFs=require("fs"),__cbPath=require("path");
+var __cbLogPath=null;
+var __cbResolve=function(){
+  if(__cbLogPath)return __cbLogPath;
+  try{
+    var ud=__cbEl.app.getPath("userData");
+    var docs=null;
+    try{
+      var cfg=JSON.parse(__cbFs.readFileSync(__cbPath.join(ud,"ohsidian-mode.json"),"utf8"));
+      if(cfg&&typeof cfg.documentsDir==="string"&&cfg.documentsDir)docs=cfg.documentsDir;
+    }catch(e0){}
+    var base=docs?__cbPath.join(docs,"OHSidian"):ud;
+    try{__cbFs.mkdirSync(base,{recursive:true})}catch(e1){}
+    __cbLogPath=__cbPath.join(base,"console.log");
+    return __cbLogPath;
+  }catch(e){return null}
+};
+var __cbAppend=function(line){
+  try{
+    var p=__cbResolve();if(!p)return;
+    var st=null;try{st=__cbFs.statSync(p)}catch(e2){st=null}
+    if(st&&st.size>512*1024){try{__cbFs.renameSync(p,p+".old.log")}catch(e3){}}
+    __cbFs.appendFileSync(p,"["+new Date().toISOString()+"] "+line+"\n","utf8");
+  }catch(e){}
+};
+__cbEl.ipcMain.on("ohs-console",function(_evt,payload){
+  try{
+    var level=(payload&&payload.level)||"log";
+    var text=(payload&&payload.text)||"";
+    if(typeof text!=="string")text=String(text);
+    if(text.length>4000)text=text.substring(0,4000)+"…";
+    var m=(level==="warn"||level==="error"||level==="info"||level==="debug")?level:"log";
+    try{console[m]("[OHSidian:web] "+text)}catch(e1){}
+    __cbAppend("[OHSidian:web]["+m+"] "+text);
+  }catch(e){}
+});
+try{console.log("[OHSidian] console bridge ready (renderer opt-in: 命令面板 → 运行日志捕获)")}catch(e2){}
 }catch(e){}})();
 /* Trash purge: 60s after startup (and once more on will-quit, F-N16 - a
    session shorter than 60s or a multi-day background session used to miss
