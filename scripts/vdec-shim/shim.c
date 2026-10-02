@@ -573,6 +573,24 @@ OH_AVErrCode OH_VideoDecoder_Configure(OH_AVCodec *codec, OH_AVFormat *format)
 {
     dumpAndFix(format);
     OH_AVErrCode r = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
+    /* Fallback chain (round 97 fix - this was lost in the v6 rewrite):
+       the queue format is decided per failed Configure call (device-proven
+       re-evaluation), so walk RGBA -> SURFACE_FORMAT -> NV12 until the HAL
+       accepts one. RGBA is tried first because the bridge's frame factory
+       imports RGBA buffers only; SURFACE_FORMAT passes Configure but the
+       HAL still emits NV12; NV12 is the layout the HAL always produces. */
+    if (r != AV_ERR_OK && gSetIntValue != NULL) {
+        SHIM_LOGI("Configure with RGBA failed (%{public}d) - retrying with SURFACE_FORMAT", r);
+        gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_SURFACE_FORMAT);
+        r = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
+        SHIM_LOGI("Configure(SURFACE_FORMAT) -> %{public}d", r);
+        if (r != AV_ERR_OK) {
+            SHIM_LOGI("retrying with NV12");
+            gSetIntValue(format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_NV12);
+            r = gConfigure ? gConfigure(codec, format) : AV_ERR_UNKNOWN;
+            SHIM_LOGI("Configure(NV12) -> %{public}d", r);
+        }
+    }
     SHIM_LOGI("Configure -> %{public}d", r);
     if (r == AV_ERR_OK && gSetIntValue != NULL && gGetIntValue != NULL) {
         int32_t w = 0;

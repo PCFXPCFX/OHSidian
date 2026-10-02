@@ -4248,6 +4248,23 @@ fence 所有权(poll 不消费,Release/Flush 由系统关闭)、错误路径
 画面异常 → 色彩/布局微调(ABGR/RGBA swizzle、crop);若无 relayed
 → 转换/队列环节被拒,按日志定位。8K 仍受 HAL 能力上限(96i 终审)。
 
+**第 97 轮修订(97b,01:46 日志):v6 重写丢失回退链——已恢复**
+
+用户 01:46 会话日志暴露 v6 重写引入的回归:1080p 解码器正常创建
+(CreateByMime→ok),垫片注入 RGBA 被拒(unsupport interface,9)后
+**Configure 直接返回失败**——v4/v5 的"RGBA→SURFACE_FORMAT→NV12
+三级回退"在全量重写时被遗漏。后果:Configure 失败 → 无 cfg 记录 →
+SetSurface 走直通 → 8 → 视频连元数据都无法加载("连时间都加载不
+出来",比 v5 时代的黑屏更早失败)。
+
+修复:Configure 包装器恢复三级回退(设备已证 Configure 失败后
+重新设置键会被重评)。回退链恢复后,1080p 将在 SURFACE_FORMAT
+处成功(此前各轮已证),然后进入中继流程。修复后垫片 27.4KB。
+另:用户侧需注意 DevEco 日志查看器的级别过滤——垫片全部诊断
+行是 I 级,过滤到 W/E 会丢失全部关键轨迹(01:24 片段的误读
+即由此而来)。
+
+
 
 
 
