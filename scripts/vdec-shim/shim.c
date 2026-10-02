@@ -196,7 +196,23 @@ __attribute__((constructor)) static void shimInit(void)
     gIsValid = (PFN_IsValid)realSym(gReal, "OH_VideoDecoder_IsValid");
     gGetIntValue = (PFN_FormatGetIntValue)coreSym("OH_AVFormat_GetIntValue");
     gSetIntValue = (PFN_FormatSetIntValue)coreSym("OH_AVFormat_SetIntValue");
-    gNwLib = dlopen("/system/lib64/libnative_window.so", RTLD_NOW | RTLD_LOCAL);
+    /* Round 96i-rev: the absolute /system/lib64 path does not exist on
+       device (dlopen ENOENT, user log 00:30) - resolve by PLAIN soname
+       first (the shim's namespace already resolves libnative_media_core.so
+       this way, and libelectron itself links libnative_window.so), then
+       fall back to absolute candidates. */
+    gNwLib = dlopen("libnative_window.so", RTLD_NOW | RTLD_LOCAL);
+    if (gNwLib == NULL) {
+        const char *candidates[] = {
+            "/system/lib64/libnative_window.z.so",
+            "/system/lib64/ndk/libnative_window.z.so",
+            "/system/lib64/platformsdk/libnative_window.z.so",
+        };
+        for (unsigned ci = 0; ci < sizeof(candidates) / sizeof(candidates[0]); ci++) {
+            gNwLib = dlopen(candidates[ci], RTLD_NOW | RTLD_LOCAL);
+            if (gNwLib != NULL) break;
+        }
+    }
     if (gNwLib != NULL) {
         gWindowOpt = (PFN_WindowOpt)dlsym(gNwLib, "OH_NativeWindow_NativeWindowHandleOpt");
         if (gWindowOpt == NULL) {
@@ -246,9 +262,13 @@ OH_AVErrCode OH_VideoDecoder_SetSurface(OH_AVCodec *codec, OHNativeWindow *windo
            video_graphic_pixel_format=24 in OnOutputFormatChanged). The
            bridge never sets a queue format, so the queue defaults to
            RGBA8888 and every NV12 frame renders as noise (round 96g). */
+        int32_t cur = -1;
+        gWindowOpt(window, GET_FORMAT, &cur);
+        SHIM_LOGI("SetSurface: queue format before = %{public}d", cur);
         int32_t r = gWindowOpt(window, SET_FORMAT,
             (int32_t)NATIVEBUFFER_PIXEL_FMT_YCBCR_420_SP);
-        SHIM_LOGI("SetSurface: queue SET_FORMAT NV12(24) -> %{public}d", r);
+        gWindowOpt(window, GET_FORMAT, &cur);
+        SHIM_LOGI("SetSurface: queue SET_FORMAT NV12(24) -> %{public}d, now = %{public}d", r, cur);
     }
     OH_AVErrCode r2 = gSetSurface ? gSetSurface(codec, window) : AV_ERR_UNKNOWN;
     SHIM_LOGI("SetSurface -> %{public}d", r2);
