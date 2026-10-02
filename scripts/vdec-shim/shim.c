@@ -738,11 +738,6 @@ static void relayOnFrame(void *context)
     if (gImageAcqBuf(gConsumer, &srcWinBuf, &srcFence) != 0 || srcWinBuf == NULL) {
         return;
     }
-    OH_NativeBuffer *srcNB = NULL;
-    if (gFromNWB == NULL || gFromNWB(srcWinBuf, &srcNB) != 0 || srcNB == NULL) {
-        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
-        return;
-    }
     waitFence(srcFence);
 
     if (!gGeomSet && gRelayW > 0 && gRelayH > 0) {
@@ -761,22 +756,21 @@ static void relayOnFrame(void *context)
         gImageRelBuf(gConsumer, srcWinBuf, srcFence);
         return;
     }
-    OH_NativeBuffer *dstNB = NULL;
-    if (gFromNWB(dstWinBuf, &dstNB) != 0 || dstNB == NULL) {
-        gImageRelBuf(gConsumer, srcWinBuf, srcFence);
-        return;
-    }
     waitFence(dstFence);
     close(dstFence);
 
-    /* GPU convert: import both buffers as EGLImages, sample the NV12 one
-       through EXTERNAL_OES, render into the RGBA one through an FBO. The
+    /* GPU convert: import both WINDOW buffers as EGLImages, sample the
+       NV12 one through EXTERNAL_OES, render into the RGBA one through an
+       FBO. EGL_NATIVE_BUFFER_OHOS takes the OHNativeWindowBuffer ITSELF
+       (the driver dereferences it via GetBufferHandleFromNative; passing
+       the derived OH_NativeBuffer instead crashes there - device crash
+       02:45, this is the same pattern OHOS's own NativeImage uses). The
        bridge queue's format/usage is the bridge's own (96g proved its RGBA
        buffers allocate and import fine) - only the geometry is set once. */
     EGLImageKHR srcImg = gEglCreateImage(gEglDpy, EGL_NO_CONTEXT,
-        EGL_NATIVE_BUFFER_OHOS, (EGLClientBuffer)srcNB, NULL);
+        EGL_NATIVE_BUFFER_OHOS, (EGLClientBuffer)srcWinBuf, NULL);
     EGLImageKHR dstImg = gEglCreateImage(gEglDpy, EGL_NO_CONTEXT,
-        EGL_NATIVE_BUFFER_OHOS, (EGLClientBuffer)dstNB, NULL);
+        EGL_NATIVE_BUFFER_OHOS, (EGLClientBuffer)dstWinBuf, NULL);
     if (srcImg == EGL_NO_IMAGE_KHR || dstImg == EGL_NO_IMAGE_KHR) {
         SHIM_LOGE("gpu: eglCreateImage failed src=%{public}d dst=%{public}d",
             srcImg != EGL_NO_IMAGE_KHR, dstImg != EGL_NO_IMAGE_KHR);
@@ -889,7 +883,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7c loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7d loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());

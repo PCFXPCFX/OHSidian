@@ -4391,6 +4391,37 @@ frame thread` → `relayed N frames (..., gpu yuv->rgba)` 增长 +
 画面正常 = 应用内 HEVC 播放打通。若再失败,日志会给出确切的
 着色器编译报错或 eglGetProcAddress 缺口,不再有猜测空间。
 
+**第 98 轮修订(98d,02:45 崩溃报告):GL 管线全通,唯一残余 bug 是
+eglCreateImage 的 client buffer 类型传错——修复后应为最终形态**
+
+02:45 实测(进程 20998)拿到决定性好消息:v7c 的 31 个入口解析成功,
+GL 扩展表确认 **GL_OES_EGL_image / GL_OES_EGL_image_external /
+GL_OES_EGL_image_external_essl3 三个变体全部存在**(Mali 驱动,
+GL_ARM_* 系),`gpu: EGL+GLES ES2 ready on frame thread`——ES2
+ESSL1 着色器程序一次构建成功,GPU 转换管线全部就绪。
+
+随后在**第一帧**崩溃(SIGSEGV NULL 解引用 @0x40,LastFatalMessage:
+surf.IBufferProducer):栈为 解码器 FlushBuffer → 消费者回调 →
+垫片 → eglCreateImageKHR → libhvgr_v200 驱动 →
+`OH_NativeWindow_GetBufferHandleFromNative+16` 空指针。原因:
+`EGL_NATIVE_BUFFER_OHOS` 目标要求的 client buffer 是
+**OHNativeWindowBuffer\***(队列窗口缓冲本体),垫片传的是经
+FromNativeWindowBuffer 派生的 OH_NativeBuffer\*——对象布局不同,
+驱动按窗口缓冲读字段读到 NULL。寄存器 x1=0x34E1 证实目标枚举正确,
+与 OHOS 自家 surface_image.cpp 的用法(直接传 nativeWindowBuffer)
+对照后确认。
+
+修复(98d):relayOnFrame 删除两处 FromNativeWindowBuffer 派生,
+`eglCreateImageKHR(..., EGL_NATIVE_BUFFER_OHOS, srcWinBuf/dstWinBuf)`
+直接传 Acquire/Request 得到的窗口缓冲(与系统 NativeImage 同模式),
+waitFence 顺位提前。产物 40.8KB(shim v7d)。
+
+判定(重测):`shim v7d loaded` → `relay engaged` → `ES2 ready` →
+`relayed N frames (..., gpu yuv->rgba, scale 1.000/1.000)` 增长 +
+画面正常 = **应用内 HEVC 播放打通**(六个层级缺陷全部补齐:
+pixel_format 注入、队列格式、中继接管、GLES 入口解析、着色器、
+EGLImage 导入)。画面若上下颠倒,改顶点着色器 Y 映射一行即可。
+
 
 
 
