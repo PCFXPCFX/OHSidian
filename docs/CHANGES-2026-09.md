@@ -4129,6 +4129,39 @@ libnative_media_core.so;libelectron 本身即链接该库),回退
 1080p 会话 Configure→SetSurface→Prepare→Start 依旧全 0、8K 三
 格式全拒,与 96i 结论一致。
 
+**第 96 轮补充(96j):垫片路线终审——两层缺陷已修,第三层在闭源
+桥接内部,编解码 API 面杠杆穷尽**
+
+v5b 真机日志(00:33,GET_FORMAT 诊断全绿):
+
+1. **队列格式假设证实并修复**:`queue format before = 12`
+   (RGBA8888,与推断完全一致)→ `SET_FORMAT NV12(24) -> 0,
+   now = 24`——消费者队列成功改配 NV12,缓冲分配与 HAL 输出对齐;
+2. **1080p 全管线成功 + 帧被消费**:[625]/[627] 解码器
+   Configure/SetSurface/Prepare/Start 全 0,输出格式报告
+   pixel_format=2/graphic=24,输入码流送入、**解码帧产出且被
+   桥接层取走**([out] UpdateOutputCache/GetBuffer);
+3. **但 Chromium 仍在 ~70ms 后 Release 解码器**(本会话仅 3 个
+   解码器,重试风暴平息;释放瞬间服务端还在投递输入缓冲——
+   `read from parcel failed` 为拆除竞态,佐证解码器被杀时仍在
+   正常工作)。
+
+**终审**:三层缺陷中,垫片已修复两层(①Configure 缺 pixel_format;
+②消费者队列未设 NV12 格式),解码与缓冲布局全部就绪;**第三层
+(HEVC 解码帧 → Chromium 渲染管线导入)位于闭源桥接内部**,任何
+编解码 API 边界(Configure/SetSurface/队列属性)均不可达——垫片
+路线到此为止。给引擎上游(SIG/华为)的 issue 现在含三条精确修复项:
+(a) Configure 补 OH_MD_KEY_PIXEL_FORMAT(垫片已证有效);
+(b) ConsumerSurface 设 NV12 队列格式(垫片已证有效);
+(c) 修复 HEVC 帧导入/渲染路径(前两项就绪后帧仍不上屏,定位在
+h265_annex_b_to_hevc_bitstream_converter / VideoFrame 导入层)。
+
+**现状收尾**:垫片保留随包(无害、全量 1:1 转发、为上游修复后的
+即刻生效预留;删除包内文件即回退);HEVC 日常方案仍为转码
+H.264/MP4(软解现状可播,渲染层 Notice 已提供系统播放器入口);
+OHMSIDIAN 用户层 flags 实验开关保留。verify-asar 标记 v19 不变。
+
+
 
 **第 96 轮补充(96e):探针改为应用内 N-API 插件(shell 域被 SELinux 拦截)**
 
