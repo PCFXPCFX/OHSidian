@@ -743,6 +743,64 @@ static void logBufferConfig(const char *what, OHNativeWindowBuffer *wb)
         what, cfg.width, cfg.height, (int)cfg.format, (unsigned)cfg.usage, (int)cfg.stride);
 }
 
+/* Pre-warm the bridge's consumer queue (round 98i). The bridge's output
+   handler returns the codec slot and IMMEDIATELY acquires its own queue
+   exactly once - device logs 03:17/03:18: "no dirty buffer" on the
+   bridge's thread at +6..7ms after RenderOutputData, abort at +11..18ms,
+   no retry. In the no-relay configuration the HAL's flush lands in that
+   queue synchronously inside RenderOutputData, so the acquire always
+   succeeds; through the relay our converted frame lands at +9..11ms -
+   too late, and the first-frame RequestBuffer additionally pays the
+   queue's inline gralloc allocation (~5ms, the "noipc" warning).
+   Pre-flush two freshly-allocated (gralloc zeroed = black) buffers:
+   - if the bridge's factory consumes+releases them pre-Start, they come
+     back as free ALLOCATED buffers and the first conversion lands at
+     ~+3-4ms, ahead of the bridge's acquire;
+   - if it does not, the bridge's one acquire takes a black buffer
+     instead of failing, and the converted frame follows via the
+     event-driven OnImageReady path. */
+static void prewarmBridgeQueue(OHNativeWindow *win)
+{
+    if (gReqBuffer == NULL || gFlushBuffer == NULL || win == NULL) {
+        return;
+    }
+    int32_t curW = 0;
+    int32_t curH = 0;
+    int32_t curFmt = -1;
+    (void)gHandleOpt(win, GET_BUFFER_GEOMETRY, &curW, &curH);
+    (void)gHandleOpt(win, GET_FORMAT, &curFmt);
+    SHIM_LOGI("bridge window at engage: geometry=%{public}dx%{public}d fmt=%{public}d",
+        curW, curH, curFmt);
+    if (gRelayW > 0 && gRelayH > 0 && (curW != gRelayW || curH != gRelayH)) {
+        SHIM_LOGI("bridge window geometry differs from video - leaving it as-is");
+    }
+    gGeomSet = 1;
+    for (int i = 0; i < 2; i++) {
+        OHNativeWindowBuffer *wb = NULL;
+        int fence = -1;
+        if (gReqBuffer(win, &wb, &fence) != 0 || wb == NULL) {
+            SHIM_LOGI("prewarm: RequestBuffer #%{public}d failed", i);
+            return;
+        }
+        if (fence >= 0) {
+            close(fence);
+        }
+        if (i == 0) {
+            logBufferConfig("prewarm dst(bridge queue)", wb);
+        }
+        struct Rect dmg;
+        dmg.x = 0;
+        dmg.y = 0;
+        dmg.w = curW > 0 ? curW : gRelayW;
+        dmg.h = curH > 0 ? curH : gRelayH;
+        Region region;
+        region.rects = &dmg;
+        region.rectNumber = 1;
+        int ret = gFlushBuffer(win, wb, -1, region);
+        SHIM_LOGI("prewarm: bridge buffer #%{public}d flushed ret=%{public}d", i, ret);
+    }
+}
+
 static void waitFence(int fd)
 {
     if (fd < 0) return;
@@ -766,19 +824,6 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
     close(srcFence);
     srcFence = -1;
 
-    if (!gGeomSet && gRelayW > 0 && gRelayH > 0) {
-        int32_t curW = 0;
-        int32_t curH = 0;
-        int32_t curFmt = -1;
-        (void)gHandleOpt(origWin, GET_BUFFER_GEOMETRY, &curW, &curH);
-        (void)gHandleOpt(origWin, GET_FORMAT, &curFmt);
-        SHIM_LOGI("bridge window at first frame: geometry=%{public}dx%{public}d fmt=%{public}d",
-            curW, curH, curFmt);
-        if (curW != gRelayW || curH != gRelayH) {
-            SHIM_LOGI("bridge window geometry differs from video - leaving it as-is");
-        }
-        gGeomSet = 1;
-    }
     if (!gpuInit()) {
         gImageRelBuf(consumer, srcWinBuf, -1);
         return 1;
@@ -1018,7 +1063,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7h loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7i loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());
@@ -1224,6 +1269,7 @@ OH_AVErrCode OH_VideoDecoder_SetSurface(OH_AVCodec *codec, OHNativeWindow *windo
         }
     }
     pthread_mutex_unlock(&gRelayLock);
+    prewarmBridgeQueue(window);
     SHIM_LOGI("relay engaged: %{public}dx%{public}d NV12 -> RGBA into bridge window (worker %{public}d)",
         w, h, gWorkerStarted);
     return r;

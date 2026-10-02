@@ -4550,6 +4550,46 @@ WxH fmt=F` 与 `src/dst config: WxH fmt=F usage=U stride=S`——
 OnOutputFormatChanged 的 3840 几何对齐);若 Flush/Stop 日志在
 中止前出现,则走 seek/停止路径再查。
 
+**第 98 轮修订(98i,全链路代码审查结论):中止机制定案——桥接输出
+处理线程在放行槽后 ~6-7ms 对自己的队列做一次且仅一次 Acquire,
+中继帧 +9~11ms 落地必迟到;修复=SetSurface 时预灌 2 个黑缓冲**
+
+以 libelectron.so 二进制串 + 设备日志线程级时序 + OHOS
+graphic_surface 开源 BufferQueue 源码三方互证:
+
+1. 引擎架构(二进制串):渲染侧 `OhosVideoDecoder`
+   (media/gpu/ohos/ohos_video_decoder.cc)→ `CodecWrapperImpl` →
+   `MediaCodecDecoderBridgeImpl` → OH_AVCodec;帧工厂
+   `VideoFrameFactoryImpl::CreateVideoFrame_OnImageReady`
+   (事件驱动,NativeImage onFrameAvailable);桥接在创建解码器
+   之前即建好自己的 NativeImage(InitSurfaceImage 先于
+   CreateByMime)。asar 侧排除:8s 看门狗仅弹提示、硬解开关仅写
+   标志文件,均与本中止无关。
+
+2. 桥接时序(03:17/03:18 日志,线程 40987=桥接输出处理线程,
+   41133=垫片 worker,两实例一致):
+   `RenderOutputData #1`(放行槽)→ **+6~7ms 桥接线程 Acquire
+   自己的队列,失败(buffer_queue.cpp:927 "no dirty buffer")** →
+   等 5~8ms → +11~18ms 中止(音频 Stop→FreeOutputData×7 池清空→
+   Release)。仅一次 Acquire,无重试。
+
+3. BufferQueue 语义(开源源码):`RequestBuffer` 在 freeList 空时
+   **内联分配一个 gralloc 缓冲**(~3-5ms,即日志中 GRALLOC
+   "noipc" 警告);`FlushBuffer` 进 dirtyList;仅消费方
+   Acquire+Release 才回 freeList。无中继时 HAL 的 flush 在
+   RenderOutputData IPC 内同步完成,桥接即取必中——这就是 96g
+   能活的全部原因;经中继后帧晚 +3~5ms,首帧还叠加首次分配。
+
+修复(98i,shim v7i,44.2KB):SetSurface 接管完成后立即对桥接
+窗口执行 2 轮 RequestBuffer+FlushBuffer(内容=gralloc 清零=黑,
+fence=-1,全画面 damage)——
+- 桥接帧工厂若在 Start 前消费并释放:两缓冲回到 freeList 且已
+  分配,首帧转换降至 ~+3-4ms,赶在桥接 +6ms Acquire 之前;
+- 若不消费:桥接那次 Acquire 取到黑帧而非失败,管线不死,转换帧
+  经事件路径随后送达(首帧前最多 1 帧黑屏,不可感知)。
+同时把 98h 的几何查询/条件设置移到预灌前执行(先查再分配,分配
+即反映桥接窗口真实 fmt/geometry;与视频尺寸不同则不覆盖)。
+
 
 
 
