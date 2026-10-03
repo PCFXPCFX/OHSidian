@@ -4681,6 +4681,29 @@ NativeImage 持有缓冲直至下次 acquire,渲染器等待的"frame available"
    断裂与解码器实现无关,可能同样卡 1 帧——投入前建议先取上游结论;
 3. 短期用户方案:HEVC 文件走系统播放器路由(应用内已有转码提示)。
 
+**最终处置(第 98 轮末,用户决策):全部撤销,HEVC 转 TODO**
+
+断裂点在引擎内部、垫片无法触及,继续投入性价比低。已执行:
+
+- `git rm` 垫片全部源码与产物:scripts/vdec-shim/{shim.c,probe.c,
+  vdecprobe_addon.c}、electron/libs/arm64-v8a/{libnative_media_vdec.so,
+  libvdecprobe.so};
+- 移除 asar 内配套面:update-obsidian.mjs 中 96c 视频硬解实验开关
+  (ohsidian-video-hw)与 98n 测试媒体 autofetcher 块;refresh 后
+  verify-asar 全绿(改为断言 video-hw 已移除);仓库 testmedia/ 已删;
+- 真机侧:ohtest 5 个测试视频 + vdec-norelay.md 从仓库删除(用户自备
+  的 hevc_main10.mp4 保留);
+- web_engine/src/main/ets/utils/EngineFlags.ets 保留:通用用户层 flags
+  读取器,无写入方时不生效,可服务未来实验。
+
+**TODO(择机执行):基于 openharmony-sig/electron 开源代码自编译引擎,
+开启 HEVC 软解(FFmpeg demuxer/decoder 或补 FFmpegVideoDecoder 的
+hevc 编译开关)。软解路径不经过断裂的硬件呈现环(软件帧经
+VideoFrameFactory 直供渲染器,h264 软解已实证完整可播),自编译版
+理论上 HEVC 可直接播放;届时无需任何垫片。注意用户层
+ohsidian-flags-user.json 若残留 PlatformVideoDecoder flag,对软解
+无碍(h264 现状即软解),可手动清理。**
+
 
 
 

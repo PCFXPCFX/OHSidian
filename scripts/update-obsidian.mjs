@@ -1400,34 +1400,6 @@ var install=function(app){
           try{new Notice("OHSidian 运行日志捕获 → "+(on?"关闭":"开启")+" (重启应用后生效)")}catch(e){}
         }catch(e){}
       }});
-    /* Round 96c: the vdec-shim experiment toggle. The HAP bundles a
-       libnative_media_vdec.so shim that fixes the engine bridge's broken
-       decoder Configure (adds pixel_format when absent) - but the platform
-       routing itself stays OFF unless this feature flag is present. The
-       toggle writes the USER-LAYER flags file that EngineFlags (round 96)
-       reads at boot, so the experiment never ships enabled by default.
-       Needs the shim lib in the package + an app restart. */
-    app.commands.addCommand({id:"ohsidian-video-hw",name:"OHSidian: 视频硬解(实验) 开/关 (重启生效)",
-      callback:function(){
-        try{
-          var p=dataDir()+"/ohsidian-flags-user.json";
-          var fsMod=require("fs");
-          var cfg={};
-          try{cfg=JSON.parse(fsMod.readFileSync(p,"utf8"))}catch(e){cfg={}}
-          var flags=Array.isArray(cfg.extraFlags)?cfg.extraFlags:[];
-          var FLAG="--enable-features=PlatformVideoDecoder,kIsPlatformVideoDecoder,PlatformAudioDecoder,kIsPlatformAudioDecoder";
-          var idx=flags.indexOf(FLAG);
-          if(idx>=0){
-            flags.splice(idx,1);
-            try{new Notice("OHSidian 视频硬解(实验) → 关闭 (重启生效)")}catch(e){}
-          }else{
-            flags.push(FLAG);
-            try{new Notice("OHSidian 视频硬解(实验) → 开启 (重启生效;需包内 vdec 垫片)")}catch(e){}
-          }
-          cfg.extraFlags=flags;
-          fsMod.writeFileSync(p,JSON.stringify(cfg,null,2),"utf8");
-        }catch(e){try{new Notice("OHSidian 视频硬解开关写入失败: "+(e&&e.message||e))}catch(e2){}}
-      }});
     /* Zoom-style font scale chooser: cycles 跟随系统 → 100% → 110% → 125% →
        150% → 100%... Written into the mode file as cfg.fontScaleOverride;
        the effective scale = override || cfg.fontScale (system). This gives
@@ -1525,69 +1497,6 @@ const MAIN_PROCESS_PATCH = `;(function(){try{
    userData dir BEFORE main.js computes the socket path (this patch is
    prepended to main.js). app.getPath works pre-ready; on failure the socket
    stays on homedir and the old EPERM noise returns - no regression. */
-/* 98n: test-media autofetcher (TEMPORARY, round-98 diagnostics). hdc rport
-   forwards device 127.0.0.1:18080 to the dev PC :8000 serving the twin
-   8-bit/10-bit HEVC files. On ready, locate the vault dir (Documents/
-   obisidian/obisidian via several candidate real paths) and download both
-   files straight into it with Node http - no manual file transfer needed.
-   Every step logs to hilog via the console bridge. Remove once the
-   bit-depth question is answered. */
-try{
-  var __ohsTm=require("electron").app;
-  __ohsTm.whenReady().then(function(){
-    try{
-      var http=require("http"),fs=require("fs"),path=require("path");
-      var rel=path.join("obisidian","obisidian");
-      var cands=[];
-      try{cands.push(path.join(__ohsTm.getPath("documents"),rel));}catch(e){}
-      cands.push(path.join("/storage/Users/currentUser/Documents",rel));
-      cands.push(path.join("/data/service/el2/100/hmdfs/account/files/Docs",rel));
-      cands.push(path.join("/mnt/data/100/HO_MEDIA",rel));
-      cands.push(path.join("/mnt/data/100/HO_MEDIA/Docs",rel));
-      var vault=null;
-      /* Authoritative: obsidian.json records the vault Obsidian actually
-         opened - the previous run wrote into the Documents URI path, which
-         the app can stat, but the user's live vault may be a different
-         mount view. Prefer the open vault's real path. */
-      try{
-        var udir=__ohsTm.getPath("userData");
-        var oj=JSON.parse(fs.readFileSync(path.join(udir,"obsidian.json"),"utf8"));
-        var vs=oj.vaults||{};
-        for(var k in vs){ if(vs[k]&&vs[k].open&&vs[k].path){ vault=vs[k].path; break; } }
-        console.log("[OHSidian] test-media obsidian.json open vault: "+vault);
-      }catch(e){ console.log("[OHSidian] test-media obsidian.json failed: "+(e&&e.message||e)); }
-      if(!vault){
-        for(var i=0;i<cands.length;i++){
-          try{
-            var st=fs.statSync(cands[i]);
-            if(st.isDirectory()){fs.accessSync(cands[i],fs.constants.W_OK);vault=cands[i];break;}
-          }catch(e){}
-        }
-      }
-      console.log("[OHSidian] test-media vault probe: "+cands.map(function(c,idx){return idx+":"+(fs.existsSync(c)?"Y":"n");}).join(" ")+" -> "+(vault||"NONE"));
-      if(vault){
-        try{ console.log("[OHSidian] test-media vault listing: "+fs.readdirSync(vault).slice(0,15).join(", ")); }catch(e){ console.log("[OHSidian] test-media listing failed: "+(e&&e.message||e)); }
-      }
-      if(!vault){
-        try{cands=[path.join(__ohsTm.getPath("documents"))];}catch(e){}
-        try{fs.mkdirSync(path.join(__ohsTm.getPath("documents"),rel),{recursive:true});vault=path.join(__ohsTm.getPath("documents"),rel);console.log("[OHSidian] test-media mkdir fallback: "+vault);}catch(e){console.log("[OHSidian] test-media mkdir fallback failed: "+(e&&e.message||e));}
-      }
-      if(!vault)return;
-      ["hevc_8bit_1080p.mp4","hevc_10bit_1080p.mp4","audio_only.m4a","hevc_8bit_noaudio.mp4","h264_8bit_with_audio.mp4"].forEach(function(name){
-        var dst=path.join(vault,name);
-        try{var st=fs.statSync(dst);if(st.size>10000000){console.log("[OHSidian] test-media exists: "+dst);return;}}catch(e){}
-        var req=http.get("http://127.0.0.1:18080/"+name,function(res){
-          if(res.statusCode!==200){console.log("[OHSidian] test-media "+name+" http "+res.statusCode);return;}
-          var out=fs.createWriteStream(dst);
-          res.pipe(out);
-          out.on("finish",function(){console.log("[OHSidian] test-media fetched: "+dst);});
-          out.on("error",function(e){console.log("[OHSidian] test-media write "+name+" error: "+(e&&e.message||e));});
-        });
-        req.on("error",function(e){console.log("[OHSidian] test-media "+name+" error: "+(e&&e.message||e));});
-      });
-    }catch(e){console.log("[OHSidian] test-media failed: "+(e&&e.message||e));}
-  });
-}catch(e){}
 if(!process.env.XDG_RUNTIME_DIR){
   try{
     process.env.XDG_RUNTIME_DIR=require("electron").app.getPath("userData");
@@ -1749,7 +1658,7 @@ if(__ohDvApp.isReady()){__ohDvRegister()}else{__ohDvApp.on("ready",__ohDvRegiste
    whenever the engine routes main stderr there, same as the other
    [OHSidian] main lines - and (2) appends them to
    <Documents|userData>/OHSidian/console.log (single 512KB rotation to
-   console.old.log), pullable from 文件管理 or `hdc file recv` on the
+   console.old.log), pullable from 文件管理 or \`hdc file recv\` on the
    public Documents path. */
 ;(function(){try{
 if(globalThis.__ohsidianConsoleBridge)return;globalThis.__ohsidianConsoleBridge=true;

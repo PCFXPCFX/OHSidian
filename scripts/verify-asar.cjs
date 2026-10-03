@@ -26,7 +26,9 @@ try {
   }
   const checks = {
     'app touch patch v19': app.includes('__ohsidianTouchPatch==="19"'),
-    'app video-hw experiment toggle (round 96c)': app.includes('ohsidian-video-hw'),
+    // Round 98r revert: the vdec-shim experiment is shelved (see
+    // docs/CHANGES-2026-09.md HEVC verdict); assert the toggle is GONE.
+    'app video-hw toggle removed (98r revert)': !app.includes('ohsidian-video-hw'),
     'app console bridge opt-in (round 96b)': app.includes('ohsidianConsoleCapture'),
     'main console bridge (round 96b)': main.includes('__ohsidianConsoleBridge'),
     'app media hang watchdog (round 95c)': app.includes('loadedmetadata') && app.includes('__ohsidianWatched'),
