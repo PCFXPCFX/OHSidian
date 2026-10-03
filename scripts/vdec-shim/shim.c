@@ -1080,7 +1080,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7l loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7m loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());
@@ -1195,8 +1195,43 @@ OH_AVErrCode OH_VideoDecoder_RegisterCallback(OH_AVCodec *codec, OH_AVCodecCallb
     return gRegisterCallback ? gRegisterCallback(codec, callback, userData) : AV_ERR_UNKNOWN;
 }
 
+/* 98p diagnostic: when <Documents>/vdec-norelay exists, SetSurface passes
+   through and the codec renders NV12 straight into the bridge window (the
+   96g configuration). If the resulting garbage ANIMATES, the engine's
+   direct producer->factory chain flows continuously and the break is in
+   our relay's frame-2+ delivery; if it is a STATIC frame, the hardware
+   surface path stalls upstream of the shim entirely. */
+static int gNoRelayChecked = 0;
+static int gNoRelay = 0;
+
+static int checkNoRelayFlag(void)
+{
+    if (gNoRelayChecked) {
+        return gNoRelay;
+    }
+    gNoRelayChecked = 1;
+    const char *paths[] = {
+        "/storage/Users/currentUser/Documents/vdec-norelay",
+        "/data/storage/el2/base/haps/entry/files/vdec-norelay",
+        NULL
+    };
+    for (int i = 0; paths[i] != NULL; i++) {
+        if (access(paths[i], F_OK) == 0) {
+            gNoRelay = 1;
+            SHIM_LOGI("norelay flag found at %{public}s - SetSurface passthrough mode", paths[i]);
+            return gNoRelay;
+        }
+    }
+    return gNoRelay;
+}
+
 OH_AVErrCode OH_VideoDecoder_SetSurface(OH_AVCodec *codec, OHNativeWindow *window)
 {
+    if (window != NULL && checkNoRelayFlag()) {
+        OH_AVErrCode r0 = gSetSurface ? gSetSurface(codec, window) : AV_ERR_UNKNOWN;
+        SHIM_LOGI("SetSurface(norelay passthrough) -> %{public}d", r0);
+        return r0;
+    }
     if (window == NULL || gConsumerCreate == NULL || gImageAcqWin == NULL ||
         gImageSetListener == NULL || gMapPlanes == NULL || gFromNWB == NULL ||
         gHandleOpt == NULL || gImageAcqBuf == NULL || gImageRelBuf == NULL ||
