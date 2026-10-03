@@ -1407,58 +1407,7 @@ var install=function(app){
        toggle writes the USER-LAYER flags file that EngineFlags (round 96)
        reads at boot, so the experiment never ships enabled by default.
        Needs the shim lib in the package + an app restart. */
-    /* 98m: test-media fetcher (TEMPORARY, round-98 diagnostics). The main
-   process has Documents write permission and Node http; hdc rport
-   forwards device:18080 to the dev PC's :8000 serving the twin test
-   files. Command copies them into the open vault folder so the
-   8-bit/10-bit bit-depth comparison can run without any manual file
-   transfer. Remove once the bit-depth question is answered. */
-app.whenReady().then(function(){
-  function __ohsFetchTestMedia(){
-    try{
-      var http=require("http"),fs=require("fs"),path=require("path");
-      var vaults=global.__ohsidianVaultDirs||[];
-      var vault=null;
-      try{
-        var sess=require("electron").session;
-      }catch(e){}
-      try{
-        var cfg=fs.readFileSync(path.join(process.env.HOME||"","ohsidian-vault.txt"),"utf8");
-      }catch(e){}
-      var cands=[];
-      try{ cands.push(require("electron").app.getPath("documents")); }catch(e){}
-      function tryVault(dir){
-        if(!dir)return false;
-        try{
-          var st=fs.statSync(dir);
-          if(!st.isDirectory())return false;
-        }catch(e){ return false; }
-        vault=dir; return true;
-      }
-      var found=cands.some(tryVault);
-      if(!found){ console.log("[OHSidian] fetch-test-media: no documents dir"); return; }
-      var files=["hevc_8bit_1080p.mp4","hevc_10bit_1080p.mp4"];
-      var done=0;
-      files.forEach(function(name){
-        var dst=path.join(vault,name);
-        try{ var st=fs.statSync(dst); if(st.size>10000000){ console.log("[OHSidian] exists: "+dst); done++; return; } }catch(e){}
-        var req=http.get("http://127.0.0.1:18080/"+name,function(res){
-          if(res.statusCode!==200){ console.log("[OHSidian] fetch "+name+" http "+res.statusCode); return; }
-          var out=fs.createWriteStream(dst);
-          res.pipe(out);
-          out.on("finish",function(){ done++; console.log("[OHSidian] fetched: "+dst+" ("+done+"/2)"); });
-        });
-        req.on("error",function(e){ console.log("[OHSidian] fetch "+name+" error: "+(e&&e.message||e)); });
-      });
-    }catch(e){ console.log("[OHSidian] fetch-test-media failed: "+(e&&e.message||e)); }
-  }
-  try{
-    app.commands.addCommand({id:"ohsidian-fetch-test-media",name:"OHSidian: 下载测试媒体 (8bit/10bit HEVC)",
-      callback:function(){ __ohsFetchTestMedia(); }});
-  }catch(e){}
-});
-
-app.commands.addCommand({id:"ohsidian-video-hw",name:"OHSidian: 视频硬解(实验) 开/关 (重启生效)",
+    app.commands.addCommand({id:"ohsidian-video-hw",name:"OHSidian: 视频硬解(实验) 开/关 (重启生效)",
       callback:function(){
         try{
           var p=dataDir()+"/ohsidian-flags-user.json";
@@ -1576,6 +1525,53 @@ const MAIN_PROCESS_PATCH = `;(function(){try{
    userData dir BEFORE main.js computes the socket path (this patch is
    prepended to main.js). app.getPath works pre-ready; on failure the socket
    stays on homedir and the old EPERM noise returns - no regression. */
+/* 98n: test-media autofetcher (TEMPORARY, round-98 diagnostics). hdc rport
+   forwards device 127.0.0.1:18080 to the dev PC :8000 serving the twin
+   8-bit/10-bit HEVC files. On ready, locate the vault dir (Documents/
+   obisidian/obisidian via several candidate real paths) and download both
+   files straight into it with Node http - no manual file transfer needed.
+   Every step logs to hilog via the console bridge. Remove once the
+   bit-depth question is answered. */
+try{
+  var __ohsTm=require("electron").app;
+  __ohsTm.whenReady().then(function(){
+    try{
+      var http=require("http"),fs=require("fs"),path=require("path");
+      var rel=path.join("obisidian","obisidian");
+      var cands=[];
+      try{cands.push(path.join(__ohsTm.getPath("documents"),rel));}catch(e){}
+      cands.push(path.join("/storage/Users/currentUser/Documents",rel));
+      cands.push(path.join("/data/service/el2/100/hmdfs/account/files/Docs",rel));
+      cands.push(path.join("/mnt/data/100/HO_MEDIA",rel));
+      cands.push(path.join("/mnt/data/100/HO_MEDIA/Docs",rel));
+      var vault=null;
+      for(var i=0;i<cands.length;i++){
+        try{
+          var st=fs.statSync(cands[i]);
+          if(st.isDirectory()){fs.accessSync(cands[i],fs.constants.W_OK);vault=cands[i];break;}
+        }catch(e){}
+      }
+      console.log("[OHSidian] test-media vault probe: "+cands.map(function(c,idx){return idx+":"+(fs.existsSync(c)?"Y":(vault===c?"W":"n"));}).join(" ")+" -> "+(vault||"NONE"));
+      if(!vault){
+        try{cands=[path.join(__ohsTm.getPath("documents"))];}catch(e){}
+        try{fs.mkdirSync(path.join(__ohsTm.getPath("documents"),rel),{recursive:true});vault=path.join(__ohsTm.getPath("documents"),rel);console.log("[OHSidian] test-media mkdir fallback: "+vault);}catch(e){console.log("[OHSidian] test-media mkdir fallback failed: "+(e&&e.message||e));}
+      }
+      if(!vault)return;
+      ["hevc_8bit_1080p.mp4","hevc_10bit_1080p.mp4"].forEach(function(name){
+        var dst=path.join(vault,name);
+        try{var st=fs.statSync(dst);if(st.size>10000000){console.log("[OHSidian] test-media exists: "+dst);return;}}catch(e){}
+        var req=http.get("http://127.0.0.1:18080/"+name,function(res){
+          if(res.statusCode!==200){console.log("[OHSidian] test-media "+name+" http "+res.statusCode);return;}
+          var out=fs.createWriteStream(dst);
+          res.pipe(out);
+          out.on("finish",function(){console.log("[OHSidian] test-media fetched: "+dst);});
+          out.on("error",function(e){console.log("[OHSidian] test-media write "+name+" error: "+(e&&e.message||e));});
+        });
+        req.on("error",function(e){console.log("[OHSidian] test-media "+name+" error: "+(e&&e.message||e));});
+      });
+    }catch(e){console.log("[OHSidian] test-media failed: "+(e&&e.message||e));}
+  });
+}catch(e){}
 if(!process.env.XDG_RUNTIME_DIR){
   try{
     process.env.XDG_RUNTIME_DIR=require("electron").app.getPath("userData");
