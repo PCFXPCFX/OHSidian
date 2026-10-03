@@ -4615,6 +4615,30 @@ fmt=35(YCBCR_420_SP) stride=3840` 证实源侧正常。
 判定:prewarm 两条 flushed ret=0 → dst config fmt=12 →
 relayed N frames 增长 → 画面正常 = 打通。
 
+**第 98 轮修订(98k,10:59 日志):几何修复生效但中止提前到 +4ms——
+预灌黑帧被桥接成功取走后仍中止;根因收口到缓冲用途位缺失——
+我们分配的 dst usage=0x9(仅 CPU_READ|MEM_DMA),编解码器自产
+usage=0x8408(含 HW 位);工厂的 GL 导入非 HW_TEXTURE 缓冲必败**
+修复=SET_USAGE(HW_RENDER|HW_TEXTURE|MEM_DMA|CPU_READ)**
+
+10:59 实测(进程 28271,v7j)证伪了"桥接同步 Acquire 失败"为中止
+主因:这次全日志无任何桥接侧 Acquire 失败(预灌黑帧被它取走了),
+中止却提前到放行后 +4ms(FreeOutputData ×7 先于我们 +7ms 的转换
+帧落地)。合并 98g(+13ms 转换帧落地后立刻中止)对照,两次中止
+都精确发生在**桥接帧工厂第一次导入我们分配的缓冲**之时;而 96g
+(无中继)工厂导入 HAL 自产缓冲从未中止。两者唯一缓冲级差异:
+usage。SDK 头文件证实:NATIVEBUFFER_USAGE_HW_RENDER=1<<8(GPU
+写入,我们 FBO 需要)、HW_TEXTURE=1<<9(GPU 读取,工厂导入+
+合成器需要);引擎窗口默认 usage=0x9 一点 HW 位都没有。
+
+98k(shim v7k,44.1KB):预灌分配前对桥接窗口
+`SET_USAGE(HW_RENDER|HW_TEXTURE|MEM_DMA|CPU_READ)`(0x309),
+与 HAL 生产者行为对齐;分配仍在预灌中完成(不在逐帧关键路径,
+即使触发慢分配也只在 SetSurface 时一次)。98j 的无条件几何设置
+保留。判定:重测后 `prewarm dst config` 的 usage 应含 HW 位;
+若 `relayed N frames` 增长即成功;若中止时点仍伴随工厂首次导入,
+则转入软解后备(libde265/ffmpeg hevc)。
+
 
 
 

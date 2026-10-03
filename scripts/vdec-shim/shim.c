@@ -778,6 +778,19 @@ static void prewarmBridgeQueue(OHNativeWindow *win)
        the first frame was dropped - prewarm RequestBuffer #0 failed). Set
        the coded size unconditionally, like the HAL would. */
     (void)gHandleOpt(win, SET_BUFFER_GEOMETRY, gRelayW, gRelayH);
+    /* Round 98k: the HAL also sets the buffer USAGE before allocating -
+       the codec's own buffers carry usage=0x8408 while ours allocated with
+       the engine's default 0x9 (CPU_READ|MEM_DMA only, NO hardware bits).
+       Every first factory import of one of our buffers coincided with the
+       pipeline abort (98g: converted frame at +13ms; 98j: pre-flushed
+       black frame at +4ms) - a non-HW_TEXTURE buffer cannot be imported
+       as a GL texture by the bridge's frame factory. Request the GPU bits
+       the pipeline needs: HW_RENDER (our FBO writes it), HW_TEXTURE (the
+       factory + compositor read it), MEM_DMA, CPU_READ. Allocation now
+       happens in the prewarm below, off the per-frame critical path. */
+    (void)gHandleOpt(win, SET_USAGE,
+        (int64_t)(NATIVEBUFFER_USAGE_HW_RENDER | NATIVEBUFFER_USAGE_HW_TEXTURE |
+                  NATIVEBUFFER_USAGE_MEM_DMA | NATIVEBUFFER_USAGE_CPU_READ));
     gGeomSet = 1;
     for (int i = 0; i < 2; i++) {
         OHNativeWindowBuffer *wb = NULL;
@@ -1067,7 +1080,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7j loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7k loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());
