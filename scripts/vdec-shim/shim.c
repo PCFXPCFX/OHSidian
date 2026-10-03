@@ -1210,8 +1210,14 @@ static int checkNoRelayFlag(void)
         return gNoRelay;
     }
     gNoRelayChecked = 1;
+    /* Candidates include the live vault (from obsidian.json, seen in the
+       12:23 device log) so the user can simply create a NOTE named
+       "vdec-norelay" inside Obsidian - it lands as vdec-norelay.md. */
     const char *paths[] = {
         "/storage/Users/currentUser/Documents/vdec-norelay",
+        "/storage/Users/currentUser/Documents/vdec-norelay.md",
+        "/storage/Users/currentUser/Documents/OHSidian/Obsidian Vault/vdec-norelay",
+        "/storage/Users/currentUser/Documents/OHSidian/Obsidian Vault/vdec-norelay.md",
         "/data/storage/el2/base/haps/entry/files/vdec-norelay",
         NULL
     };
