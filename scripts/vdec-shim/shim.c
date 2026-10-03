@@ -761,7 +761,8 @@ static void logBufferConfig(const char *what, OHNativeWindowBuffer *wb)
      event-driven OnImageReady path. */
 static void prewarmBridgeQueue(OHNativeWindow *win)
 {
-    if (gReqBuffer == NULL || gFlushBuffer == NULL || win == NULL) {
+    if (gReqBuffer == NULL || gFlushBuffer == NULL || win == NULL ||
+        gHandleOpt == NULL || gRelayW <= 0 || gRelayH <= 0) {
         return;
     }
     int32_t curW = 0;
@@ -771,9 +772,12 @@ static void prewarmBridgeQueue(OHNativeWindow *win)
     (void)gHandleOpt(win, GET_FORMAT, &curFmt);
     SHIM_LOGI("bridge window at engage: geometry=%{public}dx%{public}d fmt=%{public}d",
         curW, curH, curFmt);
-    if (gRelayW > 0 && gRelayH > 0 && (curW != gRelayW || curH != gRelayH)) {
-        SHIM_LOGI("bridge window geometry differs from video - leaving it as-is");
-    }
+    /* We are this window's producer now. In the direct configuration the
+       CODEC's HAL sets the queue geometry (device log 10:53: the engine
+       leaves it 0x0; RequestBuffer with 0x0 geometry fails allocation and
+       the first frame was dropped - prewarm RequestBuffer #0 failed). Set
+       the coded size unconditionally, like the HAL would. */
+    (void)gHandleOpt(win, SET_BUFFER_GEOMETRY, gRelayW, gRelayH);
     gGeomSet = 1;
     for (int i = 0; i < 2; i++) {
         OHNativeWindowBuffer *wb = NULL;
@@ -791,8 +795,8 @@ static void prewarmBridgeQueue(OHNativeWindow *win)
         struct Rect dmg;
         dmg.x = 0;
         dmg.y = 0;
-        dmg.w = curW > 0 ? curW : gRelayW;
-        dmg.h = curH > 0 ? curH : gRelayH;
+        dmg.w = gRelayW;
+        dmg.h = gRelayH;
         Region region;
         region.rects = &dmg;
         region.rectNumber = 1;
@@ -1063,7 +1067,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7i loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7j loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());

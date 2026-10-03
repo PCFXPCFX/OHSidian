@@ -4590,6 +4590,31 @@ fence=-1,全画面 damage)——
 同时把 98h 的几何查询/条件设置移到预灌前执行(先查再分配,分配
 即反映桥接窗口真实 fmt/geometry;与视频尺寸不同则不覆盖)。
 
+**第 98 轮修订(98j,10:53 日志):98h 的"几何不同不覆盖"判断方向
+反了——桥接窗口几何 0x0(fmt=12=RGBA8888 证实格式路线正确),
+RequestBuffer 直接分配失败,帧 1 被丢弃;修复=预灌前无条件
+SET_BUFFER_GEOMETRY(生产者职责归还垫片)**
+
+10:53 实测(进程 22666,v7i)给出两个决定性事实:
+1. `bridge window at engage: geometry=0x0 fmt=12`——桥接窗口
+   **从未有几何**(fmt=12=RGBA8888,证实桥接工厂期望的就是 RGBA,
+   转换路线的格式前提成立)。原因:无中继配置里几何由**编解码器
+   HAL 作为生产者**在 Start 时设置;中继接管后 HAL 只设置中继
+   窗口,桥接窗口成为 0x0;
+2. `prewarm: RequestBuffer #0 failed` + 无 `dst(bridge queue)
+   config` 日志——几何 0x0 时 isValidAttr(0,0,..) 失败,
+   RequestBuffer 分配不了缓冲:预灌失败,**帧 1 的 dst
+   RequestBuffer 同样失败**,帧 1 被直接丢弃,桥接获取照旧落空,
+   中止(本次连 relayed 都没有)。
+
+98h 的"几何不同→不覆盖"恰好把生产者职责丢掉了。98j(shim v7j,
+44.1KB):预灌前无条件 `SET_BUFFER_GEOMETRY(1920x1080)`(与 HAL
+在生产者位置会做的完全一致),预灌随即能分配 RGBA 缓冲并灌入 2
+个黑帧;首帧转换不再付首次分配成本。`src config: 1920x1080
+fmt=35(YCBCR_420_SP) stride=3840` 证实源侧正常。
+判定:prewarm 两条 flushed ret=0 → dst config fmt=12 →
+relayed N frames 增长 → 画面正常 = 打通。
+
 
 
 
