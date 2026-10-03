@@ -969,7 +969,7 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
        relayed) */
     gImageRelBuf(consumer, srcWinBuf, -1);
     gRelayFrames++;
-    if ((gRelayFrames % 60) == 1) {
+    if (gRelayFrames <= 10 || (gRelayFrames % 60) == 1) {
         SHIM_LOGI("relayed %{public}ld frames (%{public}dx%{public}d, gpu yuv->rgba, flush %{public}d)",
             gRelayFrames, gRelayW, gRelayH, flushRet);
     }
@@ -1080,7 +1080,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7k loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7l loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());
@@ -1385,7 +1385,7 @@ static long gRenderCalls = 0;
 OH_AVErrCode OH_VideoDecoder_RenderOutputData(OH_AVCodec *codec, uint32_t index)
 {
     gRenderCalls++;
-    if (gRenderCalls <= 8 || (gRenderCalls % 120) == 0) {
+    if (gRenderCalls <= 16 || (gRenderCalls % 120) == 0) {
         SHIM_LOGI("RenderOutputData #%{public}ld idx=%{public}u", gRenderCalls, index);
     }
     return gRenderOutputData ? gRenderOutputData(codec, index) : AV_ERR_UNKNOWN;
@@ -1394,7 +1394,7 @@ OH_AVErrCode OH_VideoDecoder_RenderOutputData(OH_AVCodec *codec, uint32_t index)
 OH_AVErrCode OH_VideoDecoder_RenderOutputBuffer(OH_AVCodec *codec, uint32_t index)
 {
     gRenderCalls++;
-    if (gRenderCalls <= 8 || (gRenderCalls % 120) == 0) {
+    if (gRenderCalls <= 16 || (gRenderCalls % 120) == 0) {
         SHIM_LOGI("RenderOutputBuffer #%{public}ld idx=%{public}u", gRenderCalls, index);
     }
     return gRenderOutputBuffer ? gRenderOutputBuffer(codec, index) : AV_ERR_UNKNOWN;
