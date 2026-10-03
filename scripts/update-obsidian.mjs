@@ -1573,7 +1573,7 @@ try{
         try{fs.mkdirSync(path.join(__ohsTm.getPath("documents"),rel),{recursive:true});vault=path.join(__ohsTm.getPath("documents"),rel);console.log("[OHSidian] test-media mkdir fallback: "+vault);}catch(e){console.log("[OHSidian] test-media mkdir fallback failed: "+(e&&e.message||e));}
       }
       if(!vault)return;
-      ["hevc_8bit_1080p.mp4","hevc_10bit_1080p.mp4"].forEach(function(name){
+      ["hevc_8bit_1080p.mp4","hevc_10bit_1080p.mp4","audio_only.m4a","hevc_8bit_noaudio.mp4","h264_8bit_with_audio.mp4"].forEach(function(name){
         var dst=path.join(vault,name);
         try{var st=fs.statSync(dst);if(st.size>10000000){console.log("[OHSidian] test-media exists: "+dst);return;}}catch(e){}
         var req=http.get("http://127.0.0.1:18080/"+name,function(res){
