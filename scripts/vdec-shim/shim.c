@@ -1206,10 +1206,11 @@ static int gNoRelay = 0;
 
 static int checkNoRelayFlag(void)
 {
-    if (gNoRelayChecked) {
-        return gNoRelay;
-    }
-    gNoRelayChecked = 1;
+    /* re-checked on EVERY SetSurface: the flag file may be created (a note
+       in the vault) while the app is running; caching made the 15:08 test
+       invalid (the check ran at the first playback, before the note
+       existed, and was never re-evaluated). access() is cheap. */
+    gNoRelayChecked = 0;
     /* Candidates include the live vault (from obsidian.json, seen in the
        12:23 device log) so the user can simply create a NOTE named
        "vdec-norelay" inside Obsidian - it lands as vdec-norelay.md. */
