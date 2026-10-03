@@ -145,6 +145,7 @@ typedef int32_t (*PFN_ImageAcqBuf)(OH_NativeImage *image, OHNativeWindowBuffer *
 typedef int32_t (*PFN_ImageRelBuf)(OH_NativeImage *image, OHNativeWindowBuffer *nativeWindowBuffer, int fenceFd);
 typedef int32_t (*PFN_ImageSetListener)(OH_NativeImage *image, OH_OnFrameAvailableListener listener);
 typedef void (*PFN_ImageDestroy)(OH_NativeImage **image);
+typedef int64_t (*PFN_ImageGetTimestamp)(OH_NativeImage *image);
 
 static PFN_WindowOpt gHandleOpt;
 static PFN_ReqBuffer gReqBuffer;
@@ -159,6 +160,7 @@ static PFN_ImageAcqBuf gImageAcqBuf;
 static PFN_ImageRelBuf gImageRelBuf;
 static PFN_ImageSetListener gImageSetListener;
 static PFN_ImageDestroy gImageDestroy;
+static PFN_ImageGetTimestamp gImageGetTimestamp;
 
 static void *coreSym(const char *name)
 {
@@ -792,30 +794,10 @@ static void prewarmBridgeQueue(OHNativeWindow *win)
         (int64_t)(NATIVEBUFFER_USAGE_HW_RENDER | NATIVEBUFFER_USAGE_HW_TEXTURE |
                   NATIVEBUFFER_USAGE_MEM_DMA | NATIVEBUFFER_USAGE_CPU_READ));
     gGeomSet = 1;
-    for (int i = 0; i < 2; i++) {
-        OHNativeWindowBuffer *wb = NULL;
-        int fence = -1;
-        if (gReqBuffer(win, &wb, &fence) != 0 || wb == NULL) {
-            SHIM_LOGI("prewarm: RequestBuffer #%{public}d failed", i);
-            return;
-        }
-        if (fence >= 0) {
-            close(fence);
-        }
-        if (i == 0) {
-            logBufferConfig("prewarm dst(bridge queue)", wb);
-        }
-        struct Rect dmg;
-        dmg.x = 0;
-        dmg.y = 0;
-        dmg.w = gRelayW;
-        dmg.h = gRelayH;
-        Region region;
-        region.rects = &dmg;
-        region.rectNumber = 1;
-        int ret = gFlushBuffer(win, wb, -1, region);
-        SHIM_LOGI("prewarm: bridge buffer #%{public}d flushed ret=%{public}d", i, ret);
-    }
+    /* 98q: the 2-dummy-buffer prewarm is REMOVED. It injected spurious
+       frames into the factory's request/response channel (the black
+       frames carried pts=0), and its original rationale (bridge acquire
+       timing) was disproven. Geometry and usage setting stay. */
 }
 
 static void waitFence(int fd)
@@ -954,6 +936,22 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
     /* Full-rect damage region: some BufferQueue dirty-accounting paths
        need a non-empty region for the buffer to become acquirable by the
        bridge's consumer (the "no dirty buffer" cache log at 02:57). */
+    /* 98q: carry the codec's own presentation timestamp over to the bridge
+       window. The direct path (codec as producer) stamps every frame; our
+       flush never did, so every converted frame carried pts=0 - the
+       renderer's frame pacing sees no time progress after frame 1, which
+       is exactly the one-frame-then-stall signature (device logs 12:24 -
+       13:00, avc AND hevc). OH_NativeImage_GetTimestamp returns the pts of
+       the most recently acquired buffer, i.e. the frame we just took.
+       Fallback: synthesized 60fps grid. */
+    int64_t ts = -1;
+    if (gImageGetTimestamp != NULL) {
+        ts = gImageGetTimestamp(consumer);
+    }
+    if (ts <= 0) {
+        ts = (int64_t)(gRelayFrames + 1) * 16667;
+    }
+    (void)gHandleOpt(origWin, SET_DESIRED_PRESENT_TIMESTAMP, ts);
     struct Rect dmg;
     dmg.x = 0;
     dmg.y = 0;
@@ -970,8 +968,8 @@ static int relayOneFrame(OH_NativeImage *consumer, OHNativeWindow *origWin)
     gImageRelBuf(consumer, srcWinBuf, -1);
     gRelayFrames++;
     if (gRelayFrames <= 10 || (gRelayFrames % 60) == 1) {
-        SHIM_LOGI("relayed %{public}ld frames (%{public}dx%{public}d, gpu yuv->rgba, flush %{public}d)",
-            gRelayFrames, gRelayW, gRelayH, flushRet);
+        SHIM_LOGI("relayed %{public}ld frames (pts=%{public}ld, flush %{public}d)",
+            gRelayFrames, ts, flushRet);
     }
     return 1;
 }
@@ -1080,7 +1078,7 @@ static void *realSym(void *handle, const char *name)
 
 __attribute__((constructor)) static void shimInit(void)
 {
-    SHIM_LOGI("shim v7m loaded - gpu surface-relay compat layer (round 98)");
+    SHIM_LOGI("shim v7n loaded - gpu surface-relay compat layer (round 98)");
     gReal = dlopen("/system/lib64/libnative_media_vdec.so", RTLD_NOW | RTLD_LOCAL);
     if (gReal == NULL) {
         SHIM_LOGE("FATAL: real libnative_media_vdec.so dlopen failed: %{public}s", dlerror());
@@ -1136,6 +1134,8 @@ __attribute__((constructor)) static void shimInit(void)
         "OH_NativeImage_SetOnFrameAvailableListener");
     gImageDestroy = (PFN_ImageDestroy)libSym(&gImgLib, "libnative_image.so",
         "OH_NativeImage_Destroy");
+    gImageGetTimestamp = (PFN_ImageGetTimestamp)libSym(&gImgLib, "libnative_image.so",
+        "OH_NativeImage_GetTimestamp");
     SHIM_LOGI("symbols: configure=%{public}d getfmt=%{public}d handleopt=%{public}d "
         "consumer=%{public}d acqbuf=%{public}d mapplanes=%{public}d",
         gConfigure != NULL, gGetIntValue != NULL, gHandleOpt != NULL,
