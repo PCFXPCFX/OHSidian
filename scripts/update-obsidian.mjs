@@ -1545,13 +1545,29 @@ try{
       cands.push(path.join("/mnt/data/100/HO_MEDIA",rel));
       cands.push(path.join("/mnt/data/100/HO_MEDIA/Docs",rel));
       var vault=null;
-      for(var i=0;i<cands.length;i++){
-        try{
-          var st=fs.statSync(cands[i]);
-          if(st.isDirectory()){fs.accessSync(cands[i],fs.constants.W_OK);vault=cands[i];break;}
-        }catch(e){}
+      /* Authoritative: obsidian.json records the vault Obsidian actually
+         opened - the previous run wrote into the Documents URI path, which
+         the app can stat, but the user's live vault may be a different
+         mount view. Prefer the open vault's real path. */
+      try{
+        var udir=__ohsTm.getPath("userData");
+        var oj=JSON.parse(fs.readFileSync(path.join(udir,"obsidian.json"),"utf8"));
+        var vs=oj.vaults||{};
+        for(var k in vs){ if(vs[k]&&vs[k].open&&vs[k].path){ vault=vs[k].path; break; } }
+        console.log("[OHSidian] test-media obsidian.json open vault: "+vault);
+      }catch(e){ console.log("[OHSidian] test-media obsidian.json failed: "+(e&&e.message||e)); }
+      if(!vault){
+        for(var i=0;i<cands.length;i++){
+          try{
+            var st=fs.statSync(cands[i]);
+            if(st.isDirectory()){fs.accessSync(cands[i],fs.constants.W_OK);vault=cands[i];break;}
+          }catch(e){}
+        }
       }
-      console.log("[OHSidian] test-media vault probe: "+cands.map(function(c,idx){return idx+":"+(fs.existsSync(c)?"Y":(vault===c?"W":"n"));}).join(" ")+" -> "+(vault||"NONE"));
+      console.log("[OHSidian] test-media vault probe: "+cands.map(function(c,idx){return idx+":"+(fs.existsSync(c)?"Y":"n");}).join(" ")+" -> "+(vault||"NONE"));
+      if(vault){
+        try{ console.log("[OHSidian] test-media vault listing: "+fs.readdirSync(vault).slice(0,15).join(", ")); }catch(e){ console.log("[OHSidian] test-media listing failed: "+(e&&e.message||e)); }
+      }
       if(!vault){
         try{cands=[path.join(__ohsTm.getPath("documents"))];}catch(e){}
         try{fs.mkdirSync(path.join(__ohsTm.getPath("documents"),rel),{recursive:true});vault=path.join(__ohsTm.getPath("documents"),rel);console.log("[OHSidian] test-media mkdir fallback: "+vault);}catch(e){console.log("[OHSidian] test-media mkdir fallback failed: "+(e&&e.message||e));}
