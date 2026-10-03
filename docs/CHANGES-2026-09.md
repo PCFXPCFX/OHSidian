@@ -4639,6 +4639,48 @@ usage。SDK 头文件证实:NATIVEBUFFER_USAGE_HW_RENDER=1<<8(GPU
 若 `relayed N frames` 增长即成功;若中止时点仍伴随工厂首次导入,
 则转入软解后备(libde265/ffmpeg hevc)。
 
+## HEVC 专题总览(第 95-98 轮,2026-10-02/03):终审结论
+
+经 98a-98r 共 18 轮迭代、真机日志 20+ 组、二进制反汇编定位,
+**根因终审:闭源引擎(openharmony-sig electron 移植版,Chromium 132)
+的硬件视频呈现链在渲染器出队循环中于"恰好 1 帧"后断裂,~110ms 后
+Deferred WaitForFrameAvailable 超时拆除解码器**。
+
+排除矩阵(全部真机实证):
+| 变量 | 结果 |
+|------|------|
+| 编解码器 | avc 与 hevc 同样 1 帧中止(h264 硬解尝试同样断,靠软解回退才播) |
+| 位深 | 8-bit(1442/1920)与 10-bit(3840)同样断 |
+| 数据源 | file:// 与 http://(127.0.0.1 rport 实测)同样断 |
+| 音轨 | 有音轨与无音轨(hevc_8bit_noaudio)同样断 |
+| 垫片中继 | 中继模式与 norelay 直连(编解码器直写桥接窗口,日志 15:10 五会话)同样断 |
+| 时间戳 | 无 pts 与携带编解码器原始 pts(SET_DESIRED_PRESENT_TIMESTAMP)同样断 |
+| 缓冲属性 | usage 位(HW_RENDER|HW_TEXTURE)、geometry、预灌、fence 全部不影响 |
+
+垫片已修复并保持的层(全部必要——缺任何一层 HEVC 连 1 帧都出不来):
+pixel_format 注入(RGBA→SURFACE_FORMAT 回退链)、NV12 消费队列格式、
+surface 中继 + GPU YUV→RGBA 着色器转换(EGL_NATIVE_BUFFER_OHOS +
+EXTERNAL_OES 采样 + FBO + native fence)、全部 GLES 入口
+eglGetProcAddress 解析、专职中继线程、生产者职责(几何/usage)、
+编解码器 pts 透传。对 H264 硬解同样有效(但其软解回退更快)。
+
+上游修复方向(供 issue 使用):渲染器出队循环在首次
+RenderOutputData 后停止;`Deferred WaitForFrameAvailable() timed out,
+elapsed:`(libelectron.so 字符串 0x11705f3,引用点 0x79f0094/
+0x79f0094 附近,OhosVideoDecoder 状态机 0x79f0a10)约 100ms 超时后
+按错误拆除;疑为工厂 VideoFrame 的呈现回收环未闭合(消费方
+NativeImage 持有缓冲直至下次 acquire,渲染器等待的"frame available"
+信号在单帧后不再产生)。软解路径(FFmpegVideoDecoder)不受影响
+(h264 软解完整可播),但本构建未编译 HEVC 软解
+(CreateByMime 返 NULL 后管线直接报错,无回退)。
+
+后续可选路径:
+1. 向 openharmony-sig/electron(或引擎厂商)提交 issue——证据包已备
+   (本节 + docs/media/tablet-demo + 各轮日志摘要);
+2. 垫片内置软解(libde265):需自建呈现环,风险是渲染器出队循环的
+   断裂与解码器实现无关,可能同样卡 1 帧——投入前建议先取上游结论;
+3. 短期用户方案:HEVC 文件走系统播放器路由(应用内已有转码提示)。
+
 
 
 
