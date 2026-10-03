@@ -1360,9 +1360,16 @@ OH_AVErrCode OH_VideoDecoder_Reset(OH_AVCodec *codec)
     return gReset ? gReset(codec) : AV_ERR_UNKNOWN;
 }
 
+static long gPushCalls = 0;
 OH_AVErrCode OH_VideoDecoder_PushInputData(OH_AVCodec *codec, uint32_t index, OH_AVCodecBufferAttr attr)
 {
-    return gPushInputData ? gPushInputData(codec, index, attr) : AV_ERR_UNKNOWN;
+    OH_AVErrCode r = gPushInputData ? gPushInputData(codec, index, attr) : AV_ERR_UNKNOWN;
+    gPushCalls++;
+    if (gPushCalls <= 30 || (gPushCalls % 100) == 0) {
+        SHIM_LOGI("PushInputData #%{public}ld idx=%{public}u -> %{public}d (pts=%{public}lld)",
+            gPushCalls, index, r, (long long)attr.pts);
+    }
+    return r;
 }
 
 OH_AVErrCode OH_VideoDecoder_PushInputBuffer(OH_AVCodec *codec, uint32_t index)
