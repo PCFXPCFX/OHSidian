@@ -75,6 +75,43 @@
 #define SHIM_LOGI(...) ((void)OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG, __VA_ARGS__))
 #define SHIM_LOGE(...) ((void)OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, LOG_TAG, __VA_ARGS__))
 
+/* 98p diagnostic: when <Documents>/vdec-norelay exists, SetSurface passes
+   through and the codec renders NV12 straight into the bridge window (the
+   96g configuration). If the resulting garbage ANIMATES, the engine's
+   direct producer->factory chain flows continuously and the break is in
+   our relay's frame-2+ delivery; if it is a STATIC frame, the hardware
+   surface path stalls upstream of the shim entirely. */
+static int gNoRelayChecked = 0;
+static int gNoRelay = 0;
+
+static int checkNoRelayFlag(void)
+{
+    /* re-checked on EVERY SetSurface: the flag file may be created (a note
+       in the vault) while the app is running; caching made the 15:08 test
+       invalid (the check ran at the first playback, before the note
+       existed, and was never re-evaluated). access() is cheap. */
+    gNoRelayChecked = 0;
+    /* Candidates include the live vault (from obsidian.json, seen in the
+       12:23 device log) so the user can simply create a NOTE named
+       "vdec-norelay" inside Obsidian - it lands as vdec-norelay.md. */
+    const char *paths[] = {
+        "/storage/Users/currentUser/Documents/vdec-norelay",
+        "/storage/Users/currentUser/Documents/vdec-norelay.md",
+        "/storage/Users/currentUser/Documents/OHSidian/Obsidian Vault/vdec-norelay",
+        "/storage/Users/currentUser/Documents/OHSidian/Obsidian Vault/vdec-norelay.md",
+        "/data/storage/el2/base/haps/entry/files/vdec-norelay",
+        NULL
+    };
+    for (int i = 0; paths[i] != NULL; i++) {
+        if (access(paths[i], F_OK) == 0) {
+            gNoRelay = 1;
+            SHIM_LOGI("norelay flag found at %{public}s - SetSurface passthrough mode", paths[i]);
+            return gNoRelay;
+        }
+    }
+    return gNoRelay;
+}
+
 /* ===== real system library ===== */
 static void *gReal = NULL;
 
@@ -1146,6 +1183,18 @@ __attribute__((constructor)) static void shimInit(void)
 
 OH_AVCodec *OH_VideoDecoder_CreateByMime(const char *mime)
 {
+    /* 98r: the norelay flag now means "hardware hevc must FAIL FAST" - the
+       norelay passthrough test proved the engine's hardware surface path
+       stalls after one rendered output for avc AND hevc (device log 15:10,
+       5 sessions, codec-as-direct-producer, no shim relay). H264 survives
+       via the engine's software-decode fallback; hevc hardware "succeeds"
+       halfway so no fallback triggers. Returning NULL here forces the
+       decoder selector onto the software path (if this build has one) or
+       a clean error (Obsidian's transcode prompt) - either is decisive. */
+    if (mime != NULL && strcmp(mime, "video/hevc") == 0 && checkNoRelayFlag()) {
+        SHIM_LOGI("CreateByMime(video/hevc) -> NULL (nohw flag: force software fallback)");
+        return NULL;
+    }
     OH_AVCodec *codec = gCreateByMime ? gCreateByMime(mime) : NULL;
     SHIM_LOGI("CreateByMime(%{public}s) -> %{public}s", mime != NULL ? mime : "(null)",
         codec != NULL ? "ok" : "NULL");
@@ -1193,43 +1242,6 @@ OH_AVErrCode OH_VideoDecoder_SetCallback(OH_AVCodec *codec, OH_AVCodecAsyncCallb
 OH_AVErrCode OH_VideoDecoder_RegisterCallback(OH_AVCodec *codec, OH_AVCodecCallback callback, void *userData)
 {
     return gRegisterCallback ? gRegisterCallback(codec, callback, userData) : AV_ERR_UNKNOWN;
-}
-
-/* 98p diagnostic: when <Documents>/vdec-norelay exists, SetSurface passes
-   through and the codec renders NV12 straight into the bridge window (the
-   96g configuration). If the resulting garbage ANIMATES, the engine's
-   direct producer->factory chain flows continuously and the break is in
-   our relay's frame-2+ delivery; if it is a STATIC frame, the hardware
-   surface path stalls upstream of the shim entirely. */
-static int gNoRelayChecked = 0;
-static int gNoRelay = 0;
-
-static int checkNoRelayFlag(void)
-{
-    /* re-checked on EVERY SetSurface: the flag file may be created (a note
-       in the vault) while the app is running; caching made the 15:08 test
-       invalid (the check ran at the first playback, before the note
-       existed, and was never re-evaluated). access() is cheap. */
-    gNoRelayChecked = 0;
-    /* Candidates include the live vault (from obsidian.json, seen in the
-       12:23 device log) so the user can simply create a NOTE named
-       "vdec-norelay" inside Obsidian - it lands as vdec-norelay.md. */
-    const char *paths[] = {
-        "/storage/Users/currentUser/Documents/vdec-norelay",
-        "/storage/Users/currentUser/Documents/vdec-norelay.md",
-        "/storage/Users/currentUser/Documents/OHSidian/Obsidian Vault/vdec-norelay",
-        "/storage/Users/currentUser/Documents/OHSidian/Obsidian Vault/vdec-norelay.md",
-        "/data/storage/el2/base/haps/entry/files/vdec-norelay",
-        NULL
-    };
-    for (int i = 0; paths[i] != NULL; i++) {
-        if (access(paths[i], F_OK) == 0) {
-            gNoRelay = 1;
-            SHIM_LOGI("norelay flag found at %{public}s - SetSurface passthrough mode", paths[i]);
-            return gNoRelay;
-        }
-    }
-    return gNoRelay;
 }
 
 OH_AVErrCode OH_VideoDecoder_SetSurface(OH_AVCodec *codec, OHNativeWindow *window)
