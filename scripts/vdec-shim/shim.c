@@ -1365,9 +1365,9 @@ OH_AVErrCode OH_VideoDecoder_PushInputData(OH_AVCodec *codec, uint32_t index, OH
 {
     OH_AVErrCode r = gPushInputData ? gPushInputData(codec, index, attr) : AV_ERR_UNKNOWN;
     gPushCalls++;
-    if (gPushCalls <= 30 || (gPushCalls % 100) == 0) {
-        SHIM_LOGI("PushInputData #%{public}ld idx=%{public}u -> %{public}d (pts=%{public}lld)",
-            gPushCalls, index, r, (long long)attr.pts);
+    if (gPushCalls <= 40 || (gPushCalls % 100) == 0) {
+        SHIM_LOGI("PushInputData #%{public}ld idx=%{public}u -> %{public}d (pts=%{public}lld size=%{public}u flags=0x%{public}x)",
+            gPushCalls, index, r, (long long)attr.pts, attr.size, attr.flags);
     }
     return r;
 }
