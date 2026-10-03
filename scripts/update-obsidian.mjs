@@ -1407,7 +1407,58 @@ var install=function(app){
        toggle writes the USER-LAYER flags file that EngineFlags (round 96)
        reads at boot, so the experiment never ships enabled by default.
        Needs the shim lib in the package + an app restart. */
-    app.commands.addCommand({id:"ohsidian-video-hw",name:"OHSidian: 视频硬解(实验) 开/关 (重启生效)",
+    /* 98m: test-media fetcher (TEMPORARY, round-98 diagnostics). The main
+   process has Documents write permission and Node http; hdc rport
+   forwards device:18080 to the dev PC's :8000 serving the twin test
+   files. Command copies them into the open vault folder so the
+   8-bit/10-bit bit-depth comparison can run without any manual file
+   transfer. Remove once the bit-depth question is answered. */
+app.whenReady().then(function(){
+  function __ohsFetchTestMedia(){
+    try{
+      var http=require("http"),fs=require("fs"),path=require("path");
+      var vaults=global.__ohsidianVaultDirs||[];
+      var vault=null;
+      try{
+        var sess=require("electron").session;
+      }catch(e){}
+      try{
+        var cfg=fs.readFileSync(path.join(process.env.HOME||"","ohsidian-vault.txt"),"utf8");
+      }catch(e){}
+      var cands=[];
+      try{ cands.push(require("electron").app.getPath("documents")); }catch(e){}
+      function tryVault(dir){
+        if(!dir)return false;
+        try{
+          var st=fs.statSync(dir);
+          if(!st.isDirectory())return false;
+        }catch(e){ return false; }
+        vault=dir; return true;
+      }
+      var found=cands.some(tryVault);
+      if(!found){ console.log("[OHSidian] fetch-test-media: no documents dir"); return; }
+      var files=["hevc_8bit_1080p.mp4","hevc_10bit_1080p.mp4"];
+      var done=0;
+      files.forEach(function(name){
+        var dst=path.join(vault,name);
+        try{ var st=fs.statSync(dst); if(st.size>10000000){ console.log("[OHSidian] exists: "+dst); done++; return; } }catch(e){}
+        var req=http.get("http://127.0.0.1:18080/"+name,function(res){
+          if(res.statusCode!==200){ console.log("[OHSidian] fetch "+name+" http "+res.statusCode); return; }
+          var out=fs.createWriteStream(dst);
+          res.pipe(out);
+          out.on("finish",function(){ done++; console.log("[OHSidian] fetched: "+dst+" ("+done+"/2)"); });
+        });
+        req.on("error",function(e){ console.log("[OHSidian] fetch "+name+" error: "+(e&&e.message||e)); });
+      });
+    }catch(e){ console.log("[OHSidian] fetch-test-media failed: "+(e&&e.message||e)); }
+  }
+  try{
+    app.commands.addCommand({id:"ohsidian-fetch-test-media",name:"OHSidian: 下载测试媒体 (8bit/10bit HEVC)",
+      callback:function(){ __ohsFetchTestMedia(); }});
+  }catch(e){}
+});
+
+app.commands.addCommand({id:"ohsidian-video-hw",name:"OHSidian: 视频硬解(实验) 开/关 (重启生效)",
       callback:function(){
         try{
           var p=dataDir()+"/ohsidian-flags-user.json";
