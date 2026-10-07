@@ -66,7 +66,7 @@
 
 本 Fork（[PCFXPCFX/OHSidian][fork]）基于上游仓库（[HanversionOvO/OHSidian][upstream]，OHsidian 原创始人 HanversionOvO，昵称 MikannQAQ）构建，在其 Electron 兼容层之上做了大量窗口、输入、数据与工程化修复。完整变更记录见[变更日志][changes]（逐轮审计，持续追加）。
 
-平板相关功能的图文与视频演示，见[平板功能演示][tablet-demo]。
+平板相关功能的图文与动图演示，见[平板功能演示][tablet-demo]。
 
 ### 窗口与显示
 
@@ -142,7 +142,7 @@
 ### 平板专属功能
 
 - 触屏模式跟随系统切换、自由窗口钳制、键盘避让等。
-- 每项功能的图文与视频说明，见[平板功能演示][tablet-demo]。
+- 每项功能的图文与动图说明，见[平板功能演示][tablet-demo]。
 
 ### 文件删除与回收站
 

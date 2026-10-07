@@ -64,7 +64,7 @@ The core idea: **simulate the Electron API surface with native HarmonyOS capabil
 
 ## Improvements Over Upstream
 
-This fork ([PCFXPCFX/OHSidian][fork]) builds on the upstream repository ([HanversionOvO/OHSidian][upstream], created by the original OHsidian author HanversionOvO, display name MikannQAQ), with extensive fixes to windowing, input, data handling, and engineering on top of its Electron compatibility layer. For the full change log (per-round audits, continuously appended), see [docs/CHANGES-2026-09.md][changes]. For a text-and-video walkthrough of the tablet features, see the [Tablet Feature Demo][tablet-demo] (in Chinese).
+This fork ([PCFXPCFX/OHSidian][fork]) builds on the upstream repository ([HanversionOvO/OHSidian][upstream], created by the original OHsidian author HanversionOvO, display name MikannQAQ), with extensive fixes to windowing, input, data handling, and engineering on top of its Electron compatibility layer. For the full change log (per-round audits, continuously appended), see [docs/CHANGES-2026-09.md][changes]. For a text-and-animated-demo walkthrough of the tablet features, see the [Tablet Feature Demo][tablet-demo] (in Chinese).
 
 ### Window and Display
 
@@ -140,7 +140,7 @@ This fork ([PCFXPCFX/OHSidian][fork]) builds on the upstream repository ([Hanver
 ### Tablet-Specific Features
 
 - Touch mode following the system switch, free-window clamping, keyboard avoidance, and more.
-- Each feature has a text-and-video walkthrough in the [Tablet Feature Demo][tablet-demo] (in Chinese).
+- Each feature has a text-and-animated-demo walkthrough in the [Tablet Feature Demo][tablet-demo] (in Chinese).
 
 ### File Deletion and Trash
 
