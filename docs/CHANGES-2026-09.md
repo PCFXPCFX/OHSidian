@@ -4764,3 +4764,38 @@ FORMAT、+YUVI420、+RGBA;另查能力 hardware 属性)。每次启动静默
    app.json 无关;改此类语义必须打在主进程读取点。
 4. 渲染层 console 不进 hilog;asar 是构建产物不在 git,部署前必须
    refresh-app-patch 重打并核对补丁版本标记。
+
+## 推送前审计(第 94-98 轮推送范围,2026-10-07)
+
+对 `origin/main..HEAD` 共 49 个提交(round 94 外部审计修复 → round 98
+终审撤销)按登记表同等标准做的推送前审计。95/95b、96 已有正式
+self-audit;97/98 实验整体撤销,其审计收敛为撤销完整性(第 3 条)。
+
+1. **敏感信息扫描(通过)**:净差异无 API key/token/密码/私钥,无
+   个人本地路径(唯一命中为文档中的设备路径
+   /storage/Users/currentUser,无害);OAuth 回调日志保持查询串
+   脱敏(round 94 S4 未回退)。
+2. **round 94 安全门核查(通过,未被后续提交回退)**:S1 own-sandbox
+   拒绝门(WebAbility.ets `ownSandboxBase`)、S5 openNewWindow 拒绝
+   非 http(s)(WebAbility.ets:2478)、H1 双侧原子写(ArkTS
+   `publishModeFileAtomic` + 渲染层 `writeModeFileSync` tmp+rename)、
+   CI S-N10/11/12 证书与 CLI sha256 固定,全部在位。
+3. **实验撤销完整性(fd77a95,通过 + 1 处磁盘残留已处置)**:垫片
+   源码与二进制已从 git 与 electron/libs/ 移除;update-obsidian.mjs
+   中 vdec/video-hw/test-media 零残留;verify-asar 改为断言开关已
+   不存在且 v19 标记链完整;EngineFlags 用户层读取器按终审记录有意
+   保留(无写入方即惰性);ohsidian-flags.json 注释完整记录 95b 撤回
+   原因与 96 隐私权衡。残留:electron/build/default/intermediates/
+   {libs,stripped_native_libs}/default/arm64-v8a/ 下遗留已撤销垫片
+   的 libnative_media_vdec.so(32K)与 libvdecprobe.so(8K),有随
+   下次 hvigor 打包混入 HAP 的风险;已于 2026-10-07 删除并复核清零。
+4. **推送体积(通过)**:范围内 .so 均为 LFS 指针(.gitattributes 已
+   配 *.so),无 >100MB blob;最大普通 blob 为本日志历次快照
+   (约 300KB),不构成仓库膨胀。
+5. **演示素材处置(当时唯一未提交物)**:01-touch-mode.mp4.mp4
+   (20.8MB,双重扩展名,违反素材命名约定)转换为
+   docs/media/tablet-demo/01-touch-mode.gif(9.7MB,800px/8fps,
+   双层调色板 + bayer 抖动,抽帧核验画质后删除源片);
+   tablet-demo.md 去除 02-10 节占位脚手架与素材说明表格(功能说明
+   正文保留),media 素材 README 删除(命名约定并入正文一行);
+   主 README/README_EN 措辞同步(图文与视频 → 图文与动图)。
