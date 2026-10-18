@@ -16,7 +16,7 @@
 
 | 事件 | 动作 |
 |------|------|
-| 启动（onWindowStageCreate） | ① 触摸形态：窗口校正为整屏（已整屏则跳过——重复 resize 会被 WMS 拒 1300002）。② 窗口/PC 形态：**不**强制尺寸（系统按上次状态恢复；记忆化由 Obsidian 主进程 `<userData>/<vaultId>.json` 完成，见 §4）。③ `setWindowTitleMoveEnabled(true)` 无条件启用（拖动面=系统标题条，见 §5）。 |
+| 启动（onWindowStageCreate） | **⓪ 先解析形态**（第 102 轮，见文末 Round 102 小节）：`onWindowStageCreate` **顶部**同步读 `window_pcmode_switch_status`（`resolvePcModeAtBoot`）seed `pcModeEnabled`；随后在 `loadContent` **之前**（设备诊断块之后）执行一次 `updateWindowPcmodeSwitchStatus`——**所有形态相关动作（布局全屏 / 整屏校正 / 钳制）必须在此完成**；`pcModeEnabled` 的字段默认值 `false` **不**代表形态，解析前禁止任何几何动作。① 触摸形态：窗口校正为整屏（**仅主窗口**；已整屏则跳过——重复 resize 会被 WMS 拒 1300002）；窗口 show 之前若被 WMS 拒绝，`loadContent` 回调里保留一次**幂等**的触摸专属重申。② 窗口/PC 形态：**不**强制尺寸（系统按上次状态恢复；记忆化由 Obsidian 主进程 `<userData>/<vaultId>.json` 完成，见 §4）；系统标题条显隐由 `pushSafeAreaInsets()` **单点**决定。③ `setWindowTitleMoveEnabled(true)` 无条件启用（拖动面=系统标题条，见 §5）。 |
 | `window_pcmode_switch_status` 变化 | 重写触摸模式文件 → 重发布 insets/decor → 触摸形态校正整屏 / 窗口形态钳制入屏。**不**再 500/1500ms 双延时补推（见 §3）。 |
 | `windowSizeChange` / `windowRectChange` / `avoidAreaChange` / `WINDOW_SHOWN` | 统一走 `pushSafeAreaInsets()`（insets+decor 发布）+ `computeViewportBound()` 视口重推。引擎推送**无条件**（第 88 轮修订：值比对去重会吞掉同值事件——含 WINDOW_SHOWN 重申与 reason 标记的 rect 事件——引擎窗口状态机断裂，真机复现为"无法动态调整窗口/无法全屏贴合"）。无延时补丁。 |
 | `windowStatusChange`（MAXIMIZE/FULL_SCREEN/FLOATING） | 补推 insets + 视口（第 56 轮，修"最大化后底部被导航条遮住"）。动画落定竞态：事件可能先于动画完成到达——随后**单发一次对账**（约 300ms 后重读矩形，无条件重推；第 87 轮 A2，第 88 轮去掉值比对，见 §3 说明）。 |
@@ -30,7 +30,8 @@
 | 启动 600/1500/3000ms 三连补推 | WebAbility.loadContent 回调 | SurfaceReady 稳定门已根治 0×0 启动；定时器补推只是掩盖。 |
 | 模式切换 500/1500ms 双连补推 | updateWindowPcmodeSwitchStatus | 同上；且补推会抢在 WMS 落定前把旧矩形推给引擎，反而制造不匹配。 |
 | 触摸模式切换后强制 maximize | settleViewportLater(forceFullscreen) | 改为 `forceFullscreenWindow()`（显式 resize 到 display 矩形）在切换处理里**同步调用一次**；maximize(ENTER_IMMERSIVE) 在 API 24 平板语义不稳（第 11 轮实测 2385x1711 vs 2800x1753）。 |
-| `setWindowLayoutFullScreen(true)` 无条件调用 | onWindowStageCreate | 第 9 轮实锤：API 24 平板 WMS 直接拒（`device not support`），调用无效但无害仅限触摸形态；**窗口模式下该调用会把 web 内容铺到标题条热区之下，正是"标题条拖不动"的根因**。改为：仅触摸/手机形态尝试调用（失败静默），窗口模式不调用、进入窗口模式时显式 `setWindowLayoutFullScreen(false)` 复位。 |
+| 启动期回调内**重复**的形态校正/决策（`if (!pcModeEnabled) forceFullscreenWindow()`） | WebAbility.loadContent 回调 | 执行时 `pcModeEnabled` 还是字段默认值 `false`（真值首读在回调**末尾**），窗口模式冷启动被误判为触摸形态 → 窗口闪动放大、再由引擎 `setBounds` 恢复记忆矩形（第 102 轮）。形态决策与整屏校正移入启动期 `updateWindowPcmodeSwitchStatus`（**唯一应用点**）；回调内只保留一次**幂等**的触摸专属重申（已整屏直接跳过、窗口形态被 `forceFullscreenWindow` 守卫挡掉），用于"窗口 show 之前 resize 被 WMS 拒"的兜底。 |
+| `setWindowLayoutFullScreen(...)` 无条件调用 | onWindowStageCreate | 第 9 轮实锤：API 24 平板 WMS 直接拒（`device not support`），调用无效但无害仅限触摸形态；**窗口模式下开 true 会把 web 内容铺到标题条热区之下，正是"标题条拖不动"的根因**。旧门是 `deviceType === 'tablet' || 'phone'`。第 102 轮：收敛为 `applyLayoutFullscreenForMode()` **单一入口**——平板/手机按形态给 true/false（窗口形态显式 false 复位，因此启动路径也会调用），2in1 不触碰该标志（代码 `deviceType` 门，历史行为）；启动路径不再有独立调用。 |
 
 第 87 轮补充（A2 对账推与本表的关系），第 88 轮修订：唯一允许的延时
 动作是 windowStatusChange 之后的**单发对账推**（`scheduleViewportReconcile`，
@@ -299,3 +300,53 @@ area**。整屏判定（rect≥display）在该场景恒 false，导致 insets/p
 时若 `vault.getConfig("frame") == null`（用户从未选择过）则写
 `setConfig("frame","native")`（重启生效，Notice 提示一次）；用户
 显式选择永远优先。
+
+### Round 102：启动期形态解析时序（窗口模式"闪动放大再恢复记忆"根因）
+
+**真机现象**：系统处于窗口模式（PC 模式）时冷启动/重开应用，窗口先被
+放大到整屏，随后"恢复记忆"（回到上次关闭时的浮窗矩形）。
+
+**根因（形态解析晚于形态动作，与 §2 启动行 ①/② 直接冲突）**：
+`pcModeEnabled` 字段默认 `false`（= 触摸），真值由
+`updateWindowPcmodeSwitchStatus` 写入，而该首读原本位于 `loadContent`
+回调**末尾**；启动几何块（`if (!pcModeEnabled) forceFullscreenWindow()`）
+与无条件 `setWindowLayoutFullScreen(true)` 都在它之前执行。于是窗口模式
+冷启动的实际序列是：系统恢复记忆矩形 → 触摸专用整屏校正 `resize` 到
+display 矩形（肉眼"放大"）→ 首读把 `pcModeEnabled` 翻成 true（只复位
+布局全屏，没有任何代码把窗口缩回去）→ 引擎主进程按记忆化主动
+`setBounds`（桌面版恢复窗口位置行为，第 5/14c 轮实证；全屏窗口上会被
+系统以 1300010 拒绝）把窗口放回记忆矩形（肉眼"恢复记忆"）。触摸形态
+看不到该现象，正是因为引擎的 `setBounds` 在整屏窗口上会失败——"该失败"
+本身就是触摸形态的预期。
+
+**修复（方案 C：解析先于动作，第 102 轮）**：
+
+- 新增 `resolvePcModeAtBoot()`：无副作用同步读。`onWindowStageCreate`
+  第一件事 seed `pcModeEnabled` 并复位 `pcModeObserved`（每个窗口舞台的
+  首同步都算首同步）；读取失败按**窗口形态**处理（不动窗口是不可破坏
+  默认，随后首读若确为 false 会走 `modeChanged` 路径自愈）。
+- `registerKeyObserver` + 首读 `updateWindowPcmodeSwitchStatus` 前移到
+  `loadContent` **之前**（注册改用 `this.context`，与销毁期 unregister
+  同源；`getContext()` 依赖已加载 UI，不适合该时点）；注册包 try/catch，
+  它在主路径上，异常不得中断窗口创建。
+- 布局全屏收敛为 `applyLayoutFullscreenForMode()` 单入口（触摸 true /
+  窗口显式 false），删除启动路径上的独立 `setWindowLayoutFullScreen(true)`。
+- 系统标题条（decor）在窗口形态下只由 `pushSafeAreaInsets()` 决定；
+  `loadContent` 回调里的 `setWindowDecorVisible(!hideTitleBar)` 只对触摸
+  形态执行——否则它会成为顺序反转后的"最后写入者"，把窗口形态的标题条
+  又藏掉（系统条 + Obsidian 自绘条同时消失）。
+- 整屏校正只由首读执行一次；`loadContent` 回调里的
+  `forceFullscreenWindow()` 改为**触摸专属、幂等**的兜底（已整屏跳过、
+  窗口形态被守卫挡掉），用于窗口 show 前 resize 被 WMS 拒绝的情况。
+- `forceFullscreenWindow()` 增加"窗口形态直接忽略"不变量守卫（当前调用图
+  无触发路径，纯防御）。
+- `computeViewportBound()` 在 `drawableRect` 宽/高 ≤ 0（标题条尚未合成）
+  时回退 `windowRect`，避免窗口形态从第一个几何事件起就推 0×0 视口。
+- `clearStaleWindowEntries()` 前移到 `onWindowStageCreate` 顶部（首读会
+  先写本窗口条目，之后再清会把它删掉）。
+- `updateWindowPcmodeSwitchStatus` 的 `getValueSync` 包内层 try/catch，
+  读失败回退已解析形态而不是跳过整个 apply。
+
+**不变量（今后改动必须保持）**：形态解析先于任何几何/布局动作；未解析
+≠ 触摸形态；窗口形态启动只允许"钳制入屏"，不允许任何 resize 到
+display 矩形；布局全屏标志与系统标题条各自只有一个写入者。

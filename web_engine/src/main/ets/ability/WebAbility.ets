@@ -149,6 +149,12 @@ export class WebAbility extends WebBaseAbility {
   // pushes are NEVER deduped: the engine consumes each event, including
   // same-value ones (the WINDOW_SHOWN re-assert, reason-tagged rect events);
   // value-compare skipping broke maximize/restore and drag-resize on device.
+  //  - state resolution order (round 102): pcModeEnabled is seeded
+  //    synchronously at the TOP of onWindowStageCreate (resolvePcModeAtBoot)
+  //    and the boot-time pcmode sync runs BEFORE loadContent, so no touch-only
+  //    action can ever run against a window-mode window. The previous order
+  //    (geometry block first, boot read last) force-fullscreened window-mode
+  //    windows on every cold start; see docs/window-state-machine.md §2.
 
   // True when the window rect covers everything below the status bar or
   // the whole display (round 92). The old check compared against the full
@@ -203,6 +209,20 @@ export class WebAbility extends WebBaseAbility {
   private computeViewportBound(prop: window.WindowProperties): WindowBound {
     const full = !this.pcModeEnabled;
     if (full || !this.mainWindow) {
+      return {
+        left: prop.windowRect.left,
+        top: prop.windowRect.top,
+        width: prop.windowRect.width,
+        height: prop.windowRect.height,
+      };
+    }
+    // Round 102: the form factor is resolved at the very start now, so free
+    // windows reach this branch from the FIRST geometry event - before the
+    // caption strip has been composed, drawableRect can still be 0 (see
+    // AppWindowAdapter's note on the same API). Pushing a 0x0 viewport would
+    // make the engine latch an empty surface, so fall back to the window rect
+    // until the drawable rect is real; the next geometry event corrects it.
+    if (prop.drawableRect.width <= 0 || prop.drawableRect.height <= 0) {
       return {
         left: prop.windowRect.left,
         top: prop.windowRect.top,
@@ -982,6 +1002,19 @@ export class WebAbility extends WebBaseAbility {
   // - creation looks broken and the title-bar X does nothing.
   private forceFullscreenWindow(): void {
     if (!this.isMainAppWindow) {
+      return;
+    }
+    if (this.pcModeEnabled) {
+      // Window form factor: forcing the display rect is the TOUCH-only
+      // correction (docs/window-state-machine.md §1/§2). On a window-mode
+      // window it overrides the remembered floating rect and races the
+      // engine's own startup setBounds (desktop bounds restore) - the
+      // "flashes full-size, then returns" symptom (round 102).
+      // INVARIANT GUARD: today no caller reaches this in window form
+      // (updateWindowPcmodeSwitchStatus calls it only after setting the field
+      // to false; the loadContent re-assert checks the flag first) - it is
+      // kept so a future caller cannot silently reintroduce the bug.
+      LogUtil.warn(TAG, 'force fullscreen ignored: window form factor');
       return;
     }
     const winObj = this.mainWindow;
@@ -1863,6 +1896,28 @@ export class WebAbility extends WebBaseAbility {
   onWindowStageCreate(windowStage: window.WindowStage) {
     super.onWindowStageCreate(windowStage);
 
+    // Round 102 (docs/window-state-machine.md §2): the FORM FACTOR must be
+    // resolved before ANY geometry / layout action of this window. The field
+    // default (false = touch) is not a valid answer: it used to be consumed
+    // by the startup block inside the loadContent callback while the real
+    // value was still unread, so a WINDOW-mode cold start ran the touch-only
+    // corrections (layout fullscreen + display-rect resize) and the engine's
+    // remembered-bounds setBounds had to undo them - the visible "window
+    // flashes full-size, then returns to the remembered size".
+    this.pcModeEnabled = this.resolvePcModeAtBoot();
+    // Round 102: every window-stage setup start counts as a FIRST sync again
+    // (onWindowStageDestroy -> onWindowStageCreate can happen on the same
+    // ability instance: display/casting switches, window-stage rebuild). The
+    // boot-time sync is now the ONLY place applying the rect/layout
+    // corrections, so without this reset the second setup would early-return
+    // as "unchanged" and apply nothing at all.
+    this.pcModeObserved = false;
+    // Round 88: purge per-window geometry left by previous sessions (hard-
+    // killed windows never ran the destroy cleanup). Round 102: moved above
+    // the boot-time mode sync, which now publishes this window's own entry
+    // before loadContent - clearing afterwards would delete that fresh entry.
+    this.clearStaleWindowEntries();
+
     // Repeat-launch protection lives in the specified launch mode: a second
     // launch routes to the existing instance's onNewWant (keyed by
     // onAcceptWant). The old checkSingleInstance compared an xcomponentId
@@ -1988,26 +2043,58 @@ export class WebAbility extends WebBaseAbility {
     // Diagnostic: dump the device shape - the mode branches below gate on it.
     LogUtil.info(TAG, 'diagnostic: deviceType=' + deviceInfo.deviceType +
       ', sdkApiVersion=' + deviceInfo.sdkApiVersion);
-    // Layout fullscreen BEFORE loadContent (official immersive step 1), for
-    // the TOUCH form factor only. API 24 tablets reject the call ("device
-    // not support" - logged, harmless; the forced display rect in
-    // forceFullscreenWindow is the real mechanism). It must NOT stay on for
-    // free windows / PC mode: the web surface would extend under the WMS
-    // caption strip and swallow its drag hot zone ("title bar cannot move
-    // the window" - docs/window-state-machine.md §5). updateWindowPcmode-
-    // SwitchStatus resets it to false when PC mode is on.
-    if (deviceInfo.deviceType === 'tablet' || deviceInfo.deviceType === 'phone') {
+    // Round 102 (docs/window-state-machine.md §2): APPLY the form factor
+    // before the content is loaded. Everything form-dependent now happens
+    // here, exactly once:
+    //  - updateWindowPcmodeSwitchStatus owns the startup window-rect
+    //    correction (touch: force the display rect; window: clamp only);
+    //  - applyLayoutFullscreenForMode owns the layout-fullscreen flag
+    //    (touch: true; window: explicit false), so the standalone
+    //    setWindowLayoutFullScreen(true) call it replaces is gone - a
+    //    window-mode window can no longer be switched into the touch regime
+    //    even briefly (that transient is the round-50 "title bar cannot
+    //    move" root cause, §3/§5);
+    //  - the loadContent callback below only KEEPS a touch-only re-assert of
+    //    the rect (idempotent safety net, see there), it does not re-decide
+    //    the form factor or the layout flag.
+    if (deviceInfo.deviceType === 'tablet' || deviceInfo.deviceType === '2in1') {
+      // this.context instead of getContext(this): the destroy-time unregister
+      // uses this.context, so register/unregister now share one context
+      // object (round 102; getContext() also depends on a loaded UI).
+      const context: Context = this.context;
+      // Round 102: this call now sits on the MAIN path, before loadContent -
+      // it must never abort the window setup. settings is an external data
+      // service and its calls are documented as throwing; a failure only
+      // costs the runtime switch, the boot-time read below still applies the
+      // current form factor (same split as the read hardening).
+      let res: boolean = false;
       try {
-        this.mainWindow.setWindowLayoutFullScreen(true)
-          .then(() => {
-            LogUtil.info(TAG, 'Succeeded in setting window layout full screen');
-          })
-          .catch((err: BusinessError) => {
-            LogUtil.warn(TAG, 'Failed to set window layout full screen: ' + JSON.stringify(err));
-          });
-      } catch (exception) {
-        LogUtil.warn(TAG, 'Failed to call window layout full screen API: ' + JSON.stringify(exception));
+        res = settings.registerKeyObserver(context,
+          'window_pcmode_switch_status', settings.domainName.USER_PROPERTY, () => {
+          this.updateWindowPcmodeSwitchStatus(context);
+        });
+      } catch (registerException) {
+        LogUtil.warn(TAG, 'register pcmode observer failed: ' +
+          JSON.stringify(registerException));
       }
+      LogUtil.info(TAG, 'register window_pcmode_switch_status,res:' + res + ',xcomponentId:' + this.xcomponentId);
+      // Whether or not the observer registered, the current value must be
+      // read once: a tablet already in PC mode at launch needs the right
+      // mode, and the first read applies layout-fullscreen + window-rect
+      // corrections for the current form factor.
+      // H15 (do NOT "fix" this by symmetry): only the TABLET runs the boot
+      // read. On 2in1 the key is not guaranteed to exist, getValueSync would
+      // answer the default 'false' and flip the historical desktop boot
+      // default to touch; resolveWant treats a missing systemMode as desktop,
+      // so skipping the write is the 2in1 no-op. Runtime switches arrive
+      // through the observer for both form factors.
+      if (deviceInfo.deviceType === 'tablet') {
+        this.updateWindowPcmodeSwitchStatus(context);
+      }
+    } else {
+      // phone: the tablet's touch regime without a pcmode setting to read.
+      this.writeTouchModeFile(false);
+      this.applyLayoutFullscreenForMode();
     }
 
     windowStage.getMainWindow((err, data) => {
@@ -2157,10 +2244,9 @@ export class WebAbility extends WebBaseAbility {
 
       let mainWin = windowStage.getMainWindowSync();
       this.mainWindow = mainWin;
-      // Round 88: purge per-window geometry left by previous sessions
-      // (hard-killed windows never ran the destroy cleanup) before any
-      // fresh entry is written below.
-      this.clearStaleWindowEntries();
+      // Round 102: the stale-entry cleanup (round 88) now runs at the TOP of
+      // onWindowStageCreate, BEFORE the boot-time mode sync publishes this
+      // window's own entry - clearing here would delete that fresh entry.
       // Round 92: seed the available-area cache the sync judgments consume.
       this.refreshAvailAreaCache();
       // Round 89: watch for layout-override changes (renderer writes them
@@ -2176,21 +2262,31 @@ export class WebAbility extends WebBaseAbility {
         // Publish the initial real insets once the window geometry exists;
         // avoidAreaChange keeps them fresh afterwards.
         this.pushSafeAreaInsets();
-        // Touch form factor: the system may restore a smaller (PC-mode
-        // session) rect - force the FULL display rect once, synchronously.
-        // The engine starts the browser only after the surface is stable
-        // (SurfaceReady), so this lands before the viewport latches. No
-        // timed settle loops (docs/window-state-machine.md §3).
+        // Round 102: touch-only RE-ASSERT, not a second decision. The form
+        // factor and the rect correction are applied before loadContent now,
+        // and forceFullscreenWindow() is idempotent (an already display-sized
+        // rect is skipped, the window form factor is guarded out), so this is
+        // only the safety net for a pre-show resize the WMS rejected
+        // (1300002 / MoveToAsync layout timeout).
         if (!this.pcModeEnabled) {
           this.forceFullscreenWindow();
         }
       }
       // hide title bar
-      try {
-        mainWin.setWindowDecorVisible(!this.hideTitleBar);
-        this.decorVisibleLast = !this.hideTitleBar;
-      } catch (exception) {
-        LogUtil.warn(TAG, 'Failed to set window decor visible: ' + JSON.stringify(exception));
+      // Round 102: in the WINDOW form factor the system caption is decided by
+      // pushSafeAreaInsets() alone (it re-shows the caption for free windows
+      // and publishes decor='system'). It used to run at the END of this
+      // callback, so it was the last writer; the form-factor block now runs
+      // before loadContent, and letting this call hide the caption afterwards
+      // would leave a window-mode window with neither the system strip nor
+      // Obsidian's own .titlebar. Touch mode has no caption anyway - keep it.
+      if (!this.pcModeEnabled) {
+        try {
+          mainWin.setWindowDecorVisible(!this.hideTitleBar);
+          this.decorVisibleLast = !this.hideTitleBar;
+        } catch (exception) {
+          LogUtil.warn(TAG, 'Failed to set window decor visible: ' + JSON.stringify(exception));
+        }
       }
 
       if (this.useDarkMode) {
@@ -2260,31 +2356,13 @@ export class WebAbility extends WebBaseAbility {
         this.nativeContext.RegisterWindowEventFilter(mainWin.getWindowProperties().id);
       }
 
-      // H15: 2in1 registers the observer too - without it a 2in1 device
-      // never followed the system touch-mode switch (the else branch below
-      // kept systemMode pinned to desktop forever). Only the TABLET runs
-      // the boot-time read: on 2in1 the setting is not guaranteed to exist
-      // and getValueSync would default 'false', flipping the historical
-      // desktop boot default to touch; resolveWant treats a missing
-      // systemMode as desktop, so skipping the boot write is the 2in1
-      // no-op. Runtime switches arrive through the observer for both.
-      if(deviceInfo.deviceType == 'tablet' || deviceInfo.deviceType == '2in1') {
-        const context: Context = getContext(this);
-        let res: boolean = settings.registerKeyObserver(context,
-          'window_pcmode_switch_status', settings.domainName.USER_PROPERTY, () => {
-          this.updateWindowPcmodeSwitchStatus(context);
-        });
-        LogUtil.info(TAG, 'register window_pcmode_switch_status,res:' + res + ',xcomponentId:' + this.xcomponentId);
-        // Whether or not the observer registered, the current value must be
-        // read once: a tablet already in PC mode at launch needs the right
-        // mode, and the first read applies layout-fullscreen + window-rect
-        // corrections for the current form factor.
-        if (deviceInfo.deviceType == 'tablet') {
-          this.updateWindowPcmodeSwitchStatus(context);
-        }
-      } else {
-        this.writeTouchModeFile(false);
-      }
+      // Round 102: the pc-mode observer + boot-time sync moved OUT of this
+      // callback - see the block right after the device diagnostic in
+      // onWindowStageCreate. They must run BEFORE loadContent, otherwise a
+      // startup action can execute against an unresolved form factor (the
+      // window-mode force-fullscreen bug this round fixes). H15 (2in1 joins
+      // the observer, only the tablet runs the boot read) is unchanged and
+      // documented there.
     });
 
     try {
@@ -2636,10 +2714,50 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
+  // Resolves the WINDOW FORM FACTOR from the system PC-mode switch WITHOUT any
+  // side effect (round 102; docs/window-state-machine.md §2). It must run
+  // before the first geometry / layout action of a window, because the field
+  // default (false = touch) is not a valid answer: the boot-time read used to
+  // sit at the END of the loadContent callback, so the startup geometry block
+  // consumed the default and a WINDOW-mode cold start executed the touch-only
+  // corrections (setWindowLayoutFullScreen(true) + forceFullscreenWindow()).
+  // The engine's remembered-bounds setBounds then had to undo them - the
+  // visible "window flashes full-size, then returns to the remembered size".
+  // Phone has no window form (always touch); 2in1 deliberately skips the boot
+  // read (H15) and keeps the historical desktop behavior.
+  // A failed read keeps the WINDOW form: NOT touching the rect is the
+  // non-destructive default. If the value really is "false", the later
+  // boot-time sync sees modeChanged (true -> false) and applies the touch
+  // correction there, so a transient settings failure self-heals.
+  private resolvePcModeAtBoot(): boolean {
+    if (deviceInfo.deviceType !== 'tablet') {
+      return false;
+    }
+    try {
+      const value: string = settings.getValueSync(this.context,
+        'window_pcmode_switch_status', 'false', settings.domainName.USER_PROPERTY);
+      return value === 'true';
+    } catch (exception) {
+      LogUtil.warn(TAG, 'boot pc-mode read failed, keep window form: ' + JSON.stringify(exception));
+      return true;
+    }
+  }
+
   private updateWindowPcmodeSwitchStatus(context: Context) {
     try {
-      let value = settings.getValueSync(context, 'window_pcmode_switch_status', 'false',
-        settings.domainName.USER_PROPERTY);
+      // Round 102: a failed read must NOT skip the apply step (the startup
+      // sync is the single application point for the rect/layout corrections,
+      // so swallowing the error here would leave a touch-mode window
+      // uncorrected). Fall back to the already-resolved form factor - the
+      // observer path then degenerates to a cheap no-op re-assert.
+      let value: string = this.pcModeEnabled ? 'true' : 'false';
+      try {
+        value = settings.getValueSync(context, 'window_pcmode_switch_status', 'false',
+          settings.domainName.USER_PROPERTY);
+      } catch (readException) {
+        LogUtil.warn(TAG, 'pcmode read failed, keeping resolved form factor: ' +
+          JSON.stringify(readException));
+      }
       LogUtil.info(TAG, 'update window_pcmode_switch_status, ' +
         'new status:' + value + ',xcomponentId:' + this.xcomponentId);
       let newStatus: boolean = false;
@@ -2694,8 +2812,12 @@ export class WebAbility extends WebBaseAbility {
   // Layout fullscreen is a TOUCH-form-factor property: on for phone/tablet
   // touch (where the content avoids the visible bars via published insets),
   // off for free windows / PC mode (where the WMS caption must keep its
-  // drag hot zone). Called on mode switches; startup handles the initial
-  // value in onWindowStageCreate.
+  // drag hot zone). Called on mode switches AND once during startup before
+  // loadContent (round 102, docs/window-state-machine.md §2) - it is the
+  // SINGLE entry point for this flag, so an unresolved form factor can never
+  // switch a window-mode window into the touch regime.
+  // 2in1 is deliberately NOT handled here (deviceType gate below, H15): the
+  // system default flag is left untouched, exactly as before round 102.
   private applyLayoutFullscreenForMode(): void {
     if (!this.mainWindow) {
       return;

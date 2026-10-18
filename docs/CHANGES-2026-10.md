@@ -128,6 +128,143 @@ EntryAbility 实例 = 一个独立的 OHOS mission。`AppWindowAdapter` 里
 ②再选回去同样成立;③仓库选择器(starter)不受影响;④PC/桌面模式仍可多窗口共存;
 ⑤`hilog -x | grep 'window geometry entry removed'` 只应看到旧窗口被清理。
 
+## 第 102 轮(2026-10-18):窗口模式冷启动"闪动放大再恢复记忆"(形态解析晚于形态动作)
+
+**用户报告**:系统处于窗口模式(平板 PC 模式)时冷启动应用,窗口先被放大到
+整屏,再"恢复"到上次关闭时的浮窗大小(一次启动里表现为"放大 → 缩小"的
+闪动);触摸模式没有该现象。
+
+**根因(对照 `docs/window-state-machine.md` §1/§2,真机日志链路)**
+
+`pcModeEnabled` 字段默认 `false`(语义 = 触摸),真值由
+`updateWindowPcmodeSwitchStatus` 写入,而该首读位于 `loadContent` 回调
+**末尾**;启动几何块 `if (!this.pcModeEnabled) forceFullscreenWindow()`
+与无条件 `setWindowLayoutFullScreen(true)` 都在它**之前**执行。于是窗口
+模式冷启动的实际序列是:
+
+1. 系统按上次状态恢复记忆浮窗矩形;
+2. 启动几何块把窗口 `resize` 到 display 整屏矩形(hilog
+   `forced fullscreen rect:`),肉眼"放大";同时
+   `setWindowLayoutFullScreen(true)` 把 web 内容铺到标题条热区(第 9/50 轮
+   已知问题);
+3. 回调末尾的首读把 `pcModeEnabled` 翻成 `true`:只复位布局全屏,
+   **没有任何代码把窗口缩回去**;
+4. 引擎主进程按桌面版记忆化(`<userData>/<vaultId>.json`)主动
+   `setBounds` 到上次关闭时的矩形(hilog `setBounds requested=...`),
+   窗口缩回,肉眼"恢复记忆"。
+
+触摸模式观察不到,是因为步骤 2 的整屏矩形让引擎 `setBounds` 被系统拒绝
+(`1300010` / `window should not move`)——"该失败"本来就是触摸形态的
+预期(第 5/14c 轮已记录)。这不是时序巧合:字段默认值与真实形态在首读前
+不可区分,状态机缺少"解析先于动作"的约束。
+
+**修复(方案 C:形态解析先于一切几何/布局动作)**
+
+| 侧 | 变更 | 目的 |
+|----|------|------|
+| ArkTS | 新增 `resolvePcModeAtBoot()`:无副作用同步读 `window_pcmode_switch_status`;非 tablet 返回 false;读异常返回 true(保持窗口形态,随后首读若确为 false 走 modeChanged 自愈) | 形态在第一次几何动作前确定,字段默认值不再被当成形态 |
+| ArkTS | `onWindowStageCreate` 顶部 seed `this.pcModeEnabled` 并复位 `pcModeObserved = false`;`clearStaleWindowEntries()` 由 loadContent 回调前移至此 | 首读会先写本窗口条目,先清再写才不会被自己删掉;每个窗口舞台的首同步都算首同步(窗口舞台重建时仍完整 apply) |
+| ArkTS | `registerKeyObserver` + 首读 `updateWindowPcmodeSwitchStatus` 整块前移到 `loadContent` **之前**;注册改用 `this.context`(与销毁期 unregister 同源),并包 try/catch | 形态应用点唯一且在内容加载前;`getContext()` 依赖已加载 UI;该调用现在在主路径上,异常不得中断窗口创建 |
+| ArkTS | 删除启动路径上的独立 `setWindowLayoutFullScreen(true)`;phone 分支改为 `writeTouchModeFile(false)` + `applyLayoutFullscreenForMode()` | 布局全屏收敛为 `applyLayoutFullscreenForMode()` 单入口(触摸 true / 窗口显式 false;2in1 保持历史行为不触碰) |
+| ArkTS | `loadContent` 回调里的 `setWindowDecorVisible(!hideTitleBar)` 改为**仅触摸形态**执行;窗口形态的 decor 只由 `pushSafeAreaInsets()` 决定 | 顺序反转后该调用会变成"最后写入者",把窗口形态系统标题条又藏掉(系统条 + Obsidian 自绘条同时消失) |
+| ArkTS | `loadContent` 回调里的 `if (!pcModeEnabled) forceFullscreenWindow()` 改为**触摸专属、幂等**兜底(保留) | 不是第二条 resize 链:窗口形态被守卫挡掉、已整屏直接跳过;兜底"窗口 show 前 resize 被 WMS 拒"(1300002 / MoveToAsync timeout) |
+| ArkTS | `forceFullscreenWindow()` 增加"窗口形态直接忽略"守卫 | 不变量:触摸专用校正不得作用于窗口形态(当前调用图无触发路径,纯防御) |
+| ArkTS | `computeViewportBound()` 在 `drawableRect` 宽/高 ≤ 0 时回退 `windowRect` | 形态在最早一批几何事件就已解析,标题条尚未合成时不能推 0×0 视口 |
+| ArkTS | `updateWindowPcmodeSwitchStatus` 的 `getValueSync` 改为内层 try/catch,读失败回退已解析形态 | 读失败不再跳过 apply(否则触摸形态会失去唯一的整屏校正) |
+
+**六维审计**
+
+| 维度 | 结论 |
+|---|---|
+| 必要性 | 每处改动都能追到真机现象:窗口模式冷启动 hilog 顺序 `forced fullscreen rect` → `update window_pcmode_switch_status,new status:true` → `setBounds requested`(引擎恢复);触摸模式同一序列里 `setBounds` 被 1300010 拒绝。文档 §2 明文要求"窗口/PC 形态不强制尺寸",旧代码违反该表。后半段改动都来自本轮审计发现的顺序侧效(invariant 收敛),不是"顺手重构" |
+| 正确性 | 形态解析(seed)→ 形态应用(首读)→ 内容加载 → 引擎 `setBounds`,单链且各一次;`pcModeObserved` 语义未变(首读置位、seed 复位,保证每次窗口舞台的首同步完整 apply);布局全屏与系统标题条各自单点写入;整屏校正幂等(已整屏跳过);窗口形态只钳制、不 resize;`drawableRect` 未合成时不推 0 视口 |
+| 安全性 | 不新增权限面与外部输入;`settings.getValueSync` 读的用户属性只用于本进程分支;新增日志只含布尔与异常 JSON,不含路径/令牌;`writeTouchModeFile` 仍走原子写 |
+| 代码质量 | 手机/平板/2in1 分支与原逻辑等价(仅搬家);删除重复决策链;注释只写代码表达不了的约束(形态默认值不可信、1300002/1300010、单应用点、decor 最后写入者);无新增 import,`Context` 沿用全局类型;"是否整屏/是否等值"等判断统一 `===` |
+| 架构 | 状态机新增**不变量**:"形态解析先于任何几何/布局动作;未解析 ≠ 触摸形态;窗口形态启动只允许钳制;布局全屏标志与系统标题条各自只有一个写入者";规格 §2/§3 同步、文末 Round 102 小节记录;`applyLayoutFullscreenForMode` 成为布局全屏唯一入口,可静态审查 |
+| 耗电性 | 未新增定时器/轮询;`resolvePcModeAtBoot` 仅一次同步读(与首读重复读一次,代价为 page-cache 读);观察者注册提前不改变触发频率;`loadContent` 的触摸重申在已整屏时立即 return(无 WMS 交互);整体减少 WMS 交互次数 |
+
+**自查审计**
+
+- R102-1 `resolvePcModeAtBoot` 读失败返回 true(窗口形态)会不会让触摸形态
+  不整屏?不会:随后首读读到 false 时 `modeChanged=true`,照常整屏;只有
+  两个读**同时**失败才失去校正,而此时"不动窗口"是安全默认。函数注释已写明。
+- R102-2 首读前移到 `loadContent` 之前,`this.mainWindow` 是否就绪?是:
+  `onWindowStageCreate` 中 `getMainWindowSync()` 在诊断块之前;`pushSafeAreaInsets`
+  内部另有判空。
+- R102-3 `nativeContext.UpdateWindowPcmodeSwitchStatusCB` 提前调用会不会在
+  引擎未起时丢失?与旧代码同为启动期(旧首读也在 `runBrowser` 之前),且该
+  方法在**每次** fire 都调用(第 94 轮),不依赖首次。
+- R102-4 观察者提前注册是否重复/泄漏?注册仍在 `onWindowStageCreate` 一次;
+  销毁期 `unregisterKeyObserver(this.context,...)` 与注册同源。
+- R102-5 2in1 启动期仍不做首读(H15),本轮不改变;`resolvePcModeAtBoot`
+  对非 tablet 返回 false,与历史默认一致 → 无新增回归(见"未改项")。
+- R102-6 删除回调内 `getContext(this)` 是否影响其它调用?文件内已无其他
+  `getContext(this)`;`Context` 由全局提供,无 import 变更。
+- R102-7 静默失败面是否扩大?两处读失败都有 `warn` 且行为确定(保持窗口
+  形态 / 回退已解析形态),不存在"读了但不知道"。
+- R102-8 顺序反转后**最后写入者**是否改变?decor 就是受害者:旧顺序里
+  `pushSafeAreaInsets` 在回调末尾收尾,现在它先在启动期跑,回调里的
+  `setWindowDecorVisible(!hideTitleBar)` 反而成为最后写入者 → 已改为仅触摸
+  形态执行,窗口形态 decor 单点归 push(审计 P1)。
+- R102-9 `registerKeyObserver` 现在位于窗口创建主路径,异常会中断
+  `loadContent`/监听注册 → 已包 try/catch,注册失败仍继续首读(审计 P2)。
+- R102-10 触摸形态唯一整屏校正提前到 `loadContent` 之前(窗口可能尚未 show),
+  WMS 若拒绝则没有后备 → 保留回调内的幂等重申作为兜底(审计 P3)。
+- R102-11 同一 ability 实例窗口舞台重建时 `pcModeObserved` 若不复位,第二次
+  首读会被 early-return 吞掉 → seed 处已复位(审计 P4)。
+- R102-12 形态提前解析后,窗口形态从第一个几何事件起走 `drawableRect`;
+  标题条未合成时 `drawableRect` 可能为 0 → 已加回退 `windowRect`(审计 P10)。
+- R102-13 改动后文件括号配对/字符串终止已用脚本核对(0 问题);另做了一次
+  **独立只读审计**(另一 context 的审计 agent,对照 9 月六维标准),其 P1/P2/
+  P3/P4/P10 已在本轮修复,剩余项记入"未改项";未跑全量构建
+  (`hvigorw`/`ohpm` 不在本机 PATH),以逐段静态核对 + 真机验证为准。
+
+**验证要点**(真机,`window_pcmode_switch_status=true`)
+
+1. 窗口模式冷启动 5 次:hilog **不得**出现 `forced fullscreen rect:`;
+   应出现 `update window_pcmode_switch_status, new status:true` →
+   `pc mode handled: enabled=true` → 引擎 `setBounds requested={...}`
+   (一次引擎恢复),肉眼无放大。
+2. 窗口模式冷启动后标题条仍可拖动(布局全屏未被打开);最大化/还原、
+   拖动改尺寸各一次正常。
+3. **`frame=hidden`/`custom` 的窗口模式下冷启动**:系统标题条仍在(不得出现
+   既无系统条、又无 Obsidian 自绘 `.titlebar` 的"无标题条窗口");
+   `hilog | grep 'Failed to set window decor'` 无新增。
+4. 关掉窗口模式后冷启动 / 切回触摸模式:仍出现 `forced fullscreen rect:`
+   且窗口整屏,视口贴合、底部导航条不遮内容。
+5. 手机 / 2in1 冷启动与改动前一致(手机触摸布局、2in1 桌面窗口)。
+6. 设置里开关 PC 模式即时生效:观察者日志
+   `pc mode handled: enabled=<新值>, changed=true`,且只出现一次整屏校正
+   或一次钳制;重复同值事件打印 `pc mode unchanged (...)` 且无副作用。
+7. 双窗口:非主窗口冷启动不做整屏校正(`isMainAppWindow` + 守卫),焦点
+   窗口几何不被抢。
+8. 若"系统恢复矩形越界"(换分辨率/旋转/上次在更大屏):接受
+   "先钳制入屏、再被引擎 `setBounds` 恢复"的两次收敛(见"已知风险"),
+   但不得出现整屏残留。
+
+**未改项/已知风险**
+
+- 2in1 启动期不读 `window_pcmode_switch_status`(H15 历史决策),
+  `pcModeEnabled` 在首次观察者触发前保持 false;`computeViewportBound`
+  因此可能仍用含标题条的 `windowRect`。本轮**未改**,需 2in1 真机验证后
+  单独立项。
+- `AppWindowAdapter.isTabletPcMode()` 是**第三处**形态解析(引擎建窗时决定
+  `StartOptions.windowMode`),其读失败兜底是 `false`(触摸),与
+  `resolvePcModeAtBoot` 的 `true`(窗口)相反。窗口模式下若该读瞬时失败,
+  新窗会以整屏创建,而窗口形态"只钳制不 resize"不会缩回。属既有风险,
+  统一两处默认值需真机验证建窗路径,本轮不动。
+- 窗口模式冷启动且系统恢复矩形越界时,首读先 `clampWindowToWorkArea`(80%
+  居中)再被引擎 `setBounds` 覆盖 → 可能出现"钳制 + 恢复"两次跳变。这是
+  既有行为(钳制在引擎恢复之前),本轮未引入也未消除。
+- `clearStaleWindowEntries()` 只清 `windows`,不清第 99 轮的 `focusedWindow`
+  (硬杀会话残留的焦点标记若与新窗口 id 撞号,渲染层会信任错误条目)。
+  `removeWindowGeometryEntry` 已清该字段,两处口径不一致;本轮不动,避免
+  影响焦点链路。
+- `resolvePcModeAtBoot` 与首读各读一次 settings(两次同步读);若将来加
+  缓存,必须保持"未解析 ≠ false"这一不变量。
+- 模式文件 `systemMode` 仍由 `writeTouchModeFile` 单点写;渲染层
+  `desktopLayoutWanted` 的 mtime 缓存未改。
+
 ## 第 99-101 轮新增改动六维审计(2026-10-18)
 
 审计范围:`scripts/update-obsidian.mjs`(渲染层补丁)、`WebAbility.ets`、
