@@ -40,8 +40,10 @@ import Want from '@ohos.app.ability.Want';
 
 import { AbilityManager } from '../common/AbilityManager';
 import { BaseAdapter } from '../common/BaseAdapter';
+import { ConfigData } from '../common/Constants';
 import { ContextAdapter } from './ContextAdapter';
 import { IStyleData, IUpdateStyle, WindowStyle } from '../common/WindowStyle';
+import { WebProxy } from '../interface/WebProxy';
 import LaunchHelper from '../utils/LaunchHelper';
 import LogMethod from '../common/LogDecorator';
 import LogUtil from '../utils/LogUtil';
@@ -131,6 +133,42 @@ export class AppWindowAdapter extends BaseAdapter {
       proxy?.setWindowPreferences(preferences);
     }
     proxy?.getWindow()?.setWindowTitleButtonVisible(true, true, true);
+  }
+
+  // Round 99: the vault chooser (starter window) is the one that calls
+  // createWindow, and it destroys itself the moment the synchronous
+  // vault-open IPC returns (starter.js does window.close() right after
+  // sendSync). Starting the new vault ability FROM that dying context made
+  // the system background the fresh window a few seconds later and hand
+  // focus back to the previous window - the reported "打开新仓库时窗口跳转"
+  // (docs/CHANGES-2026-09.md round 31 recorded the 3.3s focus bounce and
+  // could not name the trigger). Launch from a STABLE window instead: the
+  // primary ability when it is alive, else the oldest live window. The
+  // active context is only correct for the app's very first window, where no
+  // other window exists yet.
+  private launchContext(): Context | undefined {
+    try {
+      const list: WebProxy[] = this.abilityManager.getProxyList();
+      if (list.length > 1) {
+        for (let i = 0; i < list.length; i++) {
+          if (list[i].getWindowId() === ConfigData.DEFAULT_WINDOW_ID) {
+            const primaryCtx = list[i].getWindowContext() as Context | undefined;
+            if (primaryCtx !== undefined) {
+              LogUtil.info(TAG, 'launch from primary window context');
+              return primaryCtx;
+            }
+          }
+        }
+        const oldestCtx = list[0].getWindowContext() as Context | undefined;
+        if (oldestCtx !== undefined) {
+          LogUtil.info(TAG, 'launch from oldest window context: ' + list[0].getWindowId());
+          return oldestCtx;
+        }
+      }
+    } catch (exception) {
+      LogUtil.warn(TAG, 'launchContext failed: ' + JSON.stringify(exception));
+    }
+    return this.ctxAdapter.getActiveContext();
   }
 
   @LogMethod
@@ -256,7 +294,7 @@ export class AppWindowAdapter extends BaseAdapter {
       if (param.display_id != -1) {
         options.displayId = param.display_id;
       }
-      LaunchHelper.LaunchWithOptions(this.ctxAdapter.getActiveContext(), want, options);
+      LaunchHelper.LaunchWithOptions(this.launchContext(), want, options);
     };
 
     image.createPixelMap(color, {

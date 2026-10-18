@@ -246,13 +246,17 @@ function writeModeFileSync(cfg){
    own window by SIZE (outerWidth/outerHeight, +-2px): the geometry payload
    (insets/decor) is a pure function of fullscreen-likeness, which the rect
    size encodes - windows of equal size carry equal geometry, so size
-   matching is unambiguous. Same-size windows differ only in keyboard
-   (follows the focused window), so those are disambiguated by position
-   (screenX/screenY) when the engine reports it non-zero. Fallbacks: the
-   first size match, the single entry of a one-window session, then the
-   main window's legacy top-level fields (pre-B2 shape, still mirrored by
-   the main window). Returns null when nothing matches (callers fall back
-   to the legacy fields). */
+   matching is unambiguous. Same-size windows differ in keyboard (follows
+   the focused window). Round 99: within the size-matched candidates the
+   order is focused-window id (published by ArkTS as cfg.focusedWindow) ->
+   unique non-zero keyboard -> position (screenX/screenY, only when
+   non-zero) -> first candidate. In touch mode every window is the same
+   fullscreen rect at (0,0), so that last resort used to pick the OLDEST
+   window - the vault-switch bug where a new window read the previous
+   window's keyboard:0. Fallbacks: the single entry of a one-window
+   session, then the main window's legacy top-level fields (pre-B2 shape,
+   still mirrored by the main window). Returns null when nothing matches
+   (callers fall back to the legacy fields). */
 function resolveGeometry(cfg){
   try{
     var wins=cfg&&cfg.windows;
@@ -261,28 +265,118 @@ function resolveGeometry(cfg){
       var entries=[];
       for(var i=0;i<keys.length;i++){
         var e=wins[keys[i]];
-        if(e&&typeof e==="object"&&e.w>0&&e.h>0)entries.push(e);
+        if(e&&typeof e==="object"&&e.w>0&&e.h>0)entries.push({k:keys[i],e:e});
       }
-      if(entries.length===1)return entries[0];
+      if(entries.length===1)return entries[0].e;
       if(entries.length>1){
         var ow=window.outerWidth||0,oh=window.outerHeight||0;
         if(ow>0&&oh>0){
           var bySize=entries.filter(function(q){
-            return Math.abs(q.w-ow)<=2&&Math.abs(q.h-oh)<=2;
+            return Math.abs(q.e.w-ow)<=2&&Math.abs(q.e.h-oh)<=2;
           });
-          if(bySize.length===1)return bySize[0];
+          if(bySize.length===1)return bySize[0].e;
           if(bySize.length>1){
+            /* Round 99: identity, only among candidates that already matched by
+               size (so PC-mode windows of different sizes keep resolving by
+               their own rect, exactly as before). The renderer has no OHOS
+               window id and in touch mode EVERY window is the same fullscreen
+               rect at (0,0), so this branch used to end at bySize[0] = the
+               lowest key = the OLDEST window. Device-proven after a vault
+               switch: windows 520/522 both 1244x818@0,0 while 522 held
+               keyboard:344, so the new window read 520's keyboard:0 and the
+               formatting toolbar never rose. The ArkTS side now publishes
+               cfg.focusedWindow on WINDOW_ACTIVE/INACTIVE; the keyboard
+               tiebreak below still covers a running HAP that predates it. */
+            var focused=(cfg.focusedWindow===undefined||cfg.focusedWindow===null)?
+              "":(""+cfg.focusedWindow);
+            if(focused!==""){
+              var byFocus=bySize.filter(function(q){return q.k===focused;});
+              if(byFocus.length===1)return byFocus[0].e;
+            }
+            /* Only one window can own the IME at a time, so a non-zero
+               keyboard is strictly better than the oldest entry's 0 while
+               several same-size windows are on screen. */
+            var withKb=bySize.filter(function(q){return (+q.e.keyboard||0)>0;});
+            if(withKb.length===1)return withKb[0].e;
             var sx=window.screenX||0,sy=window.screenY||0;
             if(sx!==0||sy!==0){
               var byPos=bySize.filter(function(q){
-                return Math.abs(q.l-sx)<=2&&Math.abs(q.t-sy)<=2;
+                return Math.abs(q.e.l-sx)<=2&&Math.abs(q.e.t-sy)<=2;
               });
-              if(byPos.length===1)return byPos[0];
+              if(byPos.length===1)return byPos[0].e;
             }
-            return bySize[0];
+            return bySize[0].e;
           }
         }
+        /* Round 100: the size gate can miss completely. Device samples of one
+           fullscreen touch-mode window: 1140x724 right after boot, 1245x818
+           once laid out, 1468x966 in a window whose dpr settled at 2.25 -
+           against a published 1244x818 vp rect. With two windows open a miss
+           means EVERY consumer falls back to the main window's mirrored
+           top-level fields (keyboard 0, stale insets). Fall back to the
+           focus-published entry instead: focusedEntry decides by mode whether
+           the marker may be trusted without document.hasFocus(). */
+        var fe=focusedEntry(cfg);
+        if(fe)return fe;
         return null;
+      }
+    }
+  }catch(e){}
+  return null;
+}
+/* Round 100: the only window that can own the IME is the focused one, and
+   ArkTS publishes that window's OHOS id as cfg.focusedWindow - so "the entry
+   named by cfg.focusedWindow" is this renderer's entry. Deliberately NOT
+   routed through resolveGeometry: the size gate needs window.outerWidth/
+   outerHeight to equal the published vp rect, which on device only holds once
+   the layout settles (1140x724 at boot, 1245x818 laid out, 1468x966 with a
+   2.25 dpr), so a miss sends the consumer to the main window's mirrored
+   cfg.keyboard (0). That is the reported "切换仓库后新窗口的工具栏不生效,杀掉
+   旧窗口就生效" (kill the old window -> a single entry -> resolveGeometry's
+   early return feeds it). Fallbacks in resolveKeyboardEntry still land on the
+   IME owner for a renderer that has no focus marker: unique non-zero
+   keyboard, then the largest keyboard. */
+function focusedEntry(cfg){
+  try{
+    /* Touch mode: exactly one window is on screen at a time and it is the
+       focused one, so cfg.focusedWindow can be trusted unconditionally.
+       Desktop/PC mode keeps the document.hasFocus() guard because several
+       windows are visible at once and a background window must not adopt the
+       focused window's geometry. */
+    var touch=false;
+    try{touch=resolveWant(cfg)===true}catch(e0){}
+    if(!touch&&!(document.hasFocus&&document.hasFocus()))return null;
+    var wins=cfg&&cfg.windows;
+    if(!wins||typeof wins!=="object")return null;
+    var f=(cfg.focusedWindow===undefined||cfg.focusedWindow===null)?"":(""+cfg.focusedWindow);
+    if(f==="")return null;
+    var e=wins[f];
+    if(e&&typeof e==="object"&&e.w>0&&e.h>0)return e;
+  }catch(err){}
+  return null;
+}
+function resolveKeyboardEntry(cfg){
+  try{
+    var wins=cfg&&cfg.windows;
+    if(wins&&typeof wins==="object"){
+      var fe=focusedEntry(cfg);
+      if(fe)return fe;
+      var keys=Object.keys(wins),entries=[];
+      for(var i=0;i<keys.length;i++){
+        var e=wins[keys[i]];
+        if(e&&typeof e==="object"&&e.w>0&&e.h>0)entries.push(e);
+      }
+      if(entries.length===1)return entries[0];
+      var kb=entries.filter(function(q){return (+q.keyboard||0)>0});
+      if(kb.length===1)return kb[0];
+      if(kb.length>1){
+        /* Both windows report an IME (a stale >0 left by the window that
+           lost focus before its IME closed). The height is the same IME, so
+           the largest value is the safe answer for the window that is
+           typing. */
+        var best=kb[0];
+        for(var j=1;j<kb.length;j++){if((+kb[j].keyboard||0)>(+best.keyboard||0))best=kb[j]}
+        return best;
       }
     }
   }catch(e){}
@@ -579,7 +673,7 @@ var lastKeyboard=-1;
 function applyKeyboard(){
   try{
     var cfg=readMode();
-    var g=resolveGeometry(cfg);
+    var g=resolveKeyboardEntry(cfg);
     var kb=0;
     if(g){kb=+g.keyboard||0}
     else{kb=(cfg&&+cfg.keyboard)||0}
@@ -642,42 +736,55 @@ function applyFontScale(){
    readFileSync per tick, no work and no event spam when nothing moved. The
    ArkTS side writes on every keyboardHeightChange / fontScale change, so
    consumers follow within one tick without dedicated polling ladders. */
-var modePollMs=200,lastModeRaw=null;
+var modePollMs=200,hiddenPollMs=1000,lastModeRaw=null;
 function pollTick(){
   try{
-    if(document.hidden){
-      /* Hidden windows skip the read entirely; visibilitychange resumes the
-         loop, which re-checks immediately so nothing is missed while away.
-         (Protocol deep-link polling in the main process stays on - OAuth
-         callbacks arrive exactly while the app is backgrounded.) */
-    }else{
-      var dir=dataDir();
-      if(dir){
-        var txt=require("fs").readFileSync(dir+MODE_FILE,"utf8");
-        if(txt!==lastModeRaw){
-          lastModeRaw=txt;
-          try{lastWant=syncFromSystem(lastWant)}catch(e){}
-          /* Back gesture published by the @Entry pages (round 96). */
-          try{applyBackPress()}catch(e){}
-          /* Rotation / bar changes rewrite cfg.insets without touching
-             systemMode - re-apply the safe area on every change too. */
-          try{applySafeArea()}catch(e){}
-          try{applyWindowDecor()}catch(e){}
-          try{hookTrash()}catch(e){}
-          try{applyKeyboard()}catch(e){}
-          try{applyFontScale()}catch(e){}
-          try{refreshSystemFontGlobals()}catch(e){}
-          try{applyThemeFontFace(readMode())}catch(e){}
-          try{applySystemFonts()}catch(e){}
-        }
+    /* Round 100: a hidden window used to SKIP the read entirely and wait for
+       a visibilitychange to resume. That assumed the engine always reports
+       visibility correctly; after a vault switch the new window can stay
+       document.hidden (created STARTUP_HIDE, shown later), which froze EVERY
+       mode-file consumer in it - the toolbar never reacted until the old
+       window died and its visibility event kicked the loop. Throttle instead
+       of skip: one small read per second while hidden. */
+    var dir=dataDir();
+    if(dir){
+      var txt=require("fs").readFileSync(dir+MODE_FILE,"utf8");
+      if(txt!==lastModeRaw){
+        lastModeRaw=txt;
+        try{lastWant=syncFromSystem(lastWant)}catch(e){}
+        /* Back gesture published by the @Entry pages (round 96). */
+        try{applyBackPress()}catch(e){}
+        /* Rotation / bar changes rewrite cfg.insets without touching
+           systemMode - re-apply the safe area on every change too. */
+        try{applySafeArea()}catch(e){}
+        try{applyWindowDecor()}catch(e){}
+        try{hookTrash()}catch(e){}
+        try{applyKeyboard()}catch(e){}
+        try{applyFontScale()}catch(e){}
+        try{refreshSystemFontGlobals()}catch(e){}
+        try{applyThemeFontFace(readMode())}catch(e){}
+        try{applySystemFonts()}catch(e){}
       }
     }
   }catch(e){}
-  setTimeout(pollTick,modePollMs);
+  setTimeout(pollTick,document.hidden?hiddenPollMs:modePollMs);
 }
 document.addEventListener("visibilitychange",function(){
   if(!document.hidden){lastModeRaw=null}
 });
+/* Round 100: the keyboard/geometry pick now consults document.hasFocus(), so
+   a focus transition must re-evaluate immediately instead of waiting for the
+   next file change. */
+try{
+  window.addEventListener("focus",function(){
+    try{lastModeRaw=null}catch(e){}
+    try{applySafeArea()}catch(e){}
+    try{applyKeyboard()}catch(e){}
+  });
+  window.addEventListener("blur",function(){
+    try{applyKeyboard()}catch(e){}
+  });
+}catch(e){}
 /* Bug 1 (HEVC, 2026-10-02 user report): the engine bundles the standard
    open-source Chromium ffmpeg - NO HEVC/H.265 (and some patent-pool audio)
    decoders - and the closed-source engine exposes no HarmonyOS MediaCodec
@@ -1228,6 +1335,72 @@ function hookVaultSelect(){
   }catch(e){}
 }
 hookVaultSelect();
+/* Touch mode is single-window by design, but the engine's vault-open IPC
+   always creates a NEW BrowserWindow (a separate OHOS mission). The chooser
+   window then closes itself, and HarmonyOS restores focus to the mission that
+   was active BEFORE the new one - the OLD vault window - so the user is left
+   looking at the vault they just left and has to swipe/switch missions by
+   hand ("在仓库管理页面选择仓库,窗口没有到新开的仓库,还是旧的").
+   There is no API (this SDK has no moveAbilityToForeground) to raise a
+   background mission, so the deterministic fix is the one the user did by
+   hand: the newly opened vault window closes its siblings. Once the old
+   window is gone, focus has nowhere else to go. Only vault windows do this -
+   the starter chooser (starter.html) is excluded, and desktop/PC mode keeps
+   multi-window behaviour. */
+function reapSiblingVaultWindows(){
+  try{
+    if(location.href.indexOf("starter.html")>=0)return;
+    var tries=0;
+    var tick=function(){
+      tries++;
+      var again=false;
+      try{
+        var cfg=readMode();
+        if(!cfg||cfg.systemMode===undefined){
+          /* Mode file not readable yet (ArkTS write still in flight): retry
+             and never act on an unknown mode - closing windows on a guess is
+             not recoverable. */
+          again=tries<6;
+        }else if(cfg.systemMode==="touch"){
+          var rem=require("@electron/remote");
+          var BW=(rem&&rem.BrowserWindow)||(rem&&rem.getGlobal&&rem.getGlobal("BrowserWindow"));
+          var cur=(rem&&rem.getCurrentWindow)?rem.getCurrentWindow():null;
+          if(BW&&cur&&cur.id!==undefined&&cur.id!==null){
+            /* Raise ourselves first: if the engine maps show()/moveTop() onto
+               a window raise, this alone fixes the foreground, and it also
+               means closing the old window cannot strand focus on an empty
+               desktop. */
+            try{if(cur.isVisible&&!cur.isVisible())cur.show()}catch(e0){}
+            try{cur.moveTop()}catch(e1){}
+            try{cur.focus()}catch(e2){}
+            var others=BW.getAllWindows().filter(function(w){
+              try{
+                if(w.id===cur.id)return false;
+                var u=(w.webContents&&w.webContents.getURL)?String(w.webContents.getURL()):"";
+                if(/starter\.html|help|sandbox|devtools/i.test(u))return false;
+                return true;
+              }catch(e3){return false}
+            });
+            if(others.length){
+              for(var i=0;i<others.length;i++){
+                var w=others[i];
+                try{if(!(w.isDestroyed&&w.isDestroyed()))w.close()}catch(e4){}
+              }
+              /* Keep retrying: close() is asynchronous, a sibling may refuse
+                 to close (beforeunload) or a second vault window may appear. */
+              again=tries<6;
+            }
+          }
+        }
+      }catch(e5){
+        again=tries<6;
+      }
+      if(again)setTimeout(tick,400);
+    };
+    setTimeout(tick,400);
+  }catch(e){}
+}
+reapSiblingVaultWindows();
 /* Migrate the current vault into a user-visible folder: HarmonyOS sandboxes
    app files, so a vault inside userData (the quick-start default) and its
    .trash can never be reached from 文件管理 or a PC. There is no API to

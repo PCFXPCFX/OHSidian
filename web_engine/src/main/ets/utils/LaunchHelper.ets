@@ -73,6 +73,14 @@ export default class LaunchHelper {
             if (options.displayId !== undefined) {
               reduced.displayId = options.displayId;
             }
+            // Round 99: windowMode MUST survive the ladder. Dropping it turned
+            // a fullscreen touch-mode launch into a system-default floating
+            // window that was only corrected afterwards - the visible "窗口跳
+            // 转错误" (a small window appears, then jumps/fills). The rejected
+            // pair is processMode/startupVisibility, not windowMode.
+            if (options.windowMode !== undefined) {
+              reduced.windowMode = options.windowMode;
+            }
             LogUtil.warn(TAG, 'retrying with geometry-only StartOptions');
             context.startAbility(want, reduced)
               .then(() => {

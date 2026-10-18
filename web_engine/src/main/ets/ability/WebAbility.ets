@@ -111,6 +111,16 @@ export class WebAbility extends WebBaseAbility {
   // publishSystemFonts retry counter for the early-startup empty-list race.
   private systemFontRetries: number = 0;
   private mainWindow: window.Window | undefined = undefined;
+  // This ability's OHOS window id, captured once when the window stage is
+  // created (round 99). onWindowStageDestroy used to call
+  // mainWindow.getWindowProperties() to delete its mode-file entry - by then
+  // the window is already being torn down, that call throws 1300002 and the
+  // cleanup was silently skipped, leaving windows[<id>] pointing at a dead
+  // window. Device-proven consequence (vault switch): the closed window's
+  // entry (keyboard:0) stayed in the file, stayed first in key order, and the
+  // new window kept resolving to it, so the formatting toolbar never rose
+  // again. Also used as the identity published on WINDOW_ACTIVE/INACTIVE.
+  private ownerWindowId: number = -1;
 
   // Display-mode state machine (docs/window-state-machine.md is the spec;
   // keep this comment and that document in sync):
@@ -599,6 +609,9 @@ export class WebAbility extends WebBaseAbility {
       if (this.mainWindow !== undefined) {
         try {
           winId = this.mainWindow.getWindowProperties().id;
+          // Keep the cached id in sync (a window can be re-created with the
+          // same ability instance across relaunches).
+          this.ownerWindowId = winId;
           const rect = this.mainWindow.getWindowProperties().windowRect;
           let density: number = 1;
           try {
@@ -703,10 +716,25 @@ export class WebAbility extends WebBaseAbility {
   // renderer's size-match could pair a new window with dead geometry.
   private removeWindowGeometryEntry(): void {
     try {
-      if (this.mainWindow === undefined) {
+      // Round 99: the live query used to run here and threw 1300002 because
+      // the window is already being torn down at this point - the whole
+      // cleanup was skipped and the entry lingered (device log:
+      // "failed to remove window geometry entry: {\"code\":1300002}" right
+      // after the WMS terminated persistentId 520). Use the id captured in
+      // onWindowStageCreate; the live query stays only as a fallback for a
+      // destroy that happens before the capture.
+      let winId: number = this.ownerWindowId;
+      if (winId < 0 && this.mainWindow !== undefined) {
+        try {
+          winId = this.mainWindow.getWindowProperties().id;
+        } catch (exception) {
+          winId = -1;
+        }
+      }
+      if (winId < 0) {
+        LogUtil.warn(TAG, 'remove window geometry entry: no window id');
         return;
       }
-      const winId: number = this.mainWindow.getWindowProperties().id;
       const filesDir: string = this.context.getApplicationContext().filesDir;
       const filePath: string = filesDir + '/ohsidian-mode.json';
       let cfg: Record<string, Object> = {};
@@ -739,10 +767,69 @@ export class WebAbility extends WebBaseAbility {
         }
       }
       cfg['windows'] = next;
+      // Drop the focus marker too when it points at this (dead) window. The
+      // value is stringified defensively: a marker written as a number would
+      // never compare equal to the string key.
+      const focusedRaw: Object | undefined = cfg['focusedWindow'];
+      const focused: string = (focusedRaw === undefined || focusedRaw === null) ? '' : ('' + focusedRaw);
+      if (focused === key) {
+        cfg['focusedWindow'] = '';
+      }
       this.publishModeFileAtomic(filePath, cfg);
       LogUtil.info(TAG, 'window geometry entry removed: ' + key);
     } catch (err) {
       LogUtil.warn(TAG, 'failed to remove window geometry entry: ' + JSON.stringify(err));
+    }
+  }
+
+  // Publishes which window currently owns the IME focus (round 99). The
+  // renderer has no OHOS window identity (the engine exposes none), so it
+  // matched its own mode-file entry by SIZE - and in touch mode every window
+  // is the identical fullscreen rect at (0,0), so the match degenerated to the
+  // lowest key, i.e. the OLDEST window. Device-proven: windows 520/522 both
+  // 1244x818@0,0 while 522 held keyboard:344, so the freshly switched vault
+  // read 520's keyboard:0 and the toolbar stayed down. Focus ownership is the
+  // one identity signal the ArkTS side actually has, so publish it.
+  private publishFocusedWindow(focused: boolean): void {
+    try {
+      const winId: number = this.ownerWindowId;
+      if (winId < 0) {
+        return;
+      }
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const filePath: string = filesDir + '/ohsidian-mode.json';
+      let cfg: Record<string, Object> = {};
+      try {
+        if (fileIo.accessSync(filePath)) {
+          cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+          if (!cfg) {
+            cfg = {};
+          }
+        }
+      } catch (e) {
+        cfg = {};
+      }
+      const key: string = '' + winId;
+      const prev: string = cfg['focusedWindow'] === undefined ? '' :
+        (cfg['focusedWindow'] as string);
+      // Losing focus must not steal the marker from a sibling that already
+      // claimed it (INACTIVE of the old window can arrive after ACTIVE of the
+      // new one).
+      if (focused) {
+        if (prev === key) {
+          return;
+        }
+        cfg['focusedWindow'] = key;
+      } else {
+        if (prev !== key) {
+          return;
+        }
+        cfg['focusedWindow'] = '';
+      }
+      this.publishModeFileAtomic(filePath, cfg);
+      LogUtil.info(TAG, 'focused window: ' + (focused ? key : 'none'));
+    } catch (err) {
+      LogUtil.warn(TAG, 'failed to publish focused window: ' + JSON.stringify(err));
     }
   }
 
@@ -1802,6 +1889,15 @@ export class WebAbility extends WebBaseAbility {
     }
 
     this.mainWindow = windowStage.getMainWindowSync();
+    // Round 99: capture the window id at the only moment it is guaranteed to
+    // be readable (see ownerWindowId - the destroy-time query throws 1300002).
+    try {
+      this.ownerWindowId = this.mainWindow.getWindowProperties().id;
+      LogUtil.info(TAG, 'window id captured: ' + this.ownerWindowId +
+        ', main=' + this.isMainAppWindow);
+    } catch (exception) {
+      LogUtil.warn(TAG, 'capture window id failed: ' + JSON.stringify(exception));
+    }
     // Publish the current system font scale once at startup (onConfigur-
     // ationUpdate only fires on CHANGES); the renderer picks cfg.fontScale
     // up from the mode file on boot. Two independent sources, first wins:
@@ -1988,6 +2084,15 @@ export class WebAbility extends WebBaseAbility {
 
       try {
         data.on('windowEvent', (type) => {
+          // Round 99: focus ownership is the only window identity the ArkTS
+          // side can publish - the renderer cannot tell its own window apart
+          // in touch mode (all fullscreen rects are identical). See
+          // publishFocusedWindow.
+          if (type == window.WindowEventType.WINDOW_ACTIVE) {
+            this.publishFocusedWindow(true);
+          } else if (type == window.WindowEventType.WINDOW_INACTIVE) {
+            this.publishFocusedWindow(false);
+          }
           if (type == window.WindowEventType.WINDOW_SHOWN) {
             // Round 87 (A1): WINDOW_SHOWN is in the state machine §2 list -
             // re-publish the insets alongside the viewport. Switching back

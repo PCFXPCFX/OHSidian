@@ -140,6 +140,32 @@ Obsidian 窗口）都写同一份顶层 `insets/windowDecor/keyboard`，多窗�
   （insets/decor）是整屏判定的纯函数，同尺寸窗口载荷必然相同，尺寸匹
   配无歧义。同尺寸窗口的 keyboard 值（跟随焦点窗口）用 screenX/Y 消歧。
   回退顺序：唯一条目 → 顶层镜像字段（前 B2 形态）。
+  - **第 99 轮更正**：上面"同尺寸窗口用 screenX/Y 消歧"在触摸模式下
+    是**错的**——触摸模式所有窗口都是同一块整屏矩形且都在 (0,0)，
+    尺寸匹配后 screenX/Y 全为 0，只能退回 `bySize[0]`（最小键 = 最老
+    窗口），于是"切换仓库后新窗口读旧窗口的 keyboard:0"（真机取证：
+    520/522 同几何，522 已写 344，渲染层仍读 520）。
+  - **第 100 轮更正（更根本）**：尺寸门在触摸模式下**从未命中过**。
+    真机取证：渲染层自报 `outerWidth×outerHeight = 1468×966`（dpr 2.25），
+    而 ArkTS 用 `getWindowProperties().windowRect` 发布的条目是
+    `1244×818`（vp）——两者相差 1.18 倍（页面按 dpr 2.25 渲染、视口比
+    窗口大 18% 后再缩放），永远差得超过 ±2px。因此两个窗口以上时
+    `resolveGeometry()` 一律返回 null，所有消费方退回顶层镜像字段
+    （只有主窗口写 = 0）：键盘高度恒 0、工具栏不动；而杀掉旧窗口后
+    `entries.length===1` 走的是**最前面的早退分支**，与尺寸无关，于是
+    "一杀就好"。结论：**尺寸门不能作为身份前提**。
+  - 现行口径：身份 = 焦点。ArkTS 在 WINDOW_ACTIVE/INACTIVE 发布
+    `cfg.focusedWindow`（= OHOS 窗口 id，与 `cfg.windows` 的键同源）；
+    渲染层 `focusedEntry()` 在触摸模式直接信任它（任意时刻只有一个
+    可见窗口=焦点窗口），桌面/PC 模式仍要求 `document.hasFocus()`（多窗
+    口同屏，后台窗口不得采用前台几何）。键盘另有
+    `resolveKeyboardEntry()` 独立链路：焦点 → 唯一条目 → 唯一
+    `keyboard>0` → 最大 `keyboard`（同一 IME，取大者安全），完全不经过
+    尺寸门；`resolveGeometry()` 在尺寸候选为空时才回退到焦点条目。
+  - 销毁清理的失败模式（第 99 轮）：`removeWindowGeometryEntry()` 曾用
+    `mainWindow.getWindowProperties()` 取 id，而销毁阶段该调用抛
+    1300002，清理被整体跳过、条目永久残留——"关掉旧窗口也不恢复"的
+    直接原因。现改为使用 `onWindowStageCreate` 缓存的 `ownerWindowId`。
 - **生命周期（第 88 轮补）**：硬杀的窗口不跑 destroy 清理，残留条目会
   让尺寸匹配拿到死 insets——主窗口启动时 `clearStaleWindowEntries()`
   清空全部 `cfg.windows`（本次会话的窗口随后立即重写自己的条目）。
