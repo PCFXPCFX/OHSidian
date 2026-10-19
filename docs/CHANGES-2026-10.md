@@ -1899,3 +1899,40 @@ if (this.nativeHidden) {
 **审核结论**：构建通过；`ets/modules.abc` 仍命中 `v149`、`transport=avplayer`、`无音轨`、`视频峰值`、`maxWidth`；`obsidian.asar` 未变。
 
 **验证**：`BUILD SUCCESSFUL in 20 s 558 ms`；HAP **221,977,127 B**，SHA-256 `ABF2CC0438EDBC349B7D518FBD9FB37C22F9257D46BDF33F8B1E35A8B5A7234B`。
+## 第 150 轮 (2026-10-20): 模式切换的真正问题——重建链的次数、预算与时序竞争
+
+### 一次切换的完整时序（按代码顺序）
+
+| # | 发生什么 | 代码位置 |
+|---|---|---|
+| 1 | OS 换形态 → 主线程 `windowSizeChange` → 覆盖层立刻 Hidden | `Index.hideNativeForResize()` |
+| 2 | 渲染层重排 → 每帧请求带 `rect/region/mode` → 隐藏中也更新几何 | `Index.moveNativeRect()` |
+| 3 | 请求里的 `mode` 翻转 → 再隐藏一次（幂等） | `Index` rect 分支 |
+| 4 | 400ms 后满足 `ts >= hideAt+400` 的首个 rect → 覆盖层 Visible | `Index.revealNative()` |
+| 5 | 覆盖层面积变化 → 320ms 防抖 → `retry('surface area')` → **release + 280ms + initPlayer** | `Overlay.scheduleSurfaceResize()` |
+| 6 | 同时 XComponent 尺寸变化 → `onLoad` → surfaceId 变了 → `retry('surface resized')` | `Overlay` XComponent.onLoad |
+
+### 三个缺陷（全在第 5、6 步）
+
+**① 一次切换触发两次重建。** `onLoad` 与面积防抖各调一次 `retry()`，每次 `release()` 掉解码器 ⇒ 两段黑帧、两段音频中断。
+
+**② 重建消耗"解码错误预算"。** `retry()` 里有 `if (retryCount >= 2) fail()`；面积路径会先清零，但 **`onLoad` 路径不清**。切两次模式后 `retryCount` 就到 2，**下一次 resize 直接 `fail()`** ⇒ 播放器显示"播放器初始化失败"并死掉。这是"切几次就不能播了"的来源。
+
+**③ 揭示早于重建完成。** 揭示闸门 400ms；重建链 = 320ms 防抖 + 280ms 重试延迟 + prepare/play ≈ **600–900ms**。于是覆盖层在"新解码器还没出第一帧"时就显示了 ⇒ **黑矩形**。
+
+### 修法
+
+| 改动 | 作用 |
+|---|---|
+| 新增 `retryResize(reason)`：清零预算 + 500ms 去重 + 置 `resizeCover` | ①②同解：不再吃错误预算、一次切换只重建一次 |
+| `onLoad` 与面积防抖统一走 `retryResize` | 消除双重建 |
+| 新增 `resizeCover`：不透明 `theme.bg` + 「正在适配…」，在 `playing` / `paused` / `fail` 时清除 | ③：即使揭示早于重建完成，看到的也不是黑矩形 |
+
+`resizeCover` 必须在 `paused` 也清除——暂停态完成的重建不会经过 `playing`，否则遮罩会永久盖住画面。
+
+### 为什么前两次"修"没解决
+
+- R148 修的是**揭示基准被反复前推**（隐藏时间过长），属于"隐藏逻辑"；
+- 这次的问题**不在隐藏**，在**重建的次数、错误预算、以及重建与揭示的时序竞争**。两个问题在同一现象下叠加，只修前一个看起来就像"还是有问题"。
+
+**验证**：`BUILD SUCCESSFUL in 21 s 69 ms`；HAP **221,983,446 B**，SHA-256 `C449A6BA0E480270913BED63297AA1112C80F42C6E54D72FB216B4ED083C1100`；字节码命中 `v150`、`retryResize`、`resizeCover`，`v149` 已不存在。

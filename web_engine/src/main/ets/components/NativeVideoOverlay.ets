@@ -177,6 +177,11 @@ export struct NativeVideoOverlay {
   // presents its first one, so a bare re-init flashes the old video. An opaque
   // cover owns that gap and is removed on the first 'playing' of the new file.
   @State private switching: boolean = false;
+  // Shown while a window-resize rebuild runs. The surface has no valid picture
+  // between release() and the new decoder's first frame; without this the
+  // overlay was revealed at 400ms while the rebuild was still going, i.e. the
+  // user saw a black rectangle after every mode switch.
+  @State private resizeCover: boolean = false;
 
   private controller: XComponentController = new XComponentController();
   private player: media.AVPlayer | null = null;
@@ -219,7 +224,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.probeMedia();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v149');
+    LogUtil.info(TAG, 'transport=avplayer v150');
   }
 
   aboutToDisappear(): void {
@@ -318,6 +323,7 @@ export struct NativeVideoOverlay {
     this.errorText = message;
     this.playing = false;
     this.switching = false;
+    this.resizeCover = false;
     this.clearHideTimer();
     this.controlsVisible = true;
     // An exhausted retry budget must not leave the decoder/fd/surface alive:
@@ -370,6 +376,23 @@ export struct NativeVideoOverlay {
         }
       }
     }, 280);
+  }
+
+  // Resize rebuilds are not decode errors and must not consume the error budget:
+  // two mode switches used to push retryCount to 2, after which the NEXT resize
+  // hit `retryCount >= 2` -> fail(), and the player died with an error panel.
+  // They are also deduped: one switch fires BOTH XComponent.onLoad and the 320ms
+  // area debounce, which tore the decoder down twice (two black frames).
+  private retryResize(reason: string): void {
+    if (this.released) {
+      return;
+    }
+    if (this.lastRetryAt > 0 && Date.now() - this.lastRetryAt < 500) {
+      return;
+    }
+    this.retryCount = 0;
+    this.resizeCover = true;
+    this.retry(reason);
   }
 
   private retryManual(): void {
@@ -495,6 +518,7 @@ export struct NativeVideoOverlay {
           this.playing = true;
           this.completed = false;
           this.switching = false;
+          this.resizeCover = false;
           // A retry normally clears the budget only after the session has
           // proven stable. Resetting on every 'playing' lets a decoder that
           // enters playing then fails immediately retry forever.
@@ -504,6 +528,9 @@ export struct NativeVideoOverlay {
           this.scheduleHideControls();
         } else if (state === 'paused') {
           this.playing = false;
+          // A paused resize finishes in `paused`, not `playing`: clear the cover
+          // here too, otherwise it would sit over the video forever.
+          this.resizeCover = false;
           this.showControls();
         } else if (state === 'completed') {
           this.playing = false;
@@ -1068,10 +1095,9 @@ export struct NativeVideoOverlay {
       this.resizeTimer = -1;
       if (!this.released && this.player !== null &&
         (this.playerState === 'prepared' || this.playerState === 'playing' || this.playerState === 'paused')) {
-        // A user resize is not a decode error. Give the rebuilt surface its
-        // own two attempts instead of consuming the playback-error budget.
-        this.retryCount = 0;
-        this.retry('surface area');
+        // A user resize is not a decode error; retryResize() also resets the
+        // budget and dedupes against the onLoad trigger of the same switch.
+        this.retryResize('surface area');
       }
     }, 320);
   }
@@ -1687,7 +1713,7 @@ export struct NativeVideoOverlay {
               // Some engine builds hand out a new surface id after a window
               // resize. Recreate the player, but keep the current position and
               // playing state instead of closing the overlay.
-              this.retry('surface resized');
+              this.retryResize('surface resized');
             }
             return;
           }
@@ -1763,9 +1789,9 @@ export struct NativeVideoOverlay {
       // video's last frame until the new decoder presents one, so re-init
       // without a cover reads as "old clip flashes, then the new one". Opaque
       // theme.bg + a muted caption, removed on the new file's first 'playing'.
-      if (this.switching) {
+      if (this.switching || this.resizeCover) {
         Column() {
-          Text('载入中…')
+          Text(this.switching ? '载入中…' : '正在适配…')
             .fontColor(this.theme.muted)
             .fontSize(12)
         }
@@ -1809,7 +1835,7 @@ export struct NativeVideoOverlay {
               .fontColor(this.theme.muted)
               .margin({ top: 1 })
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v149')
+              ' · k=' + this.u().toFixed(3) + ' · v150')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 6 })
