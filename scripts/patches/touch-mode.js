@@ -1,5 +1,5 @@
 ;(function(){try{
-if(window.__ohsidianTouchPatch==="21")return;window.__ohsidianTouchPatch="22";
+if(window.__ohsidianTouchPatch==="22")return;window.__ohsidianTouchPatch="22";
 /* Console -> main bridge (round 96b): the renderer console never reaches
    hilog natively. Opt-in via the command "OHSidian: 运行日志捕获 开/关"
    (persisted in localStorage, takes effect on the next app start): the
@@ -691,12 +691,1061 @@ function ohsidianResolveMediaPath(el){
   }catch(e){}
   return null;
 }
+var __ohsidianNativeVideoSeq=0;
+var __ohsidianNativeTrack=null;
+/* B route: the renderer cannot create an ArkTS surface itself. Write the
+   <video> rect + absolute vault path to the same userData directory the
+   ArkTS side already uses for the mode file; Index.ets polls it and stacks
+   NativeVideoOverlay over the WebWindow. This is the inline B prototype, not
+   the rejected full-screen B-prime page.
+
+   The tracker is deliberately rAF-based: it follows scroll/resize, sends the
+   full video rect plus the safe content region, and writes a close request
+   when the IME rises or an Obsidian modal opens. IPC carries every display
+   frame; the file channel is only the degraded fallback. Index.ets clips the
+   native surface to the visible slice (video rect AND content region) and owns
+   the hit test there, so a tap on the video never reaches the page behind it. */
+function ohsidianNativeKeyboard(){
+  try{
+    return parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--keyboard-height"))||0;
+  }catch(e){return 0}
+}
+var __ohsidianOccludedAt=0;
+var __ohsidianOccludedValue=false;
+function ohsidianNativeVisible(el){
+  try{
+    if(!el)return false;
+    var cs=getComputedStyle(el);
+    if(cs.display==="none"||cs.visibility==="hidden")return false;
+    if(parseFloat(cs.opacity)===0)return false;
+    var r=el.getBoundingClientRect();
+    return !!r&&r.width>1&&r.height>1;
+  }catch(e){return false}
+}
+function ohsidianNativeOccluded(){
+  try{
+    var now=Date.now();
+    if(now-__ohsidianOccludedAt<150)return __ohsidianOccludedValue;
+    __ohsidianOccludedAt=now;
+    // 1.13.7 mobile drawer is ".workspace-drawer" + inline display:none when
+    // collapsed; it has no ".is-active" / ".is-collapsed" class on the drawer
+    // container. The backdrop is appended on expand and detached on collapse,
+    // but the old is-active selectors were always false. Visibility filtering
+    // covers both the persistent drawer and the transient backdrop.
+    var list=document.querySelectorAll(
+      ".modal-container, .prompt, .menu, .suggestion-container, " +
+      ".modal, .modal-bg, .workspace-drawer, .workspace-drawer-backdrop"
+    );
+    for(var i=0;i<list.length;i++){
+      var el=list[i];
+      if(!ohsidianNativeVisible(el))continue;
+      if(el.classList&&el.classList.contains("workspace-drawer")&&
+        el.classList.contains("is-pinned"))continue;
+      __ohsidianOccludedValue=true;
+      return true;
+    }
+    __ohsidianOccludedValue=false;
+    return false;
+  }catch(e){return false}
+}
+/* The request file is shared by every window. Resolve THIS renderer's OHOS
+   window id from the same size/focus match used for geometry, so Index.ets
+   can reject a request that belongs to another window instead of showing the
+   overlay in whichever window polled first. */
+function ohsidianNativeWindowKey(){
+  try{
+    var cfg=readMode();
+    if(!cfg)return "";
+    var wins=cfg.windows;
+    var g=resolveGeometry(cfg);
+    if(wins&&typeof wins==="object"&&g){
+      for(var k in wins){
+        if(wins[k]===g)return ""+k;
+      }
+    }
+    if(cfg.focusedWindow!==undefined&&cfg.focusedWindow!==null)return ""+cfg.focusedWindow;
+  }catch(e){}
+  return "";
+}
+function ohsidianNativeXComponentId(){
+  try{
+    var cfg=readMode();
+    if(!cfg)return "";
+    var g=resolveGeometry(cfg);
+    if(g&&g.xcomponentId)return ""+g.xcomponentId;
+  }catch(e){}
+  return "";
+}
+/* Persistent loopback IPC. The ArkTS Index publishes its ephemeral port per
+   xcomponentId; one keep-alive socket replaces 25 file writes/second and the
+   40ms reader wakeup. File remains the fallback if the socket cannot start. */
+var __ohsidianNativeIpcSock=null;
+var __ohsidianNativeIpcReady=false;
+var __ohsidianNativeIpcTriedAt=0;
+var __ohsidianNativeIpcIn="";
+function ohsidianNativeIpcPort(){
+  try{
+    var xid=ohsidianNativeXComponentId();
+    if(!xid)return null;
+    var remote=require("@electron/remote");
+    var fs=require("fs");
+    var nodePath=require("path");
+    var safe=xid.replace(/[^A-Za-z0-9_.-]/g,"_");
+    var file=nodePath.join(remote.app.getPath("userData"),"ohsidian-native-port-"+safe+".json");
+    if(!fs.existsSync(file))return null;
+    var cfg=JSON.parse(fs.readFileSync(file,"utf8"));
+    if(!cfg||!(cfg.port>0))return null;
+    return {port:cfg.port,token:(cfg.token||"")};
+  }catch(e){return null}
+}
+function ohsidianNativeIpcEnsure(){
+  if(__ohsidianNativeIpcSock!==null&&__ohsidianNativeIpcReady)return true;
+  if(__ohsidianNativeIpcSock!==null)return false;
+  var now=Date.now();
+  if(now-__ohsidianNativeIpcTriedAt<1500)return false;
+  __ohsidianNativeIpcTriedAt=now;
+  try{
+    var cfg=ohsidianNativeIpcPort();
+    if(!cfg||!cfg.port)return false;
+    var port=cfg.port, token=cfg.token||"";
+    var net=require("net");
+    var s=net.createConnection({host:"127.0.0.1",port:port});
+    s.setNoDelay(true);
+    try{s.setKeepAlive(true,30000)}catch(eK){}
+    s.on("connect",function(){
+      __ohsidianNativeIpcReady=true;
+      __ohsidianNativeIpcTriedAt=0;
+      __ohsidianNativeIpcIn="";
+      try{s.write(JSON.stringify({hello:1,token:token})+"\n")}catch(eH){}
+    });
+    s.on("error",function(){
+      __ohsidianNativeIpcReady=false;
+      try{s.destroy()}catch(eD){}
+      if(__ohsidianNativeIpcSock===s)__ohsidianNativeIpcSock=null;
+    });
+    s.on("close",function(){
+      __ohsidianNativeIpcReady=false;
+      if(__ohsidianNativeIpcSock===s)__ohsidianNativeIpcSock=null;
+    });
+    s.on("data",function(chunk){
+      try{
+        __ohsidianNativeIpcIn+=chunk.toString("utf8");
+        var lines=__ohsidianNativeIpcIn.split("\n");
+        __ohsidianNativeIpcIn=lines.pop()||"";
+        for(var i=0;i<lines.length;i++){
+          var line=lines[i].trim();
+          if(!line)continue;
+          var msg=JSON.parse(line);
+          if(msg&&msg.event==="opened"&&typeof msg.seq==="number")ohsidianConfirmNativeOpen(msg.seq);
+          if(msg&&msg.event==="close")ohsidianHandleNativeClosed();
+        }
+      }catch(eD){}
+    });
+    __ohsidianNativeIpcSock=s;
+  }catch(e){
+    __ohsidianNativeIpcSock=null;
+    __ohsidianNativeIpcReady=false;
+  }
+  return false;
+}
+function ohsidianNativeIpcSend(req){
+  if(!__ohsidianNativeIpcSock||!__ohsidianNativeIpcReady)return false;
+  try{
+    __ohsidianNativeIpcSock.write(JSON.stringify(req)+"\n");
+    return true;
+  }catch(e){
+    __ohsidianNativeIpcReady=false;
+    try{__ohsidianNativeIpcSock.destroy()}catch(eD){}
+    __ohsidianNativeIpcSock=null;
+    return false;
+  }
+}
+function ohsidianNativeGeometry(el){
+  try{
+    if(!el||!el.getBoundingClientRect)return null;
+    var r=el.getBoundingClientRect();
+    if(!r||!(r.width>0)||!(r.height>0))return null;
+    if(ohsidianNativeKeyboard()>0)return null;
+    var vw=window.innerWidth||r.right||0;
+    var vh=window.innerHeight||r.bottom||0;
+    var vv=window.visualViewport;
+    if(vv&&vv.height>0)vh=Math.min(vh,vv.height+(vv.offsetTop||0));
+    var rootStyle=getComputedStyle(document.documentElement);
+    var safeTop=parseFloat(rootStyle.getPropertyValue("--safe-area-inset-top"))||0;
+    var safeBottom=parseFloat(rootStyle.getPropertyValue("--safe-area-inset-bottom"))||0;
+    var safeLeft=parseFloat(rootStyle.getPropertyValue("--safe-area-inset-left"))||0;
+    var safeRight=parseFloat(rootStyle.getPropertyValue("--safe-area-inset-right"))||0;
+    var topGuard=safeTop;
+    // The real text clipping boundary is the current leaf's view-content, not
+    // the first .view-header in the document (a background/sidebar leaf could
+    // be returned by a global query and shift the top edge). Resolve the
+    // container from the video element itself.
+    var leaf=el.closest?el.closest(".workspace-leaf, .workspace-leaf-content"):null;
+    var content=el.closest?el.closest(".view-content"):null;
+    var contentRect=content&&content.getBoundingClientRect?content.getBoundingClientRect():null;
+    if(contentRect&&contentRect.width>0&&contentRect.height>0&&
+      contentRect.top>=0&&contentRect.top<vh*0.5){
+      topGuard=Math.max(topGuard,contentRect.top);
+    }
+    var header=null;
+    if(leaf&&leaf.querySelectorAll){
+      var hdrs=leaf.querySelectorAll(".view-header, .workspace-leaf-header");
+      for(var hi=0;hi<hdrs.length;hi++){
+        var hc=hdrs[hi].getBoundingClientRect?hdrs[hi].getBoundingClientRect():null;
+        if(hc&&hc.height>0&&hc.bottom>0&&hc.bottom<vh*0.5){header=hdrs[hi];break}
+      }
+    }
+    if(!header&&!contentRect){
+      var gh=document.querySelectorAll(".view-header, .workspace-leaf-header, .workspace-tab-header-container");
+      for(var gi=0;gi<gh.length;gi++){
+        var gr=gh[gi].getBoundingClientRect?gh[gi].getBoundingClientRect():null;
+        if(gr&&gr.height>0&&gr.bottom>0&&gr.bottom<vh*0.5){header=gh[gi];break}
+      }
+    }
+    if(header){
+      var hr=header.getBoundingClientRect();
+      if(hr&&hr.height>0&&hr.bottom>0&&hr.bottom<vh*0.5)topGuard=Math.max(topGuard,hr.bottom);
+    }
+    // Phone floating-nav / auto-full-screen applies a top fade to markdown:
+    // linear-gradient(... #000 calc(safe-top + view-header-height + 12px)).
+    // The text is only fully opaque below that line, so the native overlay's
+    // top edge must use the same line. header.bottom alone is 12px too high.
+    var body=document.body;
+    var phoneFloating=!!(body&&body.classList&&body.classList.contains("is-phone")&&
+      (body.classList.contains("is-floating-nav")||body.classList.contains("auto-full-screen")));
+    var hiddenNav=!!(body&&body.classList&&body.classList.contains("is-hidden-nav"));
+    var markdownLeaf=el.closest?el.closest('.workspace-leaf-content[data-type="markdown"]'):null;
+    if(phoneFloating&&!hiddenNav&&markdownLeaf){
+      var headerHeight=parseFloat(rootStyle.getPropertyValue("--view-header-height"))||0;
+      if(!(headerHeight>0)&&header)headerHeight=header.getBoundingClientRect().height||0;
+      if(headerHeight>0){
+        var maskTop=safeTop+headerHeight+12;
+        if(maskTop>0&&maskTop<vh*0.5)topGuard=Math.max(topGuard,maskTop);
+      }
+    }
+    // Bottom chrome: Obsidian's mobile toolbar/navbar, plus desktop/status bar
+    // variants. Only accept bars anchored in the lower half so a top header
+    // with the same class cannot steal the whole viewport.
+    var bottom=Math.min(vh,vh-safeBottom);
+    if(contentRect&&contentRect.height>0&&contentRect.bottom>vh*0.5&&contentRect.bottom<=vh){
+      bottom=Math.min(bottom,contentRect.bottom);
+    }
+    var bars=document.querySelectorAll(
+      ".mobile-toolbar, .mobile-navbar, .workspace-status-bar, .status-bar");
+    for(var i=0;i<bars.length;i++){
+      var br=bars[i]&&bars[i].getBoundingClientRect?bars[i].getBoundingClientRect():null;
+      if(br&&br.height>0&&br.top>vh*0.35&&br.bottom>vh*0.55)bottom=Math.min(bottom,br.top);
+    }
+    // The native SURFACE is clipped by Index.ets to this content region, so the
+    // video rect must stay the FULL element rect. Clamping the height here (as
+    // the previous version did) scaled the video to the toolbar and exposed the
+    // original <video> at the bottom.
+    var region={
+      left:Math.max(0,safeLeft),
+      top:Math.max(0,topGuard),
+      width:Math.max(0,vw-safeLeft-safeRight),
+      height:Math.max(0,bottom-Math.max(0,topGuard))
+    };
+    if(!(region.width>20)||!(region.height>20))return null;
+    var ix1=Math.max(region.left,r.left),iy1=Math.max(region.top,r.top);
+    var ix2=Math.min(region.left+region.width,r.right);
+    var iy2=Math.min(region.top+region.height,r.bottom);
+    if(!(ix2>ix1+1)||!(iy2>iy1+1))return null;
+    return {
+      left:r.left,
+      top:r.top,
+      width:r.width,
+      height:r.height,
+      region:region,
+      dpr:window.devicePixelRatio||1
+    };
+  }catch(e){return null}
+}
+var __ohsidianThemeCache=null;
+var __ohsidianThemeAt=0;
+var __ohsidianThemeSentAt=0;
+var __ohsidianColorCanvas=null;
+function ohsidianCssColor(value){
+  try{
+    if(!value)return "";
+    if(!__ohsidianColorCanvas){
+      __ohsidianColorCanvas=document.createElement("canvas");
+      __ohsidianColorCanvas.width=1;
+      __ohsidianColorCanvas.height=1;
+    }
+    var ctx=__ohsidianColorCanvas.getContext&&__ohsidianColorCanvas.getContext("2d");
+    if(!ctx)return "";
+    ctx.clearRect(0,0,1,1);
+    // Sentinel detects invalid colors: fillStyle keeps the previous value.
+    ctx.fillStyle="#010203";
+    ctx.fillStyle=value;
+    var out=String(ctx.fillStyle||"").toLowerCase();
+    var m;
+    if(out==="#010203")return "";
+    if(/^#[0-9a-f]{3}$/.test(out)){
+      return "#"+out[1]+out[1]+out[2]+out[2]+out[3]+out[3];
+    }
+    if(/^#[0-9a-f]{4}$/.test(out)){
+      // #RGBA -> ArkUI #AARRGGBB.
+      return "#"+out[4]+out[4]+out[1]+out[1]+out[2]+out[2]+out[3]+out[3];
+    }
+    if(/^#[0-9a-f]{6}$/.test(out))return out;
+    if(/^#[0-9a-f]{8}$/.test(out)){
+      // Canvas normalizes 8-digit input to #RRGGBBAA; ArkUI expects AARRGGBB.
+      return "#"+out.slice(7,9)+out.slice(1,7);
+    }
+    m=out.match(/^rgba?\(([^)]+)\)$/);
+    if(m){
+      var parts=m[1].split(",").map(function(x){return parseFloat(x)});
+      if(parts.length<3)return "";
+      var hex="#";
+      for(var i=0;i<3;i++){
+        var c=Math.max(0,Math.min(255,Math.round(parts[i]||0))).toString(16);
+        hex+=c.length<2?"0"+c:c;
+      }
+      if(parts.length>3&&parts[3]<1){
+        var a=Math.max(0,Math.min(255,Math.round((parts[3]||0)*255))).toString(16);
+        hex="#"+ (a.length<2?"0"+a:a) + hex.slice(1);
+      }
+      return hex;
+    }
+    return "";
+  }catch(e){return ""}
+}
+function ohsidianThemeRgba(value,alpha,fallback){
+  var hex=ohsidianCssColor(value);
+  // Accept both #RRGGBB and the #AARRGGBB form produced for translucent
+  // semantic colors; the bar's own alpha replaces the source alpha.
+  if(/^#[0-9a-f]{8}$/.test(hex))hex="#"+hex.slice(3);
+  if(!/^#[0-9a-f]{6}$/.test(hex))hex=fallback;
+  if(/^#[0-9a-f]{8}$/.test(hex))hex="#"+hex.slice(3);
+  var a=Math.max(0,Math.min(255,Math.round(alpha*255))).toString(16);
+  return "#"+(a.length<2?"0"+a:a)+hex.slice(1);
+}
+function ohsidianThemePx(value,fallback){
+  var n=parseFloat(value);
+  return isFinite(n)&&n>=0?n:fallback;
+}
+function ohsidianNativeTheme(){
+  try{
+    var now=Date.now();
+    if(__ohsidianThemeCache&&now-__ohsidianThemeAt<900)return __ohsidianThemeCache;
+    var body=document.body||document.documentElement;
+    var cs=getComputedStyle(body);
+    var v=function(name,fallback){
+      try{return (cs.getPropertyValue(name)||"").trim()||fallback}catch(e){return fallback}
+    };
+    var bg=v("--background-secondary","");
+    var panel=v("--background-primary-alt","");
+    var accent=v("--interactive-accent","");
+    var interactive=v("--interactive-normal","");
+    var text=v("--text-normal","");
+    var muted=v("--text-muted","");
+    var faint=v("--text-faint","");
+    var border=v("--background-modifier-border","");
+    var error=v("--text-error","");
+    var onAccent=v("--text-on-accent","");
+    var bgHex=ohsidianCssColor(bg)||"#1e1e1e";
+    var accentHex=ohsidianCssColor(accent)||"#8b7cf6";
+    __ohsidianThemeCache={
+      bg:bgHex,
+      panel:ohsidianCssColor(panel)||bgHex,
+      bar:ohsidianThemeRgba(bg,0.92,bgHex),
+      interactive:ohsidianCssColor(interactive)||"#363636",
+      accent:accentHex,
+      onAccent:ohsidianCssColor(onAccent)||"#ffffff",
+      text:ohsidianCssColor(text)||"#e8e8e8",
+      muted:ohsidianCssColor(muted)||"#b9b9b9",
+      faint:ohsidianCssColor(faint)||"#8a8a8a",
+      border:ohsidianCssColor(border)||"#4a4168",
+      error:ohsidianCssColor(error)||"#ff6b6b",
+      radiusS:ohsidianThemePx(v("--radius-s",""),4),
+      radiusM:ohsidianThemePx(v("--radius-m",""),8),
+      radiusL:ohsidianThemePx(v("--radius-l",""),12)
+    };
+    __ohsidianThemeAt=now;
+    return __ohsidianThemeCache;
+  }catch(e){
+    return {bg:"#1e1e1e",panel:"#252525",bar:"#eb1e1e1e",interactive:"#363636",
+      accent:"#8b7cf6",onAccent:"#ffffff",text:"#e8e8e8",muted:"#b9b9b9",faint:"#8a8a8a",
+      border:"#4a4168",error:"#ff6b6b",radiusS:4,radiusM:8,radiusL:12};
+  }
+}
+function ohsidianWriteJsonAtomic(out,obj){
+  var fs=require("fs");
+  var tmp=out+".tmp-"+Date.now()+"-"+Math.random().toString(36).slice(2);
+  try{
+    fs.writeFileSync(tmp,JSON.stringify(obj));
+    try{
+      fs.renameSync(tmp,out);
+    }catch(eRename){
+      // Some Node/OHOS builds refuse to replace an existing target.
+      if(fs.existsSync(out))fs.unlinkSync(out);
+      fs.renameSync(tmp,out);
+    }
+    return true;
+  }catch(e){
+    try{if(fs.existsSync(tmp))fs.unlinkSync(tmp)}catch(eCleanup){}
+    return false;
+  }
+}
+function ohsidianWriteNativeRequest(action,el,srcPath,identity,preG,reason){
+  try{
+    var remote=require("@electron/remote");
+    var fs=require("fs");
+    var nodePath=require("path");
+    var dir=remote.app.getPath("userData");
+    var g=(action==="close")?null:(preG||ohsidianNativeGeometry(el));
+    if(action!=="close"&&!g)action="close";
+    __ohsidianNativeVideoSeq=Math.max(Date.now(),__ohsidianNativeVideoSeq+1);
+    var winId=identity&&identity.windowId!==undefined?identity.windowId:ohsidianNativeWindowKey();
+    var xid=identity&&identity.xcomponentId!==undefined?identity.xcomponentId:ohsidianNativeXComponentId();
+    var themeOut=null;
+    if(g&&(action==="open"||Date.now()-__ohsidianThemeSentAt>1000)){
+      themeOut=ohsidianNativeTheme();
+      __ohsidianThemeSentAt=Date.now();
+    }
+    var req={
+      seq:__ohsidianNativeVideoSeq,
+      ts:Date.now(),
+      action:action,
+      windowId:winId,
+      xcomponentId:xid,
+      path:srcPath||"",
+      title:(el&&el.getAttribute&&el.getAttribute("title"))||"",
+      rect:g?{left:g.left,top:g.top,width:g.width,height:g.height}:null,
+      region:g?g.region:null,
+      thumbFile:(el&&el.__ohsidianThumbFile)||"",
+      dpr:g?g.dpr:(window.devicePixelRatio||1),
+      pointer:ohsidianPointerMode(),
+      mode:ohsidianModeFlag(),
+      reason:reason||"",
+      theme:themeOut
+    };
+    var out=nodePath.join(dir,"ohsidian-native-video.json");
+    if(ohsidianNativeIpcSend(req))return true;
+    return ohsidianWriteJsonAtomic(out,req)&&!!g;
+  }catch(e){return false}
+}
+/* Which sample entry a local MP4 carries. Chromium here ships no HEVC decoder,
+   so an hvc1/hev1 track needs the native surface; avc1/avc3 must stay on the
+   plain <video> path with no poster, no button and no notice - that identity of
+   flow is the point. Only the first/last 256 KiB are scanned (moov may be at
+   either end); results are cached per path because the scan runs on every
+   mutation batch. */
+var __ohsidianCodecCache={};
+function ohsidianCodecOf(srcPath){
+  try{
+    if(!srcPath)return "";
+    if(__ohsidianCodecCache[srcPath]!==undefined)return __ohsidianCodecCache[srcPath];
+    var fs=require("fs");
+    var st=fs.statSync(srcPath);
+    var size=st.size;
+    if(!(size>0))return "";
+    var chunk=262144;
+    var fd=fs.openSync(srcPath,"r");
+    var read=function(pos,len){
+      var b=Buffer.alloc(len);
+      var n=0;
+      try{n=fs.readSync(fd,b,0,len,pos)}catch(eR){n=0}
+      return b.slice(0,n);
+    };
+    var head=read(0,Math.min(chunk,size));
+    var tail=(size>chunk)?read(Math.max(0,size-chunk),Math.min(chunk,size)):Buffer.alloc(0);
+    fs.closeSync(fd);
+    var s=head.toString("latin1")+tail.toString("latin1");
+    var codec="";
+    if(s.indexOf("hvc1")>=0||s.indexOf("hev1")>=0)codec="hevc";
+    else if(s.indexOf("avc1")>=0||s.indexOf("avc3")>=0)codec="avc";
+    __ohsidianCodecCache[srcPath]=codec;
+    return codec;
+  }catch(e){return ""}
+}
+function ohsidianEngineCanHevc(el){
+  try{
+    if(!el||typeof el.canPlayType!=="function")return false;
+    return el.canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"')!=="";
+  }catch(e){return false}
+}
+/* Entry surface. The earlier design put a text button in the corner plus a
+   separate preview <img>; that reads as an add-on floating over the note, not
+   as Obsidian's own video. The replacement is the video's own box: a poster
+   (first decoded frame) fills the exact <video> rect, with one quiet play disc
+   centred on it - the same affordance a native <video> shows before playback.
+   One tap opens the native surface (which starts playing), so HEVC and AVC are
+   entered the same way: look at the frame, tap, watch. */
+/* Pointer detection lives in ArkTS: ArkUI's onHover fires for a mouse/trackpad
+   and never for a finger. Chromium synthesises compatibility mouse events after
+   a touch, so any JS-side probe flipped the poster and the native transport to
+   the compact desktop density on a pure touch device - "icons still small"
+   even after the sizes were raised. The poster therefore always uses the
+   touch-sized disc, matching the native paused disc. */
+function ohsidianPointerMode(){
+  return false;
+}
+/* 0 = touch, 1 = desktop/window, -1 = unknown (mode file not ready). The
+   ArkTS side hides the surface on a flip and shows it again only after the
+   page has relaid out, so a mode switch never paints the old coordinates. */
+function ohsidianModeFlag(){
+  try{
+    var cfg=readMode();
+    if(!cfg)return -1;
+    var want=resolveWant(cfg);
+    if(want===null||want===undefined)return -1;
+    return want?0:1;
+  }catch(e){return -1}
+}
+function ohsidianEnsureNativeShell(el,srcPath){
+  try{
+    if(!el||!srcPath)return;
+    el.__ohsidianSrc=srcPath;
+    var host=el.closest?el.closest(".internal-embed"):null;
+    if(!host)host=el.parentElement;
+    if(!host)return;
+    try{
+      if(getComputedStyle(host).position==="static")host.style.position="relative";
+    }catch(eP){}
+    var pointer=ohsidianPointerMode();
+    var shell=el.__ohsidianNativeBtn;
+    if(!shell||!shell.isConnected){
+      shell=document.createElement("span");
+      shell.className="ohsidian-native-shell";
+      // Absolute over the embed box; pointer-events only on this layer so the
+      // note keeps scrolling when the finger starts on the poster.
+      shell.style.cssText="position:absolute;"+
+        "z-index:2147482000;display:block;cursor:pointer;pointer-events:auto;"+
+        "overflow:hidden;border-radius:var(--radius-s,4px);"+
+        "background:var(--background-primary);-webkit-tap-highlight-color:transparent";
+      var poster=document.createElement("img");
+      poster.className="ohsidian-native-poster";
+      poster.alt="";
+      poster.style.cssText="position:absolute!important;inset:0!important;width:100%!important;"+
+        "height:100%!important;max-width:none!important;max-height:none!important;"+
+        "object-fit:contain!important;display:block;pointer-events:none;"+
+        "background:var(--background-primary)";
+      var discSize=pointer?44:64;
+      var disc=document.createElement("span");
+      disc.className="ohsidian-native-disc";
+      disc.style.cssText="position:absolute;left:50%;top:50%;width:"+discSize+"px;height:"+discSize+"px;"+
+        "margin:"+(-discSize/2)+"px 0 0 "+(-discSize/2)+"px;border-radius:50%;background:rgba(0,0,0,.42);"+
+        "display:flex;align-items:center;justify-content:center;pointer-events:none;"+
+        "opacity:"+(pointer?"0":"1")+";transition:opacity .12s linear";
+      var triW=Math.round(discSize*0.29);
+      var triH=Math.round(discSize*0.36);
+      var tri=document.createElement("span");
+      // Same 13:8 optical ratio as the native paused disc.
+      tri.style.cssText="width:0;height:0;border-style:solid;"+
+        "border-width:"+(triH/2)+"px 0 "+(triH/2)+"px "+triW+"px;"+
+        "border-color:transparent transparent transparent rgba(255,255,255,.92);margin-left:"+
+        Math.max(2,Math.round(discSize*0.06))+"px";
+      disc.appendChild(tri);
+      shell.appendChild(poster);
+      shell.appendChild(disc);
+      host.appendChild(shell);
+      el.__ohsidianNativeBtn=shell;
+      el.__ohsidianNativePoster=poster;
+      el.__ohsidianNativeDisc=disc;
+      if(pointer){
+        shell.addEventListener("mouseenter",function(){try{disc.style.opacity="1"}catch(e1){}});
+        shell.addEventListener("mouseleave",function(){try{disc.style.opacity="0"}catch(e2){}});
+      }
+    }
+    // Match the shell to the <video> box, not the embed container: padding,
+    // borders or a caption on .internal-embed used to shift the centre, and the
+    // poster disc then sat on a different axis than the native paused disc.
+    try{
+      var hr=host.getBoundingClientRect();
+      var vr=el.getBoundingClientRect();
+      if(vr.width>1&&vr.height>1){
+        shell.style.left=Math.round(vr.left-hr.left-host.clientLeft)+"px";
+        shell.style.top=Math.round(vr.top-hr.top-host.clientTop)+"px";
+        shell.style.width=Math.round(vr.width)+"px";
+        shell.style.height=Math.round(vr.height)+"px";
+      }
+    }catch(eG){}
+    // No per-node click listener: Obsidian re-renders can clone/replace the
+    // embed and drop listeners. The capture-phase document delegate below
+    // reads these properties instead.
+    shell.__ohsidianNativeVideo=el;
+    shell.__ohsidianNativePath=srcPath;
+    ohsidianRequestNativeThumb(el,srcPath,host);
+  }catch(e){}
+}
+function ohsidianThumbMime(buf){
+  try{
+    if(buf&&buf.length>8&&buf[0]===0x89&&buf[1]===0x50&&buf[2]===0x4e&&buf[3]===0x47)return "image/png";
+  }catch(e){}
+  return "image/jpeg";
+}
+/* Deterministic poster cache: name = basename + size + mtime. A second render
+   of the same embed (or a reopened note) finds the JPEG and paints instantly
+   with no IPC round-trip, which is what made the preview appear "only after
+   you open the video once". */
+function ohsidianThumbCachePath(srcPath){
+  try{
+    var remote=require("@electron/remote");
+    var fs=require("fs");
+    var nodePath=require("path");
+    var dir=remote.app.getPath("userData");
+    var st=null;
+    try{st=fs.statSync(srcPath)}catch(e0){}
+    var base=(srcPath.split(/[\\/]/).pop()||"clip");
+    var key=base.replace(/[^A-Za-z0-9_.-]/g,"_")+"-"+(st?st.size:0)+"-"+(st?Math.floor(st.mtimeMs):0);
+    if(key.length>90)key=key.slice(key.length-90);
+    return nodePath.join(dir,"ohsidian-thumb-"+key+".jpg");
+  }catch(e){return ""}
+}
+function ohsidianShowThumbFile(img,file,fs){
+  try{
+    if(!img||!file)return false;
+    if(!fs.existsSync(file))return false;
+    if(!(fs.statSync(file).size>0))return false;
+    var buf=fs.readFileSync(file);
+    var mime=ohsidianThumbMime(buf);
+    try{
+      img.src=URL.createObjectURL(new Blob([buf],{type:mime}));
+    }catch(eB){
+      img.src="data:"+mime+";base64,"+buf.toString("base64");
+    }
+    img.__ohsidianThumbLoaded=true;
+    return true;
+  }catch(e){return false}
+}
+function ohsidianRequestNativeThumb(el,srcPath,host){
+  try{
+    if(!el||!srcPath||!host)return;
+    var poster=el.__ohsidianNativePoster;
+    if(!poster||!poster.isConnected)return;
+    var remote=require("@electron/remote");
+    var fs=require("fs");
+    var nodePath=require("path");
+    var dir=remote.app.getPath("userData");
+    var file=ohsidianThumbCachePath(srcPath);
+    if(!file)return;
+    if(poster.__ohsidianThumbPath===file&&poster.__ohsidianThumbLoaded)return;
+    if(poster.__ohsidianThumbPath!==file){
+      poster.__ohsidianThumbPath=file;
+      poster.__ohsidianThumbAt=Date.now();
+      poster.__ohsidianThumbLoaded=false;
+      el.__ohsidianThumbFile=file;
+    }
+    if(ohsidianShowThumbFile(poster,file,fs))return;
+    if(poster.__ohsidianThumbTimer)return;
+    var tries=0;
+    var sentFor="";
+    var timer=setInterval(function(){
+      tries++;
+      try{
+        if(!poster.isConnected||tries>40){
+          clearInterval(timer);poster.__ohsidianThumbTimer=0;return;
+        }
+        if(ohsidianShowThumbFile(poster,file,fs)){
+          clearInterval(timer);poster.__ohsidianThumbTimer=0;return;
+        }
+        if(!sentFor){
+          // Identity must resolve first: a thumb request without xcomponentId
+          // is rejected by Index (it cannot attribute it to a window), which is
+          // why the poster sometimes only appeared after the player was opened.
+          var xid=ohsidianNativeXComponentId();
+          if(!xid)return;
+          sentFor=xid;
+          var req={
+            seq:Math.max(Date.now(),__ohsidianNativeVideoSeq+1),
+            ts:Date.now(),
+            action:"thumb",
+            windowId:ohsidianNativeWindowKey(),
+            xcomponentId:xid,
+            path:srcPath,
+            thumbFile:file,
+            rect:null,
+            dpr:window.devicePixelRatio||1
+          };
+          __ohsidianNativeVideoSeq=req.seq;
+          ohsidianNativeIpcEnsure();
+          if(!ohsidianNativeIpcSend(req)){
+            ohsidianWriteJsonAtomic(nodePath.join(dir,"ohsidian-native-video.json"),req);
+          }
+          return;
+        }
+        if(tries%8===0)sentFor="";
+      }catch(eP){}
+    },250);
+    poster.__ohsidianThumbTimer=timer;
+  }catch(e){}
+}
+function ohsidianSetNativeHtmlHidden(el,hide){
+  try{
+    if(!el||!el.style)return;
+    if(hide){
+      if(!el.__ohsidianHtmlState){
+        el.__ohsidianHtmlState={
+          controls:el.controls,
+          muted:el.muted,
+          visibility:el.style.visibility||"",
+          opacity:el.style.opacity||""
+        };
+      }
+      try{
+        el.controls=false;
+        el.muted=true;
+        el.pause();
+        el.style.visibility="hidden";
+        el.style.opacity="0";
+      }catch(eH){}
+      if(el.__ohsidianThumbImg)el.__ohsidianThumbImg.style.display="none";
+      if(el.__ohsidianNativeBtn)el.__ohsidianNativeBtn.style.display="none";
+    }else{
+      var s=el.__ohsidianHtmlState;
+      if(s){
+        try{
+          el.controls=s.controls;
+          el.muted=s.muted;
+          el.style.visibility=s.visibility;
+          el.style.opacity=s.opacity;
+        }catch(eR){}
+        el.__ohsidianHtmlState=null;
+      }
+      // No saved state means this element was never hidden by us; do not
+      // overwrite a plugin's own visibility/opacity.
+      if(el.__ohsidianThumbImg)el.__ohsidianThumbImg.style.display="block";
+      if(el.__ohsidianNativeBtn){
+        var sh=el.__ohsidianNativeBtn;
+        // The poster shell is a full-box block; the legacy text button was
+        // inline-flex. Keep both restorable from the saved markup.
+        sh.style.display=(sh.className||"").indexOf("ohsidian-native-shell")>=0?"block":"inline-flex";
+      }
+    }
+  }catch(e){}
+}
+function ohsidianHandleNativeClosed(){
+  if(__ohsidianNativeTrack)ohsidianStopNativeTracking(false);
+}
+/* OPEN acknowledgement: "write succeeded" is not "ArkTS accepted it". Index
+   writes this per-window marker after it has validated identity/rect and
+   installed the request; the renderer hides the HTML <video> only then. */
+function ohsidianNativeAckPath(identity){
+  try{
+    var remote=require("@electron/remote");
+    var nodePath=require("path");
+    var xid=(identity&&identity.xcomponentId!==undefined)?identity.xcomponentId:ohsidianNativeXComponentId();
+    if(!xid&&identity&&identity.windowId)xid="win-"+identity.windowId;
+    var safe=(xid||"").replace(/[^A-Za-z0-9_.-]/g,"_");
+    return nodePath.join(remote.app.getPath("userData"),"ohsidian-native-opened-"+safe+".json");
+  }catch(e){return ""}
+}
+function ohsidianNativeAckMatches(seq,identity){
+  try{
+    var file=ohsidianNativeAckPath(identity);
+    if(!file)return false;
+    var fs=require("fs");
+    if(!fs.existsSync(file))return false;
+    var j=JSON.parse(fs.readFileSync(file,"utf8"));
+    if(!j||typeof j.seq!=="number"||j.seq<seq)return false;
+    var xid=(identity&&identity.xcomponentId!==undefined)?identity.xcomponentId:ohsidianNativeXComponentId();
+    if(!xid&&identity&&identity.windowId)xid="win-"+identity.windowId;
+    if(j.xcomponentId&&xid&&j.xcomponentId!==xid)return false;
+    return true;
+  }catch(e){return false}
+}
+function ohsidianConfirmNativeOpen(seq){
+  var st=__ohsidianNativeTrack;
+  if(!st||st.seq!==seq||st.opened)return;
+  st.opened=true;
+  if(st.ackTimer){try{clearTimeout(st.ackTimer)}catch(eT){}st.ackTimer=0}
+  ohsidianSetNativeHtmlHidden(st.el,true);
+}
+function ohsidianWaitNativeOpen(st){
+  if(!st||!st.running||st.opened)return;
+  if(ohsidianNativeAckMatches(st.seq,st.id)){
+    ohsidianConfirmNativeOpen(st.seq);
+    return;
+  }
+  st.ackTries++;
+  if(st.ackTries>15){
+    // No acknowledgement means the request was not accepted (or the ack
+    // channel is broken). Keep the HTML visible and close the unconfirmed
+    // native request; never trade a maybe-working native surface for a black
+    // rectangle with no fallback.
+    ohsidianStopNativeTracking(true,"noack");
+    return;
+  }
+  st.ackTimer=setTimeout(function(){ohsidianWaitNativeOpen(st)},80);
+}
+
+function ohsidianStopNativeTracking(writeClose,reason){
+  var st=__ohsidianNativeTrack;
+  if(!st)return;
+  st.running=false;
+  try{cancelAnimationFrame(st.raf)}catch(e0){}
+  if(st.ackTimer){try{clearTimeout(st.ackTimer)}catch(eT){}st.ackTimer=0}
+  __ohsidianNativeTrack=null;
+  ohsidianSetNativeHtmlHidden(st.el,false);
+  if(writeClose){
+    try{ohsidianWriteNativeRequest("close",st.el,st.p,st.id,null,reason||"")}catch(e1){}
+  }
+}
+function ohsidianNativeCloseMarked(st){
+  try{
+    var remote=require("@electron/remote");
+    var fs=require("fs");
+    var nodePath=require("path");
+    var file=nodePath.join(remote.app.getPath("userData"),"ohsidian-native-closed.json");
+    if(!fs.existsSync(file))return false;
+    var j=JSON.parse(fs.readFileSync(file,"utf8"));
+    if(!(j&&j.ts&&st&&st.startedAt&&j.ts>=st.startedAt))return false;
+    var id=st.id||{};
+    // The close marker is a single shared file. A close in window A must not
+    // stop the native player in window B, so require the identities that were
+    // captured at open time to agree. Missing fields keep compatibility with
+    // markers written by older builds.
+    if(j.xcomponentId&&id.xcomponentId&&j.xcomponentId!==id.xcomponentId)return false;
+    if(j.windowId&&id.windowId&&(j.windowId+""!==id.windowId+""))return false;
+    return true;
+  }catch(e){return false}
+}
+function ohsidianNativeRectEqual(a,b){
+  if(!a||!b)return false;
+  if(Math.abs(a.left-b.left)>0.35||Math.abs(a.top-b.top)>0.35)return false;
+  if(Math.abs(a.width-b.width)>0.35||Math.abs(a.height-b.height)>0.35)return false;
+  var ar=a.region||{},br=b.region||{};
+  if(Math.abs((ar.left||0)-(br.left||0))>0.35||Math.abs((ar.top||0)-(br.top||0))>0.35)return false;
+  if(Math.abs((ar.width||0)-(br.width||0))>0.35||Math.abs((ar.height||0)-(br.height||0))>0.35)return false;
+  return true;
+}
+function ohsidianStartNativeTracking(el,srcPath,identity,seq){
+  ohsidianStopNativeTracking(false);
+  var st={el:el,p:srcPath,id:identity,running:true,raf:0,last:0,lastRect:null,hidden:false,
+    startedAt:Date.now(),lastCloseCheck:0,lastThemeAt:0,seq:seq||0,opened:false,ackTries:0,ackTimer:0,
+    writeFails:0};
+  __ohsidianNativeTrack=st;
+  var loop=function(){
+    if(!st.running)return;
+    try{
+      if(!el.isConnected){ohsidianStopNativeTracking(true,"detached");return}
+      if(ohsidianNativeKeyboard()>0){ohsidianStopNativeTracking(true,"keyboard");return}
+      if(ohsidianNativeOccluded()){
+        ohsidianStopNativeTracking(true,"occluded");return;
+      }
+      var now=Date.now();
+      if(now-st.lastCloseCheck>400){
+        st.lastCloseCheck=now;
+        if(ohsidianNativeCloseMarked(st)){
+          ohsidianStopNativeTracking(false);
+          return;
+        }
+      }
+      var g=ohsidianNativeGeometry(el);
+      if(!g){
+        // Completely outside the allowed region: release the surface instead
+        // of leaving a stale frame over the header/toolbar.
+        if(st.lastRect!==null){
+          if(ohsidianWriteNativeRequest("close",el,srcPath,st.id,null,"offscreen")){
+            st.lastRect=null;
+            st.writeFails=0;
+          }else{
+            st.writeFails++;
+          }
+        }
+        st.hidden=true;
+      }else if(st.hidden){
+        if(__ohsidianNativeIpcReady||now-st.last>=40){
+          if(ohsidianWriteNativeRequest("open",el,srcPath,st.id,g)){
+            st.hidden=false;
+            st.lastRect=g;
+            st.last=now;
+            st.writeFails=0;
+          }else{
+            st.writeFails++;
+          }
+        }
+      }else if(!st.lastRect||!ohsidianNativeRectEqual(st.lastRect,g)){
+        // IPC can carry every display frame; the file fallback stays at 40ms
+        // so a degraded path does not hammer the disk.
+        if(__ohsidianNativeIpcReady||now-st.last>=40){
+          if(ohsidianWriteNativeRequest("rect",el,srcPath,st.id,g)){
+            st.lastRect=g;
+            st.last=now;
+            st.writeFails=0;
+          }else{
+            st.writeFails++;
+          }
+        }
+      }else if(now-st.lastThemeAt>=1200){
+        // Geometry is stable, but the user may have switched theme. A rect
+        // request is also the only carrier of the theme payload; send a
+        // low-rate heartbeat so CSS variables reach the native controls.
+        if(ohsidianWriteNativeRequest("rect",el,srcPath,st.id,g)){
+          st.lastThemeAt=now;
+          st.writeFails=0;
+        }else{
+          st.writeFails++;
+        }
+      }
+      if(st.writeFails>6){
+        // A permanently failing request channel would otherwise leave a stale
+        // native frame over the page with no recovery.
+        ohsidianStopNativeTracking(true,"writefail");
+        return;
+      }
+      st.raf=requestAnimationFrame(loop);
+    }catch(e){
+      ohsidianStopNativeTracking(true,"loop");
+    }
+  };
+  st.raf=requestAnimationFrame(loop);
+}
+function ohsidianOpenNativePlayer(el,srcPath){
+  try{
+    if(!srcPath)return;
+    if(!el||!el.isConnected)return;
+    try{
+      var ae=document.activeElement;
+      if(ae&&ae!==document.body&&(ae.isContentEditable||/^(INPUT|TEXTAREA)$/.test(ae.tagName||""))){
+        ae.blur();
+      }
+    }catch(eB){}
+    var g=ohsidianNativeGeometry(el);
+    if(!g){
+      var retries=el.__ohsidianOpenRetry||0;
+      if(retries<2){
+        el.__ohsidianOpenRetry=retries+1;
+        try{el.scrollIntoView({block:"center",inline:"nearest"})}catch(eS){}
+        setTimeout(function(){
+          try{ohsidianOpenNativePlayer(el,srcPath)}catch(eR){}
+        },220);
+      }
+      return;
+    }
+    el.__ohsidianOpenRetry=0;
+    ohsidianEnsureNativeShell(el,srcPath);
+    // Capture the window identity once, at open time. Recomputing it on every
+    // rect would follow focusedWindow and make a background window's tracker
+    // target whichever window was focused last.
+    var identity={windowId:ohsidianNativeWindowKey(),xcomponentId:ohsidianNativeXComponentId()};
+    if(!ohsidianWriteNativeRequest("open",el,srcPath,identity,g))return;
+    var openSeq=__ohsidianNativeVideoSeq;
+    ohsidianNativeIpcEnsure();
+    // Do not pause/mute/hide the HTML until ArkTS acknowledges that it
+    // accepted this exact request. Otherwise an identity/port mismatch leaves
+    // a black rectangle with no fallback.
+    ohsidianStartNativeTracking(el,srcPath,identity,openSeq);
+    ohsidianWaitNativeOpen(__ohsidianNativeTrack);
+  }catch(e){}
+}
+/* Capture-phase delegate: the button itself may be re-created by Obsidian's
+   renderer, and a lost per-node click listener was the "sometimes no
+   response" failure mode. */
+document.addEventListener("click", function(ev){
+  try{
+    var t=ev.target;
+    var btn=t&&t.closest?t.closest(".ohsidian-native-shell"):null;
+    if(!btn)return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    var el=btn.__ohsidianNativeVideo;
+    var p=btn.__ohsidianNativePath;
+    if(!el){
+      var host=btn.closest?btn.closest(".internal-embed"):null;
+      if(host&&host.querySelector)el=host.querySelector("video");
+    }
+    if(el&&!el.isConnected){
+      var liveHost=btn.closest?btn.closest(".internal-embed"):null;
+      var liveVideo=liveHost&&liveHost.querySelector?liveHost.querySelector("video"):null;
+      if(liveVideo)el=liveVideo;
+    }
+    if(el&&!p)p=el.__ohsidianSrc||ohsidianResolveMediaPath(el);
+    if(el&&p)ohsidianOpenNativePlayer(el,p);
+  }catch(e){}
+}, true);
+/* Re-attach the persistent entry after Obsidian replaces the embed DOM. */
+var __ohsidianNativeScanTimer=0;
+function ohsidianScanNativeButtons(){
+  try{
+    var list=document.querySelectorAll("video");
+    for(var i=0;i<list.length;i++){
+      var v=list[i];
+      var src=v.__ohsidianSrc||ohsidianResolveMediaPath(v);
+      if(!src)continue;
+      if(v.__ohsidianSrc){ohsidianEnsureNativeShell(v,src);continue}
+      // Fresh embed: only HEVC needs an entry. An H.264 video must keep the
+      // stock <video> look, so the codec probe decides before any DOM is added.
+      try{
+        if(ohsidianCodecOf(src)==="hevc")ohsidianEnsureNativeShell(v,src);
+      }catch(eC){}
+    }
+  }catch(e){}
+}
+function ohsidianScheduleNativeScan(){
+  try{
+    clearTimeout(__ohsidianNativeScanTimer);
+    __ohsidianNativeScanTimer=setTimeout(ohsidianScanNativeButtons,120);
+  }catch(e){}
+}
+try{
+  if(typeof MutationObserver!=="undefined"&&document.body){
+    var __ohsidianNativeObserver=new MutationObserver(function(records){
+      for(var i=0;i<records.length;i++){
+        var added=records[i].addedNodes||[];
+        for(var j=0;j<added.length;j++){
+          var n=added[j];
+          if(n&&n.nodeType===1&&(n.tagName==="VIDEO"||(n.querySelector&&n.querySelector("video")))){
+            ohsidianScheduleNativeScan();
+            return;
+          }
+        }
+      }
+    });
+    __ohsidianNativeObserver.observe(document.body,{childList:true,subtree:true});
+  }
+}catch(e){}
+/* Wake the receiver once at startup so its 200ms fallback poll can stop. If
+   the port file is not published yet, focus/open retries establish it. */
+try{setTimeout(function(){try{ohsidianNativeIpcEnsure()}catch(e){}},900)}catch(e){}
+try{
+  window.addEventListener("focus",function(){
+    try{ohsidianNativeIpcEnsure()}catch(e){}
+  });
+}catch(e){}
+/* Editing puts Obsidian's formatting toolbar above the IME. The native
+   surface is always above web content, so close it on the first editable
+   focus instead of waiting for the keyboard-height update.
+   A focus event alone is not proof of a user gesture: mounting/unmounting the
+   native XComponent makes ArkUI move window focus, Chromium then re-focuses
+   the last editable node and we would close the player that the user just
+   tapped ("tap once and the video closes"). Only a focus that follows a real
+   pointer/touch on the page counts. */
+var __ohsidianPagePointerAt=0;
+document.addEventListener("pointerdown",function(){__ohsidianPagePointerAt=Date.now()},true);
+document.addEventListener("touchstart",function(){__ohsidianPagePointerAt=Date.now()},true);
+document.addEventListener("focusin", function(ev){
+  try{
+    if(!__ohsidianNativeTrack)return;
+    var t=ev.target;
+    if(!t)return;
+    var tag=(t.tagName||"").toUpperCase();
+    if(!(t.isContentEditable||tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT"))return;
+    if(Date.now()-(__ohsidianPagePointerAt||0)>1000)return;
+    ohsidianStopNativeTracking(true,"focus");
+  }catch(e){}
+}, true);
 function ohsidianOfferSystemPlayer(el){
   try{
-    if(__ohsidianMediaNotices>=5)return;
-    __ohsidianMediaNotices++;
     var p=ohsidianResolveMediaPath(el);
     var openFn=null;
+    var nativeFn=null;
+    var isVideo=!!(el&&el.tagName&&el.tagName.toUpperCase()==="VIDEO");
+    if(p&&isVideo){
+      try{ohsidianEnsureNativeShell(el,p)}catch(eB){}
+      // B route owns the video failure UX now. Only suppress the Notice when
+      // the persistent entry is actually present; if button creation failed,
+      // keep the Notice (and its "open built-in player" button) as fallback.
+      if(el&&el.__ohsidianNativeBtn&&ohsidianNativeVisible(el.__ohsidianNativeBtn))return;
+      nativeFn=function(){try{ohsidianOpenNativePlayer(el,p)}catch(eN){}}
+    }
+    // The 5-notice cap protects against Notice spam; it must NOT be consumed
+    // before the persistent video entry is created, or the 6th HEVC video
+    // would have neither a button nor a Notice.
+    if(__ohsidianMediaNotices>=5)return;
     if(p){
       try{
         var remote=require("@electron/remote");
@@ -710,7 +1759,17 @@ function ohsidianOfferSystemPlayer(el){
     var msg=zh
       ?"OHSidian: 此视频/音频编码可能不受支持(常见于 HEVC/H.265 录制,内置解码器不含专有格式)。建议转码为 H.264/MP4 后重新插入。"
       :"OHSidian: This media codec is likely unsupported (HEVC/H.265 recordings; the bundled decoder ships no proprietary codecs). Transcode to H.264/MP4 and re-embed.";
-    var n=new Notice(msg,openFn?12000:6000);
+    var n=new Notice(msg,(nativeFn||openFn)?12000:6000);
+    if(!n)return;
+    __ohsidianMediaNotices++;
+    if(nativeFn&&n&&n.noticeEl){
+      var nbtn=document.createElement("button");
+      nbtn.className="mod-cta";
+      nbtn.textContent=zh?"用内置播放器打开（HEVC）":"Open in built-in player (HEVC)";
+      nbtn.style.marginTop="6px";
+      nbtn.addEventListener("click",function(){try{nativeFn()}catch(eN){}try{n.hide()}catch(eH){}});
+      n.noticeEl.appendChild(nbtn);
+    }
     if(openFn&&n&&n.noticeEl){
       var btn=document.createElement("button");
       btn.className="mod-cta";
@@ -744,6 +1803,17 @@ document.addEventListener("error",function(ev){
    audio: readyState below HAVE_CURRENT_DATA) means the pipeline is hung -
    fire the same guidance. Remote/buffering cases are filtered by the
    internal-embed/file-source restriction and the 8s window. */
+/* A paused local audio/video with only metadata is not a decoder hang. The 8s
+   watcher must only judge media that the user/autoplay actually tried to play;
+   otherwise every "preload=metadata" MP3 gets a false "unsupported" Notice. */
+document.addEventListener("play",function(ev){
+  try{
+    var el=ev.target;
+    if(el&&el.tagName&&/^(VIDEO|AUDIO)$/.test(el.tagName.toUpperCase())){
+      el.__ohsidianPlayAttempted=true;
+    }
+  }catch(e){}
+},true);
 document.addEventListener("loadedmetadata",function(ev){
   try{
     var el=ev.target;
@@ -756,9 +1826,25 @@ document.addEventListener("loadedmetadata",function(ev){
     if(src.indexOf("file://")===0)local=true;
     if(!local)return;
     el.__ohsidianWatched=true;
+    // The persistent entry must exist before the user presses play; otherwise
+    // a paused (preload=metadata) HEVC embed has neither an entry nor a Notice
+    // now that the 8s watcher correctly ignores untouched paused media.
+    if(tag==="VIDEO"){
+      try{
+        var nativePath=ohsidianResolveMediaPath(el);
+        // No canPlayType gate: this engine answers optimistically for hvc1 and
+        // then fails to decode, which silently dropped the poster ("even the
+        // pre-entry preview disappeared"). Unknown codec waits for the
+        // error/hang watcher, so an H.264 embed never gets an extra layer.
+        if(nativePath&&ohsidianCodecOf(nativePath)==="hevc"){
+          ohsidianEnsureNativeShell(el,nativePath);
+        }
+      }catch(eBtn){}
+    }
     setTimeout(function(){
       try{
         if(!el.isConnected||el.error||el.__ohsidianMediaNoticed)return;
+        if(el.paused&&!(el.currentTime>0)&&!el.__ohsidianPlayAttempted)return;
         var hasFrame=(el.tagName.toUpperCase()==="VIDEO")?(el.videoWidth>0):(el.readyState>=2);
         if(hasFrame)return;
         if(el.readyState<1)return; /* metadata not even there - not the hang shape */
@@ -1467,13 +2553,35 @@ function reapSiblingVaultWindows(){
               }catch(e3){return false}
             });
             if(others.length){
-              for(var i=0;i<others.length;i++){
-                var w=others[i];
-                try{if(!(w.isDestroyed&&w.isDestroyed()))w.close()}catch(e4){}
+              /* Do not close while this window may still be unmapped: the
+                 system plays its "app leaves, the icon flies home" exit
+                 animation when the last VISIBLE window of the app goes away,
+                 which is the flash seen behind the switch. Wait (bounded) until
+                 this window reports itself on screen, then take the siblings
+                 off screen BEFORE terminating them: terminateSelf() on an
+                 already backgrounded ability has no on-screen window left to
+                 animate, so the old vault disappears without the transition. */
+              var onScreen=true;
+              try{if(cur.isVisible)onScreen=!!cur.isVisible()}catch(e4){}
+              if(!onScreen&&tries<6){
+                again=true;
+              }else{
+                for(var i=0;i<others.length;i++){
+                  try{if(others[i].hide)others[i].hide()}catch(e5){}
+                }
+                (function(list){
+                  setTimeout(function(){
+                    for(var j=0;j<list.length;j++){
+                      try{
+                        if(!(list[j].isDestroyed&&list[j].isDestroyed()))list[j].close();
+                      }catch(e6){}
+                    }
+                  },350);
+                })(others);
+                /* Keep retrying: close() is asynchronous, a sibling may refuse
+                   to close (beforeunload) or a second vault window may appear. */
+                again=tries<6;
               }
-              /* Keep retrying: close() is asynchronous, a sibling may refuse
-                 to close (beforeunload) or a second vault window may appear. */
-              again=tries<6;
             }
           }
         }

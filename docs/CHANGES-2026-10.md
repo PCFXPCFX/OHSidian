@@ -672,6 +672,43 @@ changed=false` 说明是首同步而非模式切换;全程无 `forced fullscreen
   目前无 off 路径,避免与窗口销毁竞态。
 
 
+## 第 106 轮(2026-10-19): HEVC 内联原生播放器（B 路由）
+
+**用户报告**:HEVC/H.265 内嵌视频在 Obsidian 的 `<video>` 里黑屏/无声；需要不离开笔记、在原视频矩形内播放，并保留主题、滚动和触控分区。
+
+**根因**:引擎有 HEVC 硬解能力，但解码后的呈现环在首帧后断裂（AVC 对照同样复现）；W（WebCodecs）已因 0 帧判 No-Go。应用层不能修闭源引擎，只能绕开呈现环。
+
+**方案**:B = 同一页面的 `Stack` 内叠 `AVPlayer + XComponent(SURFACE)`，按 `<video>` 的完整矩形定位；content region 只做裁剪，不缩放视频。入口常驻、预览图占位、关闭后恢复 HTML。IPC 优先、文件兜底；renderer 把 rect/region/theme 下发给 ArkTS。
+
+**本轮审计修复**:
+
+| 问题 | 修复 |
+|---|---|
+| 首击被 Pan 起点置为“控件已显示”，随后的单击误判成播放/暂停 | touch-down 只唤出；Pan 起点不碰 UI；`userRevealedControls` + 450ms grace |
+| open 只确认写出，未确认 ArkTS 接受，身份不匹配会黑屏 | Index 接受后写 opened ack + IPC `event:opened`；renderer 收到 ack 才隐藏 HTML，1.2s 无 ack 保留 HTML 并 close |
+| 8s 无帧 watcher 把暂停的本地音频误报为编码不支持 | 只判断确实尝试播放的媒体；本地视频在 loadedmetadata 预挂入口 |
+| 多窗口关闭标记串扰 | close marker 带 windowId/xcomponentId，tracker 身份匹配才停 |
+| 同页换视频不重建 | `source` 加 `@Watch`，release 旧 AVPlayer 后按新文件 init |
+| 静止切主题不更新 | 几何稳定时 1.2s rect 心跳携带 theme |
+| 主题 8 位 alpha/临时文件并发/缩略图泄漏 | ARGB 转换、唯一 tmp + rename 重试、预览 onload 后清理 |
+| 重试预算/快速重建 fd 泄漏 | playing 5s 稳定后才清零；token 失配关闭本次 fd |
+| 旧 inject 脚本会回退 guard | 删除 `inject-b-native-asar.mjs`，唯一路径是 repack |
+
+**六维审计**
+
+| 维度 | 结论 |
+|---|---|
+| 必要性 | 引擎无法稳定呈现 HEVC 帧；B 是保留笔记上下文的唯一可行应用层路径 |
+| 正确性 | surfaceId 只在 initialized 写；open ack + 空 identity 拒绝；source/close 身份、首击时序、音频误报均已修；resize 保留 currentTime |
+| 安全性 | 仅 127.0.0.1 临时端口 + INTERNET 权限；thumb 目标限制 filesDir；不新增外部网络。`@electron/remote` 是既有宽权限面，B 依赖它，仍建议后续收窄 |
+| 代码质量 | 关键状态机有注释；IPC/file 双通道；唯一 tmp、写失败 close、ack 超时安全回退；smoke 覆盖协议/几何/ack/恢复 |
+| 架构 | 不新开窗口；renderer 只写请求，ArkTS 拥有 AVPlayer/XComponent；文件通道仅 IPC 降级；W 不复活 |
+| 耗电性 | IPC 下 rect 每帧、文件兜底 40ms、主题心跳 1.2s；rAF 每帧 DOM 几何仍有优化空间，需真机功耗/发热复核 |
+
+**验证**:ArkTS 编译通过；renderer smoke `B RENDERER SMOKE OK`；HAP `221,792,861 B / E1D4F043...`，内嵌 asar `25,919,752 B / EEF8AD6B...` 与源文件一致。**真机尚未验证**（本机无 hdc），下一步按 `docs/B-NATIVE-OVERLAY.md` 验收 1–25。
+
+**已知风险**:pinned drawer 与视频矩形重叠时未从 region 排除侧栏；共享请求文件仍是最后写者赢；`color-mix()/oklch()` 主题色可能 fallback；rAF 几何查询的耗电需实测。
+
 ## 第 107 轮(2026-10-19):触摸模式换库后窗口停留在 PC 模式记忆尺寸
 
 **用户报告**:触摸模式(PC 模式关闭)下切换仓库,切换成功,但新窗口**不是整屏**,而是"上次窗口模式记忆的窗口大小"。
@@ -874,3 +911,991 @@ changed=false` 说明是首同步而非模式切换;全程无 `forced fullscreen
 - `maximize` 在触摸形态被忽略后,Obsidian 记忆里的 `isMaximized` 可能仍为
   true(历史状态),不再被本次启动刷新;属无害状态(触摸窗口本来就是 display)。
 - 本轮未跑真机;编译为 ArkTS 唯一门。
+
+## 第 108 轮 (2026-10-19): 触摸端"点一下视频就关" / 模式切回后矩形不刷新
+
+**用户报告**:①触摸端轻点视频，控件出现的同时视频关闭（手指持续按着则不会关）；
+②从平板窗口模式切回触摸全屏模式后，原生视频的位置/尺寸没有刷新。
+
+**根因 1（点一下就关；hilog 16:59:45.971 → 46.001）**
+`Index.ets` 的区域裁剪盒用 `.hitTestBehavior(HitTestMode.Transparent)`。ArkUI 的
+Transparent 语义是"自己被命中后，**被遮挡的兄弟节点也继续参与命中**"，因此视频上
+的一次点击同时到达下层 WebEngine 的 XComponent：Chromium 把光标放进隐藏
+`<video>` 背后的笔记正文（编辑器 `focusin`），renderer tracker 按"编辑即关闭"
+规则发 `close`，原生 surface 摘除；紧接着 Chromium 为聚焦的可编辑节点重新
+`attachTextInput`，软键盘升起（`keyboardHeight: 773`）——用户看到的就是"点一下
+视频，视频关掉还弹键盘"。长按不产生 click，所以"一直按着反而不关闭"。
+
+**修复 1**:裁剪盒改为"视频矩形 ∩ 内容区域"（`nativeClipX/Y/W/H`），不再等于整个
+region；命中模式改 `Default`。视频矩形内由播放器独占，矩形外仍是普通页面滚动区，
+不会把整篇笔记的触摸吃掉。播放器仍按完整矩形布局、由裁剪盒裁切，顶部/底部溢出
+行为不变。
+
+**根因 2（模式切回后位置不刷新）**
+`applyNativeRect/moveNativeRect` 用 `px2vp(cssPx * dpr)`。只有 renderer 的
+`devicePixelRatio` 与当前窗口密度一致时两个因子才抵消；现场日志里窗口从
+1650x1241@1.9125 切到 2800x1840@2.25，两侧更新有先后，乘积差 15%~18%，surface
+停在旧位置/旧尺寸。
+**修复 2**:本引擎里 1 CSS px 恒等于 1 vp，直接用 CSS 矩形，删掉 dpr 往返；请求里
+保留 `dpr` 字段兼容旧 renderer。
+
+**附带加固**
+- tracker 的 `focusin` 关闭规则要求最近 1s 内页面上有真实 `pointerdown`/
+  `touchstart`：原生层挂载/卸载会引起 ArkUI 焦点迁移，Chromium 会重新聚焦上次的
+  可编辑节点，属"引擎噪声"；用户点编辑器时仍有 pointerdown，规则照常生效。
+- `close` 请求新增 `reason`（keyboard/focus/occluded/offscreen/detached/
+  writefail/noack/loop），Index 侧打印
+  `NativeVideoIpc close accepted reason=...`，下次现场日志可直接归因。
+
+**验证**:`hvigorw assembleHap` **BUILD SUCCESSFUL**（2026-10-19 17:34，exit 0）；
+renderer smoke `B RENDERER SMOKE OK`（close 请求已带 `reason:"occluded"`）；
+HAP `electron-default-signed.hap` **221,792,784 B**，SHA-256
+`9F2EFAFBCF8F2EBD66392D124CF727948F304ADB2D558F7A5A2A078422ACD22E`；HAP 内
+`resources/resfile/resources/app/obsidian.asar` **25,920,570 B**，SHA-256
+`6A628DB70C4FE851967FA2DF211A78FAF58B520B20A9B386709B017465AC2AAF`，与仓库
+文件一致（已解包复核）。**真机待验证**。
+
+**验收要点（触摸端）**
+1. 轻点视频：控件出现，视频不关闭、不弹软键盘；日志无 `close accepted`。
+2. 连点两次：第一次只唤出控件，第二次播放/暂停。
+3. 视频矩形外上下滑动仍滚动笔记；矩形内横滑 seek、竖滑音量。
+4. 平板窗口模式 → 触摸全屏模式：视频矩形随新布局刷新，不残留旧位置/旧尺寸。
+5. 点编辑器/输入框：原生 surface 关闭、软键盘正常升起（`reason=focus`）。
+
+## 第 109 轮 (2026-10-19): 从"能用"到"好用"——控件语汇统一、入口无感、缩略图时序
+
+**用户反馈（真机通过后的审美问题）**:控件太丑、图标不统一；预览图与 Obsidian 美学不匹配、看视频时容易"出戏"；进入 HEVC 视频的方式和普通 AVC 不一样；缩略图有时必须先点进视频才出现。
+
+**根因**
+1. **图标三套语汇混排**：播放/暂停用文本 `❚❚ ▶`、重播用 `↻`、静音用 emoji `🔇 🔊`、全屏用制表箭头 `⤡ ⤢`、关闭用 `✕`。字重、基线、光学尺寸全不同，所以控件永远"像外挂"。
+2. **入口是叠加物**：角落一个 `▶ 内置播放器` 文本按钮 + 一张单独定位的预览 `<img>`。视频本体与按钮/预览是三层不同来源的视觉，和 Obsidian 的 `<video>` 不是一个东西。
+3. **缩略图请求时序**：旧 `ohsidianRequestNativeThumb` 在 `xcomponentId` 未解析时就发 `thumb`（Index 无法归属窗口，直接丢弃），文件名随机、加载后又把文件删掉 —— 于是只有"先点开一次播放器"（open 路径带 identity）才可能生成，重开笔记也不会复用。
+
+**修复**
+| 项 | 变更 |
+|---|---|
+| 控件图标 | `NativeVideoOverlay.ets` 新增 `glyph()` builder：`Shape`+`viewPort(24)`+`Path.commands`，统一 1.7vp 描边、圆头端点/圆角连接；播放三角填充；图标换成 Lucide 几何（play/pause/rotate-ccw/volume-2/volume-x/maximize/minimize/x） |
+| 控件版式 | 条高 40→44，按钮命中区 36–40；时间码定宽 88 防跳动；滑块 block 10；顶边加 1vp hairline；速度 chip 保留文本 `1×`（与 Obsidian 一致），不再混用 emoji |
+| 入口 | 删除角落文本按钮与独立预览层，改为视频自身盒子：`span.ohsidian-native-shell`（`inset:0`、圆角 `var(--radius-s)`、底色 `var(--background-primary)`）+ `img` 首帧 poster + 居中 46px 播放圆盘（13:8 三角形） |
+| 无感判定 | 新增 `ohsidianCodecOf()`：只扫文件首/尾 256 KiB 的 `stsd` 采样描述，`hvc1/hev1` → HEVC、`avc1/avc3` → AVC，结果按路径缓存；配合 `canPlayType('hvc1')` 守卫，**AVC 完全不建层、不弹 Notice**，HEVC 才显示 poster |
+| 缩略图 | 确定性缓存 `ohsidian-thumb-<basename>-<size>-<mtime>.jpg`；先查缓存直接 set src（零 IPC）；identity 未解析时等待重试（250ms×40，每 2s 重发一次）；加载后保留文件复用 |
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；renderer smoke `B RENDERER SMOKE OK`（新增 `poster shell / shell class / poster from cache / codec hevc / codec avc / codec cached / close reason` 断言）；HAP **221,807,574 B**，SHA-256 `C704BEFEF87DBFAED146FB9A7C2638748984FD8BC6445B89B1E8EC0C01EE29D3`；HAP 内 asar **25,924,440 B**，SHA-256 `F25766F70EBA704BFF36634C878AD9A345EDFA38BA7AACA36E61DA014DF23139`（已解包复核）。**真机待验证**。
+
+**验收要点（触摸端）**
+1. H.264 内嵌视频：**零变化** —— 没有 poster、没有按钮、没有"编码不支持"Notice。
+2. HEVC 内嵌视频：显示首帧 + 居中播放圆盘；轻点一次即播；控件图标风格统一（无 emoji/制表字符）。
+3. 新增/打开笔记时 poster 立即出现（或 1s 内），不需先进入播放器；重开同一笔记应瞬时出现（缓存）。
+4. 播放中 3s 底栏隐去；轻点/悬停重现；暂停与错误时保持可见。
+5. 关闭后回到 poster，不残留原生黑框。
+
+## 第 110 轮 (2026-10-19): 控件对齐/放大、竖向音量手势、触屏与指针双密度
+
+**用户反馈**:播放圆盘与底部控件不在一条直线上；控件太小；上下滑动调音量没有生效；并留了一个问题——现在这套控件适合桌面还是触摸，两端都要特化该怎么改。
+
+**根因**
+1. **不在一条直线**：poster 的播放圆盘按 `.internal-embed` 的 `inset:0` 居中，原生播放器按 `<video>` 的 rect 居中。embed 盒子有 padding/边框/说明行时两者中心不同，于是"两个播放键不在同一轴线"。
+2. **控件小**：上一版是 40vp 条高、34–40vp 命中区、18–19vp 图标，只够指针用；触摸端的最小命中区应是 48vp。
+3. **竖向音量不生效**：手势是 `PanDirection.All` + distance 12，方向靠运行时 `|dx|>=|dy|` 猜；另外 `volumeByGesture` 以 `lastAreaH` 为行程，首帧尚未测量时为 0，一次 1vp 的移动就会被除成 0%/100%（表现为"滑了没反应/直接静音"），且父级手势识别器可以抢走拖拽。
+
+**修复**
+| 项 | 变更 |
+|---|---|
+| 对齐 | shell 改为按 `<video>` 的 `getBoundingClientRect` 相对 host 定位（left/top/width/height），不再 `inset:0`；圆盘中心与原生暂停圆盘严格同点 |
+| 放大 | 新增 `pointerMode` 双密度：触摸 56vp 条高 / 48vp 命中区 / 24–27vp 图标 / 13fp 时间码 / 3vp 轨 / 14vp 滑块；指针 40 / 34 / 19 / 11 / 2 / 10 |
+| 暂停态 | 原生层新增居中播放盘（触摸 64vp、指针 44vp），与 poster 圆盘同尺寸同三角比例 |
+| 竖向音量 | 拆成分方向的 `PanGesture(Vertical)` / `PanGesture(Horizontal)`（distance 8）+ `GestureMask.IgnoreInternal`，方向在 `onActionStart` 即确定；音量行程 `max(160, lastAreaH)`，避免首帧 0 高度导致的跳变 |
+| 模式来源 | renderer 用 `(hover: hover) and (pointer: fine)` 判定并随每个请求下发 `pointer`；Index 透传给 `NativeVideoOverlay.pointerMode`；poster 在指针模式只在 hover 时显示圆盘 |
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；smoke `B RENDERER SMOKE OK`（新增 `shell aligned to video rect` 断言）；HAP **221,847,479 B**，SHA-256 `5440B4A2BD56024A7014F4F685FA34F6E5A9098322B9785EDC9964EB917D179F`；HAP 内 asar **25,936,962 B**，SHA-256 `719E0B515E699ABD70A553242BC86AFD28F34CAB6D7C08C5D529DA56A92F7C8E`（已解包复核）。**真机待验证**。
+
+**验收要点**
+1. 暂停时，poster 圆盘与原生暂停圆盘在同一像素位置（进出播放器不跳动）。
+2. 触摸端底栏 56vp、图标明显放大；指针端（窗口模式）自动变紧凑。
+3. 视频内竖滑：出现"音量 xx%"并按比例增减；首滑不会直接静音或拉满。
+4. 视频内横滑仍为 seek；双击 ±10s、单击唤出/播放暂停不受影响。
+
+## 第 111 轮 (2026-10-19): 布局系统性错误——圆盘掉到底部、HUD 被控制条挡住、切视频闪旧帧
+
+**用户反馈**:暂停圆盘不在中间、跑到下面；控件还是没有对中；切换视频会有一瞬间显示上一个视频的画面；音量提示被控制条挡住。
+
+**根因（一处，解释三个现象）**
+`build()` 的根 `Stack({ alignContent: Alignment.Bottom })`。在这版 ArkUI 里，子组件上的 `.align()` 不是"在父 Stack 内定位"的覆盖项（它是设置组件自身内容对齐的通用属性），因此：
+- 居中播放盘 `.align(Alignment.Center)` 无效 → 被 `alignContent: Bottom` 放到**底部居中**；
+- 手势 HUD `.align(Alignment.Top)` 无效 → 同样落到底部，正好被控制条压住；
+- `2×` 角标 `.align(TopEnd)` 无效 → 也在底部。
+
+"圆盘在下面"和"提示被挡"是**同一个 bug**，上一轮只调尺寸没查容器对齐，是我的失职。
+
+**修复**
+| 项 | 变更 |
+|---|---|
+| 根容器 | `alignContent: Bottom` → `Center`；所有"靠边"的内容改用**容器属性**定位，不再依赖子组件 `.align()` |
+| 提示 HUD | 全尺寸 `Column` + `justifyContent(Start)` + `alignItems(Center)`，顶部 14vp，`hitTestBehavior(None)` |
+| 2× 角标 | 全尺寸 `Stack` + `alignContent(TopEnd)` |
+| 控制条 | 全尺寸 `Column` + `justifyContent(End)` 包住 `Row`：触摸端 96% 宽**悬浮药丸**（中心轴与圆盘一致）、指针端 100% 贴边；圆角四角统一 |
+| 切换视频 | 新增 `switching` 状态：`onSourceChanged` 置真并立即盖一层不透明 `theme.bg` + "载入中…"，新文件首次 `playing` 时撤除；`fail()` 也撤除（错误面板不被遮） |
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,865,835 B**，SHA-256 `C3AD913978E4D4DD84157A4909E890251778F8B138AA2B59A170A9114DD99E3C`；HAP 内 asar **25,939,637 B**，SHA-256 `7CB612610383F3A53B9B2324B138C43821E8CF1184750D901608A775C37BD9FD`；`ets/modules.abc` 已确认含 `载入中`/`switching`/`discSize`/`pointerMode`。**真机待验证**。
+
+**验收要点**
+1. 暂停：圆盘在画面正中心（不是底部），与进入前的 poster 圆盘同点。
+2. 控制条在底部、水平居中：触摸端为 96% 悬浮药丸，中心轴与圆盘垂直对齐。
+3. 竖滑调音量：提示出现在**顶部居中**，不被控制条遮挡；数值按比例增减。
+4. 同页切换视频：旧画面不再闪现，直接进入"载入中…"再出新画面。
+
+## 第 112 轮 (2026-10-19): poster 准、原生层不准——密度误判 + 对齐不可靠
+
+**用户反馈**:进入播放器前 poster 的圆盘居中且大小合适；点进播放器后，暂停盘不在中心而且变小；底栏控件仍不对齐。
+
+**根因（两处，都在"原生层"）**
+1. **密度误判**：`pointerMode` 来自 renderer 的 `(hover: hover) and (pointer: fine)`。这块平板同时支持鼠标，媒体查询可能为真，于是进入播放器那一刻整套控件切到桌面密度（44vp 盘 / 40vp 条 / 34vp 按钮 / 19vp 图标）——"点进去就变小"。poster 在 DOM 里用 CSS 固定 64px，所以进入前是"对的"。
+2. **对齐不可靠**：`Stack.alignContent` / `Column.justifyContent` + 子组件 `.align()` 在这版 ArkUI 的实测布局里没有稳定生效（圆盘落到下边缘）。poster 用 CSS `left/top:50%` 与 `margin` 定位，所以永远准；原生层依赖容器对齐，所以"奇怪"。
+
+**修复**
+| 项 | 变更 |
+|---|---|
+| 密度 | 不再用媒体查询：`__ohsidianMouseAt` 记录真实 `mousemove/pointermove(mouse)`，4s 内有鼠标活动才用紧凑密度，**默认触摸密度** |
+| 密度实时生效 | Index 新增 `@State nativePointer`，`open`/`rect` 都更新它并透传 `pointerMode`，鼠标出现/离开会在下一个 rect 心跳（≤1.2s）切换 |
+| 圆盘 | 不再依赖 `alignContent`：`discX=discY=` 按实测帧尺寸计算，`.position({x,y})` 显式落位 |
+| 底栏 | `barX=(frameW-barW)/2`、`barY=frameH-barH-gap-lift`，`.position()` 显式落位；触摸端 96% 药丸，中心轴与圆盘同一竖线 |
+| 可观测 | `onAreaChange` 新增日志 `layout area=<w>x<h> pointer=<bool> bar=<h> disc=<size>`，下次现场日志可直接判断是帧尺寸问题还是密度问题 |
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,863,713 B**，SHA-256 `7AD332E12DAAA15EBBCF2D7709836B7ACA53B49EFFCDAF4075518865AA33EF73`；HAP 内 asar **25,940,184 B**，SHA-256 `21FB273DE27A0F75948F3FB07EE572D24A6ED629A371D8E71ACFD7B70FD570CA`；`ets/modules.abc` 已确认含 `discX`/`barX`/`barY`/`nativePointer`/`载入中`。**真机待验证**。
+
+**验收要点**
+1. 进入播放器后暂停：圆盘与 poster 圆盘同点同大小（64vp）。
+2. 触摸端底栏为 96% 居中药丸，中心与圆盘同一条竖线；鼠标移动后 ≤1.2s 自动切紧凑。
+3. hilog 出现 `layout area=WxH pointer=... bar=... disc=...`，其中 `area` 应与视频矩形一致。
+
+## 第 113 轮 (2026-10-19): 三处"机制性"错误——poster 消失、密度误判、摆放依赖测量
+
+**用户反馈**:新版本连进入前的 poster 也没了；图标仍然小；底栏不居中；全屏时控制条要等一会才移动。
+
+**以代码为准的根因**
+1. **poster 消失**：`touch-mode.js` 的 `loadedmetadata` 用 `!ohsidianEngineCanHevc(el)` 作为建层条件。该引擎对 `hvc1` 的 `canPlayType` 返回乐观值，于是 HEVC 也跳过 poster；此前的"能显示"只是错误/8s 兜底路径碰巧触发。
+2. **图标仍小**：`ohsidianPointerMode` 监听 `mousemove` 判鼠标。Chromium 在触摸点击后会合成兼容鼠标事件，触摸端因此恒为 true → 一直用桌面密度（40/34/19/44 盘）。这解释了"越改越小"。
+3. **摆放靠测量**：`disc`/`bar` 先依赖根 `Stack.alignContent: Bottom`（把圆盘压到底部），再改用 `lastAreaW/H` 的 `.position()`（全屏切换要等 `onAreaChange`，所以"一会才反应过来"）。三种机制都不可靠。
+
+**修复**
+| 项 | 变更 |
+|---|---|
+| poster | 删除 `canPlayType` 门；只看文件 `stsd` 的 `hvc1/hev1`（`ohsidianCodecOf`），未知编码仍走失败兜底 |
+| 密度 | renderer 的 `pointer` 恒为 false；ArkTS 用 `onHover`（手指永不触发）置 `hoverSeen`，默认触摸密度 56/48/24–27、盘 64 |
+| 摆放 | 圆盘/底栏改为**全尺寸 Column + justifyContent/alignItems** 的布局约束；不再用子组件 `.align()`、不再用 `.position(测量值)`，全屏切换同帧到位 |
+| 裁切补偿 | 视频被底部 toolBar 裁掉时，圆盘按隐藏高度上移，保证"视觉中心"而非"矩形中心" |
+| 工程 | 补丁源已重构到 `scripts/patches/touch-mode.js`（原 `update-obsidian.mjs` 改为 `readPatch`）；`repack`/smoke 同步指向该文件 |
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；smoke `B RENDERER SMOKE OK`；HAP **221,881,814 B**，SHA-256 `22DBFA471B829206641982E594D6AD94ECA97CAB2F428663FB29A94C2FA9391A`；HAP 内 asar **25,944,941 B**，SHA-256 `43D2689A8F1DFEEC8ED2347E8B8E0ADD54E220CB8DAB339D294B66B47F032688`；asar 内已核对 `pointer 恒 false`、无 `canPlayType` 门、shell/cache 均在。
+
+## 第 114 轮 (2026-10-19): 图标"小且不居中"的真因是缩放方式，长按倍速找回，双击全屏
+
+**用户反馈**:播放条本身正常、倍速文字正常，但暂停/声音/放大/关闭四个图标偏小且不居中；长按倍速失效；希望加双击全屏。
+
+**以代码为准的根因**
+`glyph()` 之前用 `Shape().viewPort({24x24}).width(size).height(size)`。`viewPort` 只定义**路径坐标系**，不会把 24 单位的绘制内容缩放到更大的节点：Path 仍按 24 单位绘制，锚在节点左上角。于是按钮是 48vp、字形只有 24vp，且视觉重心偏左上——同时解释了"小"和"不居中"。播放条正常，是因为它由 Text/Slider 正常排版，不经过这个 Path。
+
+**修复**
+| 项 | 变更 |
+|---|---|
+| 图标 | `glyph()` 改为固定 24×24 布局 + `.scale({x:size/24,y:size/24})`：以中心缩放，尺寸与居中都是确定的；触摸 30vp / 指针 21vp，播放三角 30/22，暂停盘内字形 0.46×盘径 |
+| 长按倍速 | 手势从 38vp 的 Text 移到 **48×56 的整个单元格**（Stack），400ms 长按不再因为按偏/过窄而丢失 |
+| 双击 | 中间 1/3 → 全屏；左右 1/3 → ±10s（移动端惯例，一个手势两种职责） |
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,885,342 B**，SHA-256 `7B9D78671BE7382BB4C75BA77D547661847F93BA1CF9718993841C00CAA63103`；HAP 内 asar **25,947,644 B**，SHA-256 `8A6AE160730C8931C5B113B21CF7EB2380FF0318940C3E4095B4831106698685`；asar 内已复核 `pointer 恒 false`、无 `canPlayType` 门、shell/cache/reason 均在。**真机待验证**。
+
+**验收要点**
+1. 底栏四个图标明显变大，且在 56vp 条内垂直居中；与倍速文字同一条基线。
+2. 长按倍速：按住底栏「1×」约 0.4s 变 2×，松手回 1×。
+3. 双击画面中间进/退全屏；双击左右两侧 ±10s。
+
+## 第 116 轮 (2026-10-19): 对照 poster 审计——圆盘"偏上"是我加的补偿，图标"小"是 Lucide 内边距
+
+**用户反馈**:图标和暂停盘仍偏上、偏小；并指出"进入前 poster 上的暂停盘才是正常的"。
+
+**审计结论（对照 poster 实现逐项核）**
+1. **圆盘偏上**：第 113 轮我给圆盘容器加了 `padding(bottom: controlsBottomClip)`（视频被底栏裁切时上移"视觉中心"）。但 poster 是 CSS `50%/50%`，按**视频矩形**居中，没有任何补偿。原生层的 frame 就是视频矩形，这段 padding 一旦非 0 就把圆盘顶高——"偏上"由此而来。**已删除**。
+2. **圆盘内三角偏小**：poster 的三角是 19.8×23.2（64 盘），而 Lucide play 路径只占 24 栅格的 13.5×15.6，按 24 缩放后视觉只有 17×20。**改为按 20 单位"光学盒"缩放**（路径留白 2 单位），0.48×64 时视觉 20.7×24，与 poster 对齐。
+3. **底栏四个图标小**：同一原因。pause 旧路径只占 6×15，close 只有 12×12；按 24 缩放后视觉 7.5×18.8 / 15。**pause 改为 8×16、close 改为 16×16，统一 20 光学盒**，触摸 26vp → pause 10.4×20.8、close 20.8，明显放大。
+4. **顺手修掉一个真 bug**：上一版把"光学右移"的 `translate` 加在了**圆盘节点**上（会把整个圆一起挪走）。现在只作用于字形内层 Stack，2%。
+5. **居中链路复核**：每个图标格 48×56，Stack 居中 24 布局盒；整条链路无 padding/margin/align 偏移（逐个核过 play/pause/volume/fullscreen/close/speed）。
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,907,096 B**，SHA-256 `4DB3B7832C6045263B9545EB8EB2DE32758A5F77BA17919036BCB5BD8F5FEA92`。**真机待验证**。
+
+**验收**：① 暂停盘与 poster 盘同点同大；② 底栏四个图标明显变大且垂直居中；③ 倍速/时间码与图标同一条中线。
+
+## 第 117 轮 (2026-10-19): 截图定量——紧凑密度被触控板触发；图标改为零 transform；全屏比例与模式切换补数据通道
+
+**用户反馈（附截图）**:图标仍小且偏上；全屏仍拉伸；模式切换未按预期隐去再出现。用户提出"是否把图标右下角当 0 点"。
+
+**截图定量（这是本轮的关键证据）**
+- 底栏高度约 40vp、图标约 18vp ⇒ **紧凑密度生效**。来源是 `hoverSeen`：平板接了键盘/触控板，hover 事件把 `compactControls()` 置真，触摸使用也被降到 40/34/18/44。之前几轮"越调越小"就是**目标密度在变**，不是常量不对。
+- 图标偏上/偏左 ⇒ 字形依赖 `Shape` 的 `viewPort` + `.scale()`。截图尺寸说明缩放没有按中心生效，视觉落在原始 24 栅格的左上区域；用户的"锚点"直觉是对的。
+
+**修复（去掉整类问题，而不是再调参）**
+| 项 | 变更 |
+|---|---|
+| 密度 | 取消双密度：始终 56vp 条 / 48vp 格 / 30vp 图标 / 64vp 盘（`compactControls()` 固定 false） |
+| 图标 | 全部改为 **30 栅格路径 + 30×30 盒、零 transform、零 viewPort**：路径坐标即 vp，Stack 居中盒子，不存在锚点歧义 |
+| 盘内三角 | 独立 40 栅格大三角（视觉约 20×26），对应 poster 的 19.8×23.2 |
+| 全屏比例 | `videoSizeChange` 写入 `videoAspect`；另加**兜底**：进全屏前若仍未知，用内联帧宽高比（Obsidian 的 `<video>` 就是文件比例），并打日志 `aspect from inline frame=` |
+| 模式切换 | renderer 每次请求附带 `mode`（0 触摸 / 1 窗口 / -1 未知）；Index 检测到翻转即 `Visibility.Hidden`，等 **400ms 布局稳定后**的新矩形再显示，1.5s 兜底 |
+| 清理 | 去掉不被 AVPlayer 类型支持的 `videoSizeChanged` 旧事件（编译期即拒绝） |
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；smoke `B RENDERER SMOKE OK`（请求已带 `mode`）；HAP **221,905,346 B**，SHA-256 `8E5C5AA9806454239608A22A6F629519A69BE1DCE2E726DAFAD48452E3C3C7FB`；HAP 内 asar **25,948,112 B**，SHA-256 `2AC4D18E72ED3CE6B275D2D12905247E1AEB29C930DBD582403D2724EF3ADC97`；字节码与 app.js 已确认含 `videoAspect`/`glyphBig`/`ICON_PLAY_BIG`/`nativePc`/`mode:ohsidianModeFlag()`。
+
+## 第 118 轮 (2026-10-19): 打包审计结论——asar 正确；加"时间码长按"诊断读数
+
+**用户疑问**:重构补丁到 `scripts/patches/` 后，包内 asar 是否正确？
+
+**审计方法**:解包 HAP 内 asar → 与 `scripts/patches/touch-mode.js` 逐字节比对 + 结构计数。
+
+| 检查项 | 结果 |
+|---|---|
+| HAP 内 asar | 25,948,112 B / `2AC4D18E…`，与 `web_engine/resfile` 源文件一致 |
+| `var __ohsidianNativeVideoSeq=0;` 出现次数 | **1**（无重复 B 块，不存在"旧函数后定义覆盖新函数"） |
+| `function ohsidianEnsureNativeShell` | 1 |
+| `/*OHSIDIAN-PATCH-END*/` | 1 |
+| `function ohsidianModeFlag` / `mode:ohsidianModeFlag()` | 1 / 1 |
+| 整个 touch 补丁前缀 vs 补丁文件 | 长度均 130,206；唯一差异是 repack 在 B 块接缝多插一个空行（无行为影响） |
+| main.js | 228,618 B，主进程补丁已应用（原生视频走 renderer↔ArkTS 回环，不经过 main.js） |
+
+结论：**拆分补丁后的打包链路是对的**，HAP 里的 renderer 就是 R117 代码。
+
+**新增诊断（关键）**：长按底栏**时间码** 0.6s，左上角出现读数：
+`v117 WxH aspect=…` / `bar=… btn=… disc=… compact=…`
+
+- `bar=56 btn=48 disc=64 compact=false` → 新构建已生效；
+- `bar=40 … compact=true` → 装的是旧包（或进程未重启）；
+- `aspect=n/a` → 全屏比例走内联帧兜底。
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,909,505 B**，SHA-256 `B2B59704DDB5EFF36BB6D09AFB75C1352FA7B397111B68DF812CB8C20C99555D`（21:38）。
+
+## 第 119 轮 (2026-10-19): 读数证明构建生效，量出"小"的真因是路径墨迹只占 53–66%
+
+**证据**：用户长按时间码截图读数 `v117 700x394 aspect=1.778 / bar=56 btn=48 disc=64 compact=false`。
+⇒ 新构建已安装、密度正确、比例已获取。那"图标小"只可能来自**字形本身**。
+
+**逐条量路径墨迹（30 栅格）**
+| 图标 | 旧墨迹 | 占盒比 | 修正后 |
+|---|---|---|---|
+| play | 15×19 | 50–63% | 17.5×23 |
+| pause | 8×20 | 27–67% | 11×24 |
+| replay | 18×18 | 60% | 26×26 |
+| volume | 20×20 | 67% | 22×26 |
+| maximize | 18×18 | 60% | 26×26 |
+| close | 16×16 | 53% | 24×24 |
+
+盒子是 30vp，但**墨迹只有 16–20vp**，在 56vp 条里当然显小。现在按 Material 的"24dp 图标 / 48dp 目标"标准把墨迹做到 24–26vp；盘内三角 21×28（poster 19.8×23.2）。盒子仍 30/40、**零 transform**，不重新引入锚点问题。
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,909,503 B**，SHA-256 `683E58915D28E83D99B1307A9192636DB56D37CD698B998884E871C11DDCE17A`。
+
+## 第 120 轮 (2026-10-19): 读数加"实测值"——用布局自证，而不是靠肉眼看缩略图
+
+**背景**：R119 的读数确认 `bar=56 btn=48 disc=64 compact=false`，但截图里圆盘与图标仍显小。截图在我这边是缩放预览，凭像素估算不可靠（同一条底栏我算出 40vp 与 56vp 两种结论），所以不再用眼睛量。
+
+**新增**
+- 诊断读数第二行（黄色）：`measured bar=<onAreaChange 实测高> disc=<实测直径>`。
+- pause 墨迹 11×26、close 26×26（上一版 11×24 / 24×24）。
+
+**判读规则**
+| 实测值 | 含义 | 处理 |
+|---|---|---|
+| `measured bar=56 disc=64` | 布局正确，小的是墨迹 | 继续按数值加大墨迹（26→30） |
+| `measured bar≈44 disc≈44` | 声明值没有被渲染出来，上层有缩放/约束 | 查 clip 帧与 vp↔px 映射 |
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,919,003 B**，SHA-256 `739A5BFC02E51594A1402A078CB2AD58CE81221987B34CCCBD6A2278CC3CE680`。
+
+## 第 121 轮 (2026-10-19): 实测证明布局正确（bar=56/disc=64），问题在"笔画太细、观感弱"
+
+**证据**：用户读数 `v117 700x394 aspect=1.778 / bar=56 btn=48 disc=64 compact=false / measured bar=56 disc=64`。
+⇒ 声明值与实测值一致：**布局没有缩水**，小的是"观感"——1.7vp 描边配 24–26vp 墨迹，在 56vp 条里像细线。
+
+**本轮**
+- pause 改为**实心两条**（6×26 每条），不再用 2.6 描边；
+- 全部图标描边 1.7 → **2.8**；
+- 底栏 56 → **60**，按钮格 48 → **52**，圆盘 64 → **68**（poster 仍 64，视觉等大偏大）；
+- 诊断读数版本号 `v117` → **`v121`**，便于确认装的是这版。
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,918,999 B**，SHA-256 `A376ADA8B7B32E00960042C82FC756EBFD4A74D9028A2D7973349928D594EADA`。
+
+## 第 122 轮 (2026-10-19): 栏的构成与中线审计——每个图标格都缺显式 alignContent
+
+**用户要求**：分析栏的构成、中线在哪，别再试。
+
+**栏的构成（逐层）**
+1. 外层 `Column`（100%×100%，`justifyContent(End)`，底部 10vp padding）→ 把药丸贴在画面底部；
+2. 药丸 `Row`：96% 宽 × 60vp，左右各 10vp padding，`alignItems(Center)`；
+3. 内容：5 个固定格（52×60：播放/倍速/音量/全屏/关闭）+ 时间 `Text`（宽 108）+ `Slider`（layoutWeight 1）。
+
+**中线定义**
+- 覆盖层中线 = `overlayTop + H/2`
+- 圆盘中线 = `discTop + discMeasured/2`（应等于覆盖层中线）
+- 底栏中线 = `barTop + barMeasured/2`
+- 图标格中线 = `iconTop + iconH/2`（应等于底栏中线）
+
+**发现的缺陷**：5 个图标格是 `Stack` + 固定宽高，但**没有显式 `alignContent`**。这版 ArkUI 的 `Stack` 会忽略子组件的 `.align()`，内容位置完全由 `alignContent`（显式或默认）决定——根 Stack 曾因 `alignContent: Bottom` 把圆盘压到底部，正是同一类错误。所以"图标不在中线上"不是尺寸问题，是**容器没钉死对齐**。
+
+**修复**
+- 全部 5 个图标格 + 暂停盘显式加 `.alignContent(Alignment.Center)`（6 处）；
+- 诊断读数新增第 4 行（蓝色）：`center ov=… disc=… bar=… icon=…`，直接给出三条中线；
+- 读数版本号 → **v122**。
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,920,527 B**，SHA-256 `7BD9AF3BAFB8CF134D149320BA8896D3828B46344B6D51F8C1E8A3556CE85BCC`。
+
+## 第 123 轮 (2026-10-19): 中线读数证明纵向正确；真正错的是"横向"——覆盖层被钉在裁剪帧左上角
+
+**读数**（用户截图）：`v122 … bar=60 btn=52 disc=68` / `measured bar=60 disc=68` / `center ov=375 disc=375 bar=532 icon=532`。
+⇒ **纵向中线精确相等**：圆盘在画面中线、图标在底栏中线。用户说的"位置错误"不是纵向。
+
+**横向的结构缺陷**
+- `Index` 把覆盖层 `.position({x: rect.left - clipX, ...})` 钉在**裁剪帧左上角**；
+- 裁剪帧 = 视频矩形 ∩ 内容区。笔记右侧有滚动条留白时，交集比视频矩形**窄几个 vp**；
+- 于是整个覆盖层（连同底栏）被整体**向左推**了那个差值。截图上就是左间隙 ~15px、右间隙 ~32px 的不对称。
+
+**修复**：非全屏时把覆盖层在裁剪帧内**水平居中**（`x=(clipW-宽度)/2`）；纵向仍钉住矩形，保证滚动时视频跟随笔记。
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,920,516 B**，SHA-256 `A8FC6F44216531EF800FD5C046BC7D5DCB640ADEE485C03D7BB9B45F721F4575`。
+
+## 第 124 轮 (2026-10-19): 容器中线已对齐（591 vs 590），字形偏左的真正原因是 Shape 的绘制原点
+
+**读数**：`center ov=433 disc=433 bar=590 icon=591` ⇒ 容器全部对齐（1vp 舍入差）。
+但截图里**圆盘的三角明显偏左**——容器居中而墨迹不居中，说明问题在**绘制层**。
+
+**机制**
+`Shape` 是绘制节点：路径从节点的**左上角**开始画。当它被布局得比"墨迹设计盒"更大时（例如 68vp 的圆盘里放 40 栅格的三角），墨迹就贴在左上角：
+- 三角墨迹中心在 40 栅格里是 (23.5, 20)，若 Shape 被撑到 68，视觉上就**偏左 10.5vp**；
+- 底栏图标同理：30 栅格的墨迹在 52×60 的格里，被撑大后整体偏左上。
+
+这解释了为什么"加粗、加大"都没修好位置：**盒子变大了，墨迹仍锚在左上**。
+
+**修复**
+- `glyph`/`glyphBig` 里把 `Shape` 包进**固定尺寸 Column**（30×30 / 40×40，justify/align Center），绘制盒与设计栅格一一对应，墨迹才真正居中；
+- 读数版本号 → **v124**。
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,919,507 B**，SHA-256 `DE5F00D47F6CB48F94368A2639E9489320DE908152897769A55940CA4EA7A7BF`。
+
+## 第 125 轮 (2026-10-19): 加"物理标尺"诊断——先测清 1vp 等于多少 CSS px
+
+**为什么**：读数 `center ov=471 disc=471 bar=628 icon=629` 已证明容器对齐，但截图目测仍偏小/偏左。反复出现约 0.7 的比值，说明**怀疑单位换算**（ArkUI vp ↔ 页面 CSS px），而这是靠眼睛和假设都分不清的。
+
+**做法**：诊断层在读数下方画一个 **100vp 的红色方框**。截图里用方框宽度与视频宽度（已知 700 CSS）相比，就能反推出 `100vp = ? CSS px`，一次定死单位。
+
+**判读**
+- 方框 ≈ 视频宽的 1/7 → 1vp = 1 CSS，单位没问题，剩下是墨迹/光学问题；
+- 方框明显更小 → 1vp < 1 CSS，之前所有尺寸都被"缩水"，应按比例放大控件。
+
+读数版本号 → **v125**。
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,927,106 B**，SHA-256 `048E417F6EF4B8EEF8D4142CB3DF0F0245C04451CCE1EBD447B7EC3444AAA3F3`。
+
+## 第 126 轮 (2026-10-19): 标尺给出单位比——CSS px ≠ vp，整个覆盖层一直比页面视频框小
+
+**标尺读数**：诊断层 100vp 的方框只占 700 CSS 视频宽的 **12.2%**；若 1vp=1CSS 应为 **14.3%**。
+⇒ **1 CSS ≈ 1.17 vp**（vp 比 CSS 小）。这也解释了全部症状：
+- 覆盖层一直按 CSS 数值当 vp 布局 → 整体比页面视频框**小约 15%**；
+- poster 圆盘是 64 **CSS**，原生圆盘 68 **vp ≈ 58 CSS** → 看起来更小；
+- 图标同理，全都被缩了同样的比例。
+
+**修复（单位层，不是像素层）**
+| 层 | 变更 |
+|---|---|
+| Index | 新增 `cssToVp() = dpr * px2vp(1)`（每次请求现算，mode 切换不会留旧值）；rect/region 统一 ×k |
+| Overlay | 新增 `@Prop unitScale`；`barHeight/btnSize/discSize/glyphSize/timeWidth/timeFontSize/blockSize/trackThickness` 全部 ×`u()` |
+| 字形 | 固定 30/40 绘制盒 + `.scale({x:u,y:u,centerX:'50%',centerY:'50%'})`，中心锚点显式，避免旧偏移 |
+| 读数 | 版本 → **v126** |
+
+**验证**：`hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,928,171 B**，SHA-256 `500B4D50307C77284D11884FF26AFACA20A8F0CA0BFA70AB73E2D322213560C9`。
+
+## 第 127 轮 (2026-10-19): 以代码为准复盘——R126 的乘数从未生效，字形还被百分比原点拖偏
+
+**代码级事实（不是看图推断）**
+1. `Index.ets:153` 的 `nativeCssToVp` 是**普通字段**，不是 `@State`；`unitScale: this.nativeCssToVp` 传给子组件 `@Prop`，非观察变量不参与同步，子组件可固定停在初值 `1`。R125 读数 `bar=60 disc=68`（若 k=1.17 应为 `70.14/79.56`）正是这个失效的读数。
+2. `.scale({centerX:'50%', centerY:'50%'})` 的百分比原点在 ArkUI 里按**父容器**解析 → 原点落在格子中心 (26,30)，而字形盒中心是 (15,15)，每次放大把字形往左上拖约 1.9vp / 2.5vp。
+3. 图标**墨迹本身偏心**：`ICON_PLAY` 墨迹 x=10..27.5，中心 **18.75**（格子中心 15，偏右 12.5%）；`ICON_PAUSE` 墨迹 8..24，中心 16。
+4. `controlsBottomClip` 由 `Index.ets:1048` 算出、`NativeVideoOverlay.ets:87` 声明，注释写着"transport must stay inside the visible region"，但 build 里**一次都没用**——控制条贴在未裁剪的视频矩形底部，被裁剪帧切掉多少就是"又小又不居中"。
+
+**修复（乘数来源 + 几何原点，不动任何像素常数）**
+| 层 | 变更 |
+|---|---|
+| Index | `nativeCssToVp` 改 `@State`；新增 `@State nativeCssW`（rect 的 CSS 宽度原值，两条 rect 路径都写） |
+| Overlay | 新增 `@Prop @Watch cssWidth`；`u()` 改为 `lastAreaW / cssWidth` **实测**换算，`unitCache` 为 `@State`，`unitScale` 仅作兜底 |
+| Overlay | `lastAreaW/H` 改 `@State`，尺寸/信箱帧随实测盒重算 |
+| 字形 | 原点改数值 `centerX:15/20`；`glyph` 的 `size` 参数真正生效（`size/30`） |
+| 图标 | `ICON_PLAY → M6.25 3.5 23.75 15 6.25 26.5z`（墨迹中心 15）；`ICON_PAUSE` 双杠 7..13/17..23；`ICON_PLAY_BIG` 墨迹 21×28 居中于 (20,20) |
+| 控制条 | 底部内缩 = `10u + clamp(controlsBottomClip, 0, 0.4H)`，`barBottomInset()` |
+| 读数 | 版本 → **v127**，新增 `k=/unitScale=/clip=/inset=/css=` |
+
+**验证**
+- `hvigorw assembleHap` **BUILD SUCCESSFUL in 42 s**；HAP **221,937,329 B**，SHA-256 `B0ABBC72649ED321353AF9AEEB82E6B2DA020BFEE11F052FCE998E6A6944ABB7`。
+- 内嵌 `obsidian.asar` **25,948,112 B** `2AC4D18E72ED3CE6B275D2D12905247E1AEB29C930DBD582403D2724EF3ADC97`——与本轮前一致，说明只改了 ArkTS 层，渲染层补丁未被覆盖。
+- `ets/modules.abc` 命中 `v127`、`k=`、`unitScale=`、`css=`、`inset=`、新 play/pause/big 路径；**旧的偏心灵迹路径 `M10 3.5 27.5 15 10 26.5z` / `M13 6 34 20 13 34z` 已不存在**。
+- `node --check scripts/patches/touch-mode.js` OK；`B RENDERER SMOKE OK`。
+
+## 第 128 轮 (2026-10-19): 真机读数推翻 R126——k=1.000，问题回到"声明值本身不够大"
+
+**真机读数（用户提供）**：`k=1.000`；第四排 `measured bar=60 disc=68`。
+
+**结论：R126 作废。**
+- `k=1.000` ⇒ 本机 **1 CSS px = 1 vp**，`dpr × px2vp(1)` 恒等于 1；
+- `measured == declared` ⇒ 声明值就是渲染值，没有被任何上层缩放；
+- 所以"整体小 15%"不成立。R126 的 1.17 来自**截图目测标尺**（100vp 占视频宽 12.2% vs 应 14.3%），目测误差被当成了结论——这是推断，不是实测，错误已撤回。
+- 同时确认：R127 的 `centerX/centerY = 15/20` 在 `k=1` 时是恒等变换，**不可能是"不居中"的原因**；这一点也必须承认，不能再拿它当挡箭牌。
+
+**"偏小"的唯一剩余解释**：声明值本身。用户列举的是 `暂停/声音/放大/关闭`——正好是控制条上从左到右的四个按钮（跳过速度），所以**只放大控制条**：
+
+| 项 | R127 | R128 |
+|---|---|---|
+| barHeight | 60 | **74** |
+| btnSize | 52 | **64** |
+| glyphSize / playGlyphSize | 30 | **38** |
+| timeFontSize | 13 | **15** |
+| timeWidth | 108 | **128** |
+| blockSizePx | 14 | **17** |
+| trackThickness | 3 | **4** |
+| discSize | 68 | **68（不变）** |
+
+圆盘保持 68：它与海报圆盘（64 CSS px）等大，是进入播放时不该跳变的那一个；用户的四条抱怨里没有它。
+
+**新增读数**：`glyph%=` / `disc%=`（相对播放器宽度），把"大小"变成可核对的百分比；`v128` 版本号用于区分安装包。
+
+**验证**
+- `hvigorw assembleHap` **BUILD SUCCESSFUL in 23 s 831 ms**；HAP **221,936,010 B**，SHA-256 `4386D68B116E239D967412D86D614A0D854065B643DE476B7161195162F181A8`。
+- 内嵌 `obsidian.asar` 25,948,112 B `2AC4D18E…3ADC97`，与 R126/R127 完全一致——三轮都只改 ArkTS。
+- `ets/modules.abc` 命中 `v128  `、`glyph%=`、`glyph=`、`measured bar=`、`(of player width)`；**`v127` 已不存在**。
+## 第 129 轮 (2026-10-19): "都变大了"——R128 越过了仓库里写死的验收标准；尺寸改为按宽度取比例
+
+**用户判定**：`所有的都变大了，不对，不对，不对，读代码`。
+
+**读代码（含验收标准）得到的结论**
+- `docs/B-NATIVE-OVERLAY.md` 第 32 条原本写死：**触摸端 56vp 条高 / 48vp 命中区**。R128 把条高抬到 **74**、命中区 **64**，**违反了自己仓库里的验收标准**。这是流程错误：尺寸的权威是验收表，不是我的"感觉"。
+- 但这条标准也不完整：固定 vp 对 **360vp 手机视频** = 15.6%，对 **700vp 笔记视频** = 8%——同一个数字不可能同时正确。R121 按 56 实现被说"偏小"，R128 按 74 实现被说"变大"，中间几轮在 60/52 打转，本质都是在猜一个"绝对 vp"。
+
+**修复（换模型，不是换数字）**
+| 项 | 规则（W = 播放器宽度） | @700vp |
+|---|---|---|
+| 条高 | `0.094×W` 夹 [56,76] | **65.8** |
+| 命中区 | `0.080×W` 夹 [48,64]，再受药丸宽度预算约束 | **56** |
+| 图标 | `0.046×W` 夹 [26,34] | **32.2** |
+| 圆盘 | `0.0914×W` 夹 [56,72] | **64.0（= 海报圆盘，零跳变）** |
+| 时间码字号 / 宽 | `0.019×W` / `0.137×W` | 13.3 / 95.9 |
+| 滑块钮 / 轨 | `0.019×W` / `0.0046×W` | 13.3 / 3.2 |
+
+锚点是设备上**唯一被认可过的尺寸**：海报圆盘 64 CSS px / 700px 宽 = 9.14%。圆盘因此严格回到 64；控制条仍是 96% 宽、中心轴与圆盘一致（验收 #35 不变）。
+
+**同时修掉一个真 bug（溢出）**：原来 5 个按钮是固定宽度 `52..64`，加上时间码在窄视频上会**超出药丸自身宽度**，右侧按钮被裁——看起来就是"被切掉/不居中"。现在 `btnSize` 取 `min(比例值, (药丸内容宽 − 时间码 − 边距)/5)`，并给滑块保留 40vp，任何宽度都不会溢出。
+
+**验证**
+- `hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP **221,947,187 B**，SHA-256 `BEE4B047A959922BCC36315533189295DE6543BB5BDF56430B8723E694A70BF1`。
+- `ets/modules.abc` 命中 `v129  `、`ratioOf`、`glyph%=`、`(of player width)`；`v127`/`v128` 均已不存在。
+## 第 130 轮 (2026-10-19): 把"中线"变成读数——crop / shiftX / vclip
+
+**动机**：连续三轮"不居中"都无法用读数证伪。几何结论（`disc == ov`、`icon == bar`、96% 药丸居中）已经成立，但**还剩一个未测量量**：覆盖层是被放在 `rect` 上，还是被放在 `rect ∩ 内容区` 上。若右侧有滚动条/侧栏把视频裁掉，`Index` 会把覆盖层左移 `|crop|/2` 以让控件留在可见中线——代价是**画面相对页面海报位移**。这就是"中线"最后一个可测的偏差来源。
+
+**改动**
+| 项 | 变更 |
+|---|---|
+| Overlay | 新增 `@Prop clipW`；读数新增 `crop=clipW-boxW`、`shiftX=crop/2`、`vclip=controlsBottomClip` |
+| Index | 传 `clipW: nativeFullscreen ? 0 : nativeClipW()` |
+| 读数 | 版本 → **v130** |
+
+**判定规则（下次读数）**
+- `crop=0 shiftX=0` ⇒ 视频盒完整可见，覆盖层零位移，中线由数字关闭，问题只能在观感层。
+- `crop<0` ⇒ 内容区裁了视频，画面相对海报左移 `|crop|/2`；此时需要决定优先级：画面跟页面（`x=rect.left`）还是控件跟可见区（当前实现）。
+
+**验证**
+- `hvigorw assembleHap` **BUILD SUCCESSFUL in 22 s 437 ms**；HAP **221,944,299 B**，SHA-256 `52D2EABE5A9567180FF9E439C1FA88A2A0E5D5FBFFA4AAE7E5EE1E9132FDDE62`。
+- `ets/modules.abc` 命中 `v130  `、`crop=`、`shiftX=`、`vclip=`、`ratioOf`、`glyph%=`；`v129` 已不存在。
+- 内嵌 `obsidian.asar` 仍为 `2AC4D18E…3ADC97`（四轮未变）。
+## 第 131 轮 (2026-10-19): 改用系统 Video 组件——控制条不再手写
+
+**触发**：R130 读数 `crop=0 shiftX=0 vclip=0`、`measured bar=66 disc=64`，几何与声明完全一致，手写控件已无"可修的数学问题"；用户提出"华为有写好的整套视频控件吗"。
+
+**答案：有 —— ArkUI 内置 `Video` 组件**。SDK 声明（本地 `sdk/default/openharmony/ets/component/video.d.ts`）确认：
+- `controls(value: boolean)` 默认 true（播放/暂停、可拖进度、时间、全屏）
+- `autoPlay` / `objectFit` / `loop` / `muted`
+- `VideoController`：`start/pause/stop/setCurrentTime/requestFullscreen/exitFullscreen/reset`
+- `onStart / onPause / onFinish / onPrepared / onUpdate / onSeeking / onSeeked / onError / onStop / onFullscreenChange(Callback<FullscreenInfo>)`
+- 解码走系统媒体栈（内部 AVPlayer 同一核心），**HEVC 由系统解**，不经过 Chromium——正是 B 路线要解决的根问题
+
+**实现（可回退）**
+| 项 | 变更 |
+|---|---|
+| Overlay | 顶部新增 `const SYSTEM_VIDEO: boolean = true`；`build()` 分派到 `systemVideo()` 或 `legacyVideo()`（原 1500 行整体保留，仅改名为 builder） |
+| 系统路径 | `Video({src, controller, currentProgressRate:1}).controls(true).autoPlay(true).objectFit(ImageFit.Contain)` |
+| 源 | 笔记文件不在沙箱 → `fileUri.getUriFromPath()` 转 URI，失败则回退原路径 |
+| 保留 | 自绘关闭按钮（系统控制条无"关闭"），复用 30 单位字形，44vp 命中区，右上角 |
+| 全屏 | `onFullscreenChange` → `applySystemBars`（状态栏隐藏/恢复逻辑不变） |
+| 渲染层 | 海报 / 入口 / rect 跟随 / 裁剪帧 / IPC / ack 全部不动 |
+
+**损失（明示）**：倍速菜单与长按加速、控制条样式跟随 Obsidian 主题（改为系统样式）、调试读数（仅在手写路径）。
+
+**验证**
+- `hvigorw assembleHap` **BUILD SUCCESSFUL in 22 s 950 ms**；HAP **221,957,701 B**，SHA-256 `C109321F48187A77A69AAA04E50982A5AACC4863859422DAF25DE4EF75973A5B`。
+- `ets/modules.abc` 命中 `system prepared duration=`、`getUriFromPath failed`、`系统播放器无法播放该文件`、`关闭播放器`；同时 `v130`/`ratioOf` 仍在（手写路径未删除，可一行切回）。
+- 内嵌 `obsidian.asar` `2AC4D18E…3ADC97` 六轮未变。
+
+**真机待验证**：HEVC 能否直接起播；系统控制条出现且贴视频盒底部；全屏按钮与返回；右上关闭按钮；同页换视频（`src` 变更是否重建，验收 #25）。
+## 第 132 轮 (2026-10-19): 用户一句话点破根因——`Stack.alignContent` 不放置单个子组件；同时上线"玻璃"皮肤
+
+**用户观察**：关闭按钮的 `X` 落在圆圈的**左上四分之一**。
+
+**根因（一条，解释全部历史症状）**：该 ArkUI 构建上 **`Stack` 的对齐不作用于子组件**——无论构造参数 `Stack({alignContent: Alignment.TopEnd})` 还是属性 `.alignContent(Alignment.Center)`：
+- `systemVideo` 里的关闭按钮本该在右上角，实际渲染在 **Stack 中心**，正好落在系统暂停态大播放圆盘的左上四分之一（用户看到的现象）；
+- 更早的根 Stack 用 `Bottom` 把所有子组件压到底部，是同一失败的另一面；
+- **控制条 5 个按钮格、圆盘内层、2× 徽标全都用 `Stack+alignContent` 居中 → 字形一直贴在格子左上角**。这就是二十轮"不居中"的真因，也解释了"图标偏小"（字形被挤在角落，视觉占比更小）和"圆盘偏高"。读数查不出来，因为 `onAreaChange` 量的是**格子**的中心，格子确实是对的。
+
+**修复规则（写死）**：**任何居中/定位只用容器属性**——`Column` 的 `justifyContent + alignItems`、`Row` 的 `justifyContent + alignItems`、`Stack` 的构造参数一律不再用于放置子组件。
+- 控制条 5 个格子、圆盘内层、关闭按钮：`Stack+alignContent` → `Column+justifyContent(Center)+alignItems(Center)`；
+- 关闭按钮：`Stack(TopEnd)` + margin → **全屏 `Column`(Start/End) + padding** 定位；
+- 2× 徽标：`Stack(TopEnd)` → `Column(Start/End)`。
+
+**同时上线 R132「玻璃」皮肤（`NativeVideoPro.ets`）**：解码仍用系统 `Video`（`controls(false)`，HEVC 由系统解），视觉自绘：
+磨砂胶囊 `backgroundBlurStyle(BlurStyle.Thick)`、居中紧凑药丸（86% 宽、54 高、圆角 27）、投影 + 1px 高光描边、顶部渐隐遮罩、暂停态 64vp 玻璃圆盘、显示/隐藏淡入上移 180ms、滑杆 3vp 轨 + 14vp 白色滑钮。
+`NativeVideoOverlay` 顶部三档开关：`PRO_UI`（默认 true）/ `SYSTEM_VIDEO` / 手写 AVPlayer 路径，全部保留可回退。
+
+**验证**
+- `hvigorw assembleHap` **BUILD SUCCESSFUL in 23 s 178 ms**；HAP **222,018,194 B**，SHA-256 `D876B39E812893EC871297871F87DE3C9735450FF61772AFDF34704557BBEA6F`。
+- `ets/modules.abc` 命中 `NativeVideoPro`(x6)、`播放/暂停`、`无法播放该视频`、`取消静音`、`系统播放器无法播放该文件`、`关闭播放器`。
+- 内嵌 `obsidian.asar` `2AC4D18E…3ADC97` 七轮未变。
+
+**真机待验证**：HEVC 起播；胶囊是否居中且磨砂可见；关闭按钮是否在**右上角**；圆盘播放三角是否在圆心；拖进度条 seek；全屏。
+## 第 133 轮 (2026-10-19): 系统 `Video` 打不开仓库文件——解码回到 AVPlayer，玻璃皮肤搬过去
+
+**真机日志（用户提供）**
+```
+AceVideo: Cannot find base path of storage/Users/currentUser/Documents/q/hevc 1.mp4
+AceVideo: GetFileInfo failed, fileName=
+AceVideo: Video media player set media source failed.
+NativeVideoPro --> video onError
+```
+⇒ **系统 `Video` 组件的 `src` 只接受应用沙箱内 `file://<bundleName>/<sandboxPath>` 与网络 URL，不接受仓库绝对路径**（`fileUri.getUriFromPath()` 产物被当成相对沙箱路径解析，报 "Cannot find base path"）。R131/R132 的黑屏就是这个原因，不是皮肤问题。
+
+**结论**：能读仓库的只有 **`fileIo` 打开 fd → `AVPlayer.fdSrc`**（R108 起一直可用）。所以解码留在这条路，皮肤搬到这条路上。
+
+**本轮改动**
+| 项 | 变更 |
+|---|---|
+| 开关 | `PRO_UI = false`、`SYSTEM_VIDEO = false` → 走 AVPlayer（可播放路径） |
+| 玻璃胶囊 | 宽度 96%→**86%**（`maxWidth 620`）、`backgroundBlurStyle(BlurStyle.Thick)`、`#3D000000` + `#26FFFFFF` 1px 高光描边、`shadow(20, 4D000000)`、`borderRadius = barHeight/2` |
+| 圆盘 | `#4D000000` + `BlurStyle.Thin` + 1px 描边 + `shadow(18)` |
+| 图标 | 描边 2.8→**2.2**（玻璃上更利落） |
+| 居中 | R132 的 `Stack.alignContent` → `Column` 修复全部保留（5 个按钮格、圆盘内层、2× 徽标） |
+| 取证 | `aboutToAppear` 打印 `transport=pro|system|avplayer v133`——三个分支都会被编译，只有这行日志能证明真机跑的是哪条 |
+
+**验证**
+- `hvigorw assembleHap` **BUILD SUCCESSFUL in 25 s 6 ms**；HAP **222,017,852 B**，SHA-256 `7D8C4909A703BF74921CE94D388FFF05A06111C6A5F0230847726C797967757B`。
+- `ets/modules.abc` 命中 `transport=`、`v133  `；内嵌 `obsidian.asar` `2AC4D18E…3ADC97` 未变。
+
+**真机待验证**：日志出现 `transport=avplayer v133`；HEVC 起播；胶囊居中且磨砂可见；关闭按钮在右上角；圆盘三角在圆心。
+## 第 134 轮 (2026-10-19): 固定尺寸容器不对齐——字形改成"全屏容器 + 内层固定盒"
+
+**用户观察**：所有控件都落在"正方形四等分后左上那一格的中间"。
+
+**判读**：子组件中心落在容器的 **25%** 处，是"子组件被钉在容器左上角、且只有容器一半大小"的精确指纹（30 盒塞进 56/64 格 → 15/56 ≈ 27%）。结合 R132 的关闭按钮现象，结论收紧为：
+- `Stack.alignContent` 不放置子组件（R131/R132 已证）；
+- **固定尺寸（如 44/56/64）的 `Column` 也不执行 `justifyContent/alignItems`**——否则不会出现 25%。
+- 而 **`100%×100%` 的 `Column` 是有效的**：暂停圆盘一直靠它居中，读数 `disc == ov` 是硬证据。
+
+**修复（只依赖被证明有效的形态）**
+`glyph` / `glyphBig` 改为两层结构：
+```
+Column() {                       // 外层：100% x 100%（撑满格子），负责居中
+  Column() { Shape() {...} }     // 内层：30/40 固定盒，负责尺寸与 scale
+    .width(30).height(30)
+    .scale({centerX:15, centerY:15})
+}
+.width('100%').height('100%')
+.justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
+```
+外层撑满格子 → 不存在"放在左上角"的余地；内层由**全屏容器**居中 → 用的是被验证过的那条路。同时读数字形尺寸不变。
+
+**验证**
+- `hvigorw assembleHap` **BUILD SUCCESSFUL in 22 s 434 ms**；HAP **222,025,037 B**，SHA-256 `B2C6726F585EBF9043326C95514EE9E68F0A363F409CE62851C7431A9BD29D44`。
+- `ets/modules.abc` 命中 `v134  `、`transport=`；`v133` 已不存在；`obsidian.asar` `2AC4D18E…3ADC97` 未变。
+
+**真机待验证**：日志 `transport=avplayer v134`；圆盘三角在圆心；五个按钮图标在各自格子中心；关闭按钮在右上角。
+## 第 135 轮 (2026-10-19): 撤回臆断——按文档复核布局语义，改为"测量优先"
+
+**用户指出**：我在猜接口，没有查文档。属实。
+
+**查文档后的更正（`sdk/default/openharmony/ets/component/*.d.ts` 的 doc 注释）**
+| 我之前的说法 | 文档原文 | 结论 |
+|---|---|---|
+| `Stack.alignContent` 不放置子组件 | "Sets the alignment of child components in the container"；默认 `Alignment.Center`；**属性优先于构造参数** | **错** |
+| 固定尺寸 `Column` 不执行 `justifyContent/alignItems` | `alignItems` 默认即 `HorizontalAlign.Center`；`justifyContent` 为标准纵向对齐 | **错** |
+| `.scale()` 的 `centerX` 有百分比歧义 | 默认 `centerX/centerY: '50%'`，数字按 **vp** 解释 | **错** |
+
+⇒ R134 的"全屏外层 + 内层固定盒"建立在错误前提上，**已撤回**；`glyph`/`glyphBig` 回到文档支持的简单形态（固定 30/40 盒 + `Column` 居中 + `scale`）。
+
+**改为测量优先**：读数新增 `playCell=(x,y,w×h)`、`disc=(x,y,w)`，`onAreaChange` 直接量**实际盒子**；版本 → **v135**。
+
+**判定矩阵（下一次读数）**
+- `playCell` 宽高 ≠ 56×66 → 尺寸链路错（`btnSize/barHeight` 或父级缩放）；
+- `playCell` 的 x/y 不在控制条内 → `Row`/药丸定位错；
+- `playCell` = 56×66 且位置正确，但图标偏在格子左上 → 问题在字形自身（`Shape`/`Path`/`scale`），与容器无关。
+
+**验证**：`BUILD SUCCESSFUL in 24 s 562 ms`；HAP **222,029,657 B**，SHA-256 `EB6F7873533D7D91E4E3D352ECA2EF42752940E41FE5F85DE6C4B9E31638AF9C`。
+## 第 136 轮 (2026-10-19): 恢复"小矩形+圆角"美学；三层盒子全部描边（盒审计）
+
+**用户要求**：① 恢复原来的小矩形+圆角外观；② 把每个控件的大小用方框框起来，直接看有没有居中。
+
+**改动**
+| 层 | 颜色 | 说明 |
+|---|---|---|
+| 药丸本体 | 白 `#FFFFFF` | 恢复 `theme.bar` 实底 + 10 圆角，去掉磨砂/投影；仍是 86% 宽（上限 620） |
+| 按钮格 | 红 `#FF5F5F` | 5 个格子各 1px，露出命中区实际尺寸 |
+| 字形绘制盒 | 青 `#5FD0FF` | 30/40 单位盒子，随 `scale` 一起描边 → 描的是**实际绘制范围** |
+| 圆盘 | 青 `#5FD0FF` | 恢复 `#6b000000` 实底 |
+
+三级颜色对应三个问题：**白框错** → 药丸定位/宽度；**红框内图标不居中** → 格子对齐；**青框内墨迹不居中** → 路径本身。
+
+版本 → **v136**；读数保留 `playCell=(x,y,w×h)` / `disc=(x,y,w)`。
+
+**验证**：`BUILD SUCCESSFUL in 22 s 276 ms`；HAP **222,022,211 B**，SHA-256 `82DCA1AFFC310ED617A0B35FA4174BBF59E8BB5965AD4B01EEB92184D83E8893`；`ets/modules.abc` 命中 `v136  `、`playCell=`；`obsidian.asar` 未变。
+## 第 137 轮 (2026-10-19): 量到根因——`Path.commands` 坐标单位是 px，不是 vp
+
+**截图实测（R136 三级描边 + Python 像素测量）**
+| 图标 | 墨迹中心 | 盒子中心 | 偏移 |
+|---|---|---|---|
+| play/replay | (694,1380) | (712,1396) | (-8.7vp, -7.9vp) |
+| volume | (1548,1380) | (1565,1396) | (-8.2vp, -7.9vp) |
+| fullscreen | (1662,1380) | (1679,1396) | (-8.4vp, -7.9vp) |
+| close | (1776,1380) | (1792,1396) | (-8.2vp, -7.9vp) |
+
+同时墨迹只有 **24~26 px = 12~13 vp**，而路径写了 26 个单位 ⇒ **正好一半**（设备 1vp = 2px）。
+
+**结论**：`Path.commands` 的坐标按 **px** 解释。30 单位网格在这台 2× 屏上只画出 15vp，且锚在盒子左上角——**墨迹中心落在盒子的 21% 处，就是"左上那一格中间"**。二十轮的"偏小 + 不居中"是同一根因。
+
+**修复**：不再用 `.scale()`，改为**数值缩放路径坐标** `k = vp2px(1) × size / 30`（`scalePath()`，圆弧的 rotate/flags 不缩放；描边宽度同样 ×`vp2px(1)`）。线性缩放保持墨迹中心在盒子中心（网格本就以 15,15 / 20,20 为中心）。`glyph`/`glyphBig` 的盒子尺寸改为 `size` / `40u`，`Shape` 同步。
+
+**离线验证（含圆弧极值的 bbox 计算）**
+```
+OK play/pause/replay/volume/mute/maximize/minimize/close/playBig/replayBig
+ALL INK CENTRED  最大偏差 1.1px（0.5vp），墨迹 55.8px = 27.9vp（盒子 32.2vp）
+```
+（第一版测试对 `replay`/`volume` 报 BAD，是测试只取弧端点、没算弧凸出部分——修正测试后全部通过，不是图标本身偏。）
+
+**验证**：`BUILD SUCCESSFUL in 23 s 719 ms`；HAP **222,032,617 B**，SHA-256 `9AE25C453170FC2D71D8450D286F142169BE01F9107CB1F61AE49C2717FA647E`；`ets/modules.abc` 命中 `v137  `、`scalePath`；`v136` 已不存在。
+## 第 138 轮 (2026-10-19): 观感收口——笔画变细、药丸缩小、撤掉诊断描边
+
+**反馈**：`现在没问题了，就是太粗了，然后这个长方形有点大，稍微小一些，精致一些`。
+
+| 项 | R137 | R138 |
+|---|---|---|
+| 图标描边 | 2.2 | **1.7** |
+| 条高 | `0.094W`→65.8 | **`0.078W`→54.6**（夹 [48,64]） |
+| 命中区 | `0.080W`→56 | **`0.068W`→47.6**（夹 [40,56]） |
+| 图标 | `0.046W`→32.2 | **`0.038W`→26.6**（夹 [22,30]） |
+| 时间码 | 13.3 / 95.9 | **11.2 / 80.5** |
+| 滑块钮 / 轨 | 13.3 / 3.2 | **10.5 / 2.6** |
+| 圆盘 | 64 | 64（不变，与海报同尺寸） |
+| 圆角 | 10 | **12** |
+| 描边盒 | 白/红/青 | **全部移除** |
+
+**验证**：`BUILD SUCCESSFUL in 22 s 767 ms`；HAP **222,033,320 B**，SHA-256 `0A79CDE614EEF210FB9B22B297B258D0CABC03F66AABFC5DB15E27CEB6F0FCC4`；字节码命中 `v138  `、`scalePath`；`v137` 已不存在；`obsidian.asar` 未变。
+## 第 139 轮 (2026-10-19): 描边降到 1；长按面板升级为"媒体彩蛋"（真读 MP4 容器）
+
+**反馈**：`还是太粗了…缩小到1试试`；`长按时间的做成彩蛋…加上视频的参数（像素、帧率、音频质量）`。
+
+**改动**
+| 项 | 变更 |
+|---|---|
+| 图标描边 | 1.7 → **1**（`strokeWidth` 仍 ×`vp2px(1)`，因为描边也是 px） |
+| 彩蛋 | 长按时间码。面板改为左上角深色卡片：色板 `#E6141414`、圆角 10、1px `#26FFFFFF` 描边 |
+| 内容 | 保留：编码/分辨率、帧率、音轨、时长、文件大小、平均码率、画面尺寸、`k`、版本；**删掉**：`playCell/disc/crop/shiftX/measured/center` 与 100vp 标尺 |
+| 参数来源 | **真实解析 MP4 容器**（`probeMedia()`），不是猜 |
+
+**容器解析（`probeMedia` / `probeTrack`）**
+- 顶层盒用 16 字节 seek 遍历（`size/type`，支持 64-bit size 与 `size=0`），**只读 `moov`**，4GB 片子也只需几百字节 I/O；
+- `trak → mdia/minf/stbl`：`hdlr` 判 `vide`/`soun`；
+- `stsd`：视频取 sample entry 四字码（`hvc1/hev1/avc1/avc3`）与 **宽高**（entry+32/+34）；音频取 `mp4a` 的**声道数**（+24）与**采样率**（+32，16.16 定点）；
+- `mdhd`：媒体 timescale（v0 @+12 / v1 @+20）；
+- `stts`：首条 `sample_count/sample_delta` → **帧率 = timescale / delta**；
+- 文件大小 / 平均码率：`文件字节 × 8 / 时长`。
+
+**离线验证（Node 移植同一套解析，跑本地样片）**
+```
+avc.mp4              avc1 1280x720 30.00fps  | no audio | 0.92 MB
+hevc.mp4             hev1 1280x720 30.00fps  | no audio | 1.01 MB
+hevc_10bit_1080p.mp4 hvc1 1920x1080 24.00fps | no audio | 1.28 MB
+hevc_10bit_720p.mp4  hvc1 1280x720  24.00fps | no audio | 0.60 MB
+hevc_8bit_1080p.mp4  hvc1 1920x1080 24.00fps | no audio | 1.26 MB
+```
+分辨率/帧率/编码全部正确；`*-probe.mp4` 是 25 字节的合成文件，正确报 `no moov`。
+**未验证**：带音轨的样片本地没有，`mp4a` 分支按 ISO BMFF 布局实现，面板在有音轨时会显示 `AAC · 48.0 kHz · 立体声`。
+
+**验证**：`BUILD SUCCESSFUL in 26 s 247 ms`；HAP **222,779,564 B**，SHA-256 `EA5F57628D5B12169A48E33ABADFC5DB541472375250B0EE3159291671ABB554`；字节码命中 `v139`、`probeMedia`、`无音轨`、`fps`、`Mbps`；`obsidian.asar` 未变。
+## 第 140 轮 (2026-10-19): 时间码字号与药丸厚度再收一档
+
+| 项 | R139 | R140 |
+|---|---|---|
+| 条高 | `0.078W`→54.6 | **`0.066W`→46.2**（夹 [42,56]） |
+| 时间码字号 | `0.016W`→11.2 | **`0.014W`→9.8**（夹 [9,12]） |
+| 时间码宽度 | `0.115W`→80.5 | **`0.098W`→68.6**（夹 [62,96]） |
+| 图标 | `0.038W`→26.6 | **`0.032W`→22.4**（夹 [19,27]） |
+| 滑块钮 / 轨 | 10.5 / 2.6 | **8.4 / 2.1** |
+| 命中区宽度 | 47.6 | 47.6（不变，只收纵向） |
+| 圆盘 | 64 | 64（不变） |
+
+@700vp：药丸 46.2 高、格子 47.6×46.2、图标 22.4、时间码 9.8。行内固定宽度合计 314.6，滑块仍有 275vp。
+
+**验证**：`BUILD SUCCESSFUL in 31 s 42 ms`；HAP **222,054,509 B**，SHA-256 `F487AB8645239139E708789D59C133DF92F2593D1949BFF45A420F43F4E5F92E`；字节码命中 `v140`、`probeMedia`，`v139` 已不存在；`obsidian.asar` 25,948,112 B `2AC4D18E…3ADC97` 未变。
+## 第 141 轮 (2026-10-19): 右侧三键单独收小 + 复盘
+
+**改动**：`音量 / 全屏 / 关闭` 三个次级按钮单独一档尺寸（`glyphSizeRight` / `btnSizeRight`），与 `播放/暂停` 形成主次层级。
+@700vp：图标 **22.4 → 18.6**，格宽 **47.6 → 42**；播放/暂停仍是 22.4 / 47.6。
+
+**验证**：`BUILD SUCCESSFUL in 20 s 745 ms`；HAP **222,053,909 B**，SHA-256 `1E5C90A73A6638F475F74CA3EB71FF2257DEDFCF13008EEA839DE463903B7C42`；字节码命中 `v141`、`glyphSizeRight`，`v140` 已不存在。
+
+## 复盘：为什么走了这么多弯路（R108 → R141）
+
+**一句话**：一个"路径坐标单位是 px 不是 vp"的底层事实，被我当成"图标偏小 + 不居中"两个上层现象，追了三十多轮。
+
+**根因链（按因果，不按时间）**
+1. **没有观测通道却用推测代替测量**。设备没有 hdc，我用"看截图猜数字"替代"造一个可测信号"。真正的转折点是用户建议"把每个控件用方框框起来"——一旦有了彩色边框，Python 量一次像素就定位了。**我应该在 R110 就自己做这件事。**
+2. **从未验证最底层假设**。整套 UI 都画在 `Path.commands` 上，三十多轮里我一次都没验证过它的单位。单位错一半，上层所有现象（偏小、偏左上、不居中）都成立，于是我在上层反复"修"。
+3. **把"一半"当成"小"**。半尺寸 + 固定比例偏移（8.2/7.9vp ≈ (30−13)/2）是**单位失配的指纹**；我却把它拆成"偏小"和"不居中"两个问题分别追。
+4. **凭现象反推 API 语义**。`Stack.alignContent 不生效`、`固定尺寸 Column 不对齐` 两个结论都不符合 SDK 文档，各消耗一轮（R132/R134），后来被 R135 的文档核对推翻。
+5. **换技术栈前没查硬约束**。切系统 `Video` 组件前没确认它的 `src` 只接受沙箱路径，R131/R132 两轮黑屏。
+6. **每轮都在"交付"而不是"证伪"**。R126 从截图目测标尺得出"1 CSS≈1.17vp"，没有写成可证伪的假设就当成事实往下传，污染了 R127–R130 四轮。
+7. **沉没成本**。越调越觉得"再大/再小一点就行"，而没有回到第一性问题：**坐标单位是什么？**
+
+**代价**：R108→R141，其中约 **10 轮**（R126–R130、R131–R135）直接由上述错误导致；真 bug 的修复本身只有一个概念 + 约 60 行解析/缩放代码。
+
+**可复用 SOP（写进流程，不再靠记性）**
+1. 位置/尺寸问题 → **先加可见边界 + 数值读数，再动代码**；
+2. 坐标类 API → 第一轮就做**单位验证**（已知长度标尺 × 已知尺寸，用比值判定，不靠目测）；
+3. 出现**成比例偏差**（1/2、25%、1.17×）→ 先怀疑单位，再怀疑布局；
+4. 每个结论必须**可证伪**：写清"若 X 则 A，否则 B"，并让读数直接给出判别值；
+5. 换方案前先查**硬约束**（能力/权限/路径/单位），5 分钟文档 > 2 轮构建；
+6. 验收只认**可测量的一致性**，不认"看起来对了"。
+## 第 142 轮 (2026-10-19): 彩蛋增加色彩深度/色度采样（读 hvcC，不靠猜）
+
+**回答**：能。但**不能从 sample entry 的 `depth` 字段拿**——HEVC 即使 10bit，VisualSampleEntry.depth 也是 `0x18`。真实值在 **`hvcC` 的 profile_tier_level** 里：
+```
+hvcC payload: [1]=profile_idc(低5位) [12]=level_idc [16]=chroma_format(低2位)
+              [17]=bit_depth_luma_minus8 [18]=bit_depth_chroma_minus8
+```
+实现：在视频 sample entry 内遍历子盒找到 `hvcC`（从 entry+86 开始走 `size/type`），取上述字节；`depth = (b[17] & 7) + 8`；`chroma` 映射到 `4:0:0 / 4:2:0 / 4:2:2 / 4:4:4`；`profile_idc` 映射 `Main / Main10 / Main Still / RExt`。
+
+**面板现在长这样**
+```
+HEVC Main10 · 1920×1080
+10-bit 4:2:0 · 24.00 fps
+AAC · 48.0 kHz · 立体声
+00:10 · 1.3 MB · 平均 1.0 Mbps
+────────────────
+画面 700×394 · k=1.000 · v142
+```
+
+**离线验证（本地样片，Node 移植同一解析）**
+```
+hevc_8bit_1080p.mp4   hvc1 Main   L4.0 1920x1080  8-bit 4:2:0 24.00fps
+hevc_10bit_1080p.mp4  hvc1 Main10 L4.0 1920x1080 10-bit 4:2:0 24.00fps
+hevc_10bit_720p.mp4   hvc1 Main10 L3.1 1280x720  10-bit 4:2:0 24.00fps
+hevc.mp4              hev1 Main   L3.1 1280x720   8-bit 4:2:0 30.00fps
+```
+hvcC 头字节也对得上：8bit `01 01 60 … f8 f8`、10bit `01 02 20 … fa fa`（`&7` = 0 / 2）。
+AVC 无 `hvcC` → 面板不显示深度行（`depthLabel()` 返回空），符合预期。
+
+**验证**：`BUILD SUCCESSFUL in 19 s 470 ms`；HAP **222,057,282 B**，SHA-256 `66CE7CD5BA12A71C74DBA4B721D2C069ACD942F6751DE16FEC525AEA322B89D4`；字节码命中 `v142`、`Main10`、`-bit `、`hvcC`，`v141` 已不存在；`obsidian.asar` 未变。
+## 第 143 轮 (2026-10-19): 控件再收一档（右侧贴近文字重量）+ 彩蛋补 HDR/VFR/视频码率
+
+**尺寸（@700vp）**
+| 项 | R142 | R143 |
+|---|---|---|
+| 播放/暂停 图标 | 22.4 | **18.9** |
+| 右侧三键 图标 | 18.6 | **14.0** |
+| 右侧三键 格宽 | 42 | **36** |
+| 播放键 格宽 | 47.6 | **44.1** |
+| 时间码/倍速 字号 | 9.8 | 9.8（不变） |
+
+右侧三键现在与倍速文字的视觉重量接近（图标 14 vs 文字 9.8），不再是"突兀的大图标"。
+
+**彩蛋新增（全部真读容器）**
+| 项 | 来源 | 说明 |
+|---|---|---|
+| 色彩深度 / 色度 | `hvcC` +17/+18/+16 | R142 已验证 8/10-bit |
+| **HDR / 色彩空间** | `colr`(nclx) primaries+transfer | 16=HDR10(PQ)、18=HLG、9=BT.2020、1=SDR |
+| **VFR 标记** | `stts` 条目数 > 1 | 可变帧率提示 |
+| **视频码率** | `btrt` avg→峰值回退 | avg 为 0 的编码器占多数，故显示"峰值"并标注 |
+
+**离线验证**
+```
+hevc_8bit_1080p.mp4   hvc1 1920x1080 8-bit  24fps  btrt max=5.26Mbps avg=0.00
+hevc_10bit_1080p.mp4  hvc1 1920x1080 10-bit 24fps  btrt max=5.34Mbps avg=0.00
+hevc_10bit_720p.mp4   hvc1 1280x720  10-bit 24fps  btrt max=2.49Mbps avg=0.00
+```
+`btrt` 偏移（buffer/max/avg = +0/+4/+8）验证正确；样片 **avg 写 0**，因此实现里做了"avg>0 显示视频码率，否则显示峰值"的分档，不拿峰值冒充平均。
+**未验证**：本地 5 个样片**都没有 `colr` 盒**（子盒为 `hvcC,fiel,pasp,btrt`），HDR 分支按 ISO/IEC 14496-12 布局实现，只有在存在 `colr` 时才会显示，否则该段自动省略。
+
+**用户视角的"还想要什么"清单**（按解释力排序，供后续取舍）
+HDR/色彩空间（已做）→ 旋转（`tkhd` 矩阵）→ 视频/音频码率拆分（部分已做）→ 关键帧间隔/GOP（`stss`）→ 音轨语言/多音轨 → 解码器名与首帧耗时（运行时）→ 缓冲区/丢帧（系统不暴露）。
+
+**验证**：`BUILD SUCCESSFUL in 20 s 81 ms`；HAP **222,063,231 B**，SHA-256 `2117F81B035CEA7D2A26A43B4D8EF1ECD42C25AFFE30519D2EF3C839E0D90723`；字节码命中 `v143`、`btrt`、`视频峰值`、`HDR10`、`HLG`、`VFR`；`obsidian.asar` 未变。
+## 第 144 轮 (2026-10-19): 描边单位修正——"1"终于是网格上的 1 单位
+
+**用户**：`感觉这个控件还是粗`。
+
+**根因**（和 R137 同一类错误，这次错在描边）：路径坐标按 `pathScaleFor(size,30)=vp2px(1)×size/30` 缩放，但描边写的是 `stroke × vp2px(1)`——两者不同源。在 18.9vp 的图标上：
+- 坐标缩放系数 k = 2 × 18.9/30 = **1.26 px/单位**
+- 描边却是 1 × 2 = **2 px** ⇒ 相当于 **1.6 个单位**，凭空粗 60%
+
+所以"调到 1 还觉得粗"是必然的：它从来不是 1。
+
+**修复**
+| 位置 | 之前 | 现在 |
+|---|---|---|
+| 控制条图标描边 | `1 × vp2px(1)` = 2.0 px | `1 × pathScaleFor(size,30)` = **1.26 px**（−37%） |
+| 圆盘重播图标 | `2.2 × vp2px(1)` = 4.4 px | `1.4 × pathScaleFor(40u,40)` = **2.8 px**（−36%） |
+
+换算到相对粗细：控制条描边 = 图标宽度的 **3.3%**（Material 是 8.3%），属于"细但不虚"的档。
+
+**验证**：`BUILD SUCCESSFUL in 19 s 343 ms`；HAP **222,063,091 B**，SHA-256 `39FC9739214B142CCFCA54E7A1E611158849B1189305B39443F87B8A20EB53CF`；字节码命中 `v144`，`v143` 已不存在；`obsidian.asar` 未变。
+
+**若还觉得粗**：描边参数现在是"网格单位"，1.0 → 0.8 即为再细 20%，一行可调；不需要再改缩放链路。
+## 第 145 轮 (2026-10-20): 手势职责收干净——双击只 seek，长按加速回到画面
+
+**用户问**：`双击到底是放大还是加10s减10s，长按加速也没了`。
+
+**代码事实（改前）**
+- `onDoubleTap`：**中间三分之一 → 全屏**，左右两侧 → ±10s。一个手势两个职责，所以"到底是哪个"没有答案；
+- 长按加速绑在**倍速小格子**上，而同一个格子还挂着 `.bindMenu`（点按出菜单）——两者抢同一个手势，实际几乎按不出来。
+
+**改法（对齐行业惯例）**
+| 手势 | 改前 | 改后 |
+|---|---|---|
+| 双击 | 中间全屏 / 两侧 ±10s | **左半 −10s，右半 +10s**（只有这一个语义） |
+| 长按画面 | 无 | **临时 2×，松手恢复到菜单里选的倍速**（450ms） |
+| 长按倍速格 | 与 bindMenu 冲突 | 移除；点按仍出倍速菜单 |
+| 全屏 | 双击中间 | 只走全屏按钮 |
+
+手势组是 `GestureGroup(Exclusive)`：拖动 8vp 先满足 Pan → 赢；按住 450ms 不动 → LongPress 赢；更短就抬手 → Tap 赢。三者互斥，不会互相吞掉。
+
+**验证**：`BUILD SUCCESSFUL in 25 s 615 ms`；HAP **222,063,356 B**，SHA-256 `0CD1C7ECADDE3031728C0D29D686E1350E87B85E21BDE1DA25E70909C13BE02A`；字节码命中 `v145`、`画面长按可临时加速`，`v144` 已不存在；`obsidian.asar` 未变。
+
+**注意**：长按加速只在**播放中**生效（暂停时无可加速），这是 `beginBoost` 里 `if (!this.playing) return` 的既定行为。
+## 第 146 轮 (2026-10-20): 全局倍速 + 接入 Obsidian 语义令牌（去硬编码色）
+
+**一、全局加速**
+倍速是**用户偏好**，不是单视频状态：`filesDir/ohsidian-native-speed.json` 持久化，`loadSpeed()` 在 `aboutToAppear` 读取，`setPlaybackSpeed()` 写入，`prepared` 状态每次（含 resize 重建 surface 后）重新 `applyPlaybackRate(this.speed)`。长按临时 2× **不写文件**，松手回到这个全局值——所以"全局加速"与"长按加速"不打架。
+
+**二、颜色与圆角：全部改为语义令牌**
+
+链路本来就是通的（`scripts/patches/touch-mode.js` 里 `ohsidianNativeTheme()` 已经把 CSS 变量转成 ARGB 送给 ArkTS）：
+
+| 令牌 | Obsidian 变量 |
+|---|---|
+| bg | `--background-secondary` |
+| panel | `--background-primary-alt` |
+| bar | `--background-secondary` @92% |
+| interactive | `--interactive-normal` |
+| accent | `--interactive-accent` |
+| onAccent | `--text-on-accent` |
+| text / muted / faint | `--text-normal` / `--text-muted` / `--text-faint` |
+| border | `--background-modifier-border` |
+| radiusS/M/L | `--radius-s` / `--radius-m` / `--radius-l` |
+
+缺口在 ArkTS 侧：还有 10 处硬编码。本轮全部替换：
+
+| 位置 | 改前 | 改后 |
+|---|---|---|
+| 面板标题 / 图标 | `#ffffff` | `this.theme.text` |
+| 面板次要文字 ×3 | `#d2d2d2` | `this.theme.muted` |
+| 面板三级文字 | `#8f8f8f` | `this.theme.faint` |
+| 面板背景 | `#E6141414` | `this.theme.panel` |
+| 面板描边 / 分割线 | `#26FFFFFF` / `#2AFFFFFF` | `this.theme.border` |
+| 圆盘底 / 关闭圆底 / 重播键 | `#6b000000` / `#66000000` / `#ffffff` | `this.theme.bar` / `this.theme.onAccent` |
+| 药丸圆角 | `12` | `this.theme.radiusM`（8，Obsidian 主容器刻度） |
+| 彩蛋面板圆角 | `10` | `this.theme.radiusM` |
+
+现在源码里只剩 `DEFAULT_NATIVE_VIDEO_THEME` 的兜底值（渲染层没送到时用）与 `'#00000000'`（透明）——两者都不是"自选品牌色"。
+
+**三、对照设计纲要做状态标记**
+| 要求 | 状态 |
+|---|---|
+| 主色接入语义变量 | ✅ 本轮完成 |
+| 圆角用系统刻度（4/8/12） | ✅ 完成（药丸用 8，圆形按半径） |
+| 控件默认隐形、按需浮现 | ✅ 3.2s 自动隐去，触摸/悬停浮现 |
+| 手势优先（横滑进度/竖滑音量/双击跳转/长按倍速） | ✅ 全部可用（双击已收敛为 ±10s） |
+| 全局快捷键 / 命令面板控制 | ❌ 未做，需要主进程把按键路由给原生层 |
+| 时间戳链接 / 转录联动 | ❌ 未做，属渲染层特性，需与 `touch-mode.js` 的 DOM 挂钩 |
+| 离屏暂停/释放 | ⚠️ 部分：遮挡/键盘/滚出时渲染层会 close，`aboutToDisappear` 释放 player |
+| 可访问性 | ⚠️ 部分：所有控件有 `accessibilityText`，缺键盘操作 |
+
+**验证**：`BUILD SUCCESSFUL in 21 s 638 ms`；HAP **222,072,910 B**，SHA-256 `F497649672D4743E89C314E71B9B91A7CA66B132A4D41D970EF1A31F7593A3F6`；字节码命中 `v146`、`saveSpeed`，`v145` 已不存在；`obsidian.asar` 未变。
+## 第 147 轮 (2026-10-20): 彩蛋从"一横条"改成内容自适应的小卡片
+
+**用户**：`彩蛋的样式也要优化，现在占一横条，不太美观`。
+
+**根因**：面板内部放了一个 `Divider()`。**Divider 默认撑满父容器宽度**，于是内层 `Column` 被它撑到满宽，整张卡片变成一条横贯视频的横条。
+
+**改法**
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 分割线 | `Divider()`（撑满父宽） | **删除**，改用 6vp 上间距 |
+| 宽度 | 内容 + Divider 撑满 | `constraintSize({ maxWidth: 260 })` 真正按内容收紧 |
+| 标题字号 | 13 | 12 |
+| 正文字号 | 11 | 10 |
+| 末行（画面/k/版本） | 10 | 9 |
+| 行距 | 3/2/2 | 2/1/1（更紧凑） |
+| 内边距 | 12/12/10/10 | 12/14/9/9 |
+| 投影 | 无 | `radius 12 / #33000000 / y 4`，与面板层级一致 |
+| 圆角 | `theme.radiusM` | 不变（8，Obsidian 主容器刻度） |
+
+顺带把分辨率里的 `x` 改成排版用的 `×`。
+
+**验证**：`BUILD SUCCESSFUL in 18 s 745 ms`；HAP **222,073,130 B**，SHA-256 `E6D221BFB9DE54C231574C175DF740AA86867A3B9E86F22CD5AF0DBAFF247AB2`；字节码命中 `v147`、`maxWidth`，`v146` 已不存在；`obsidian.asar` 未变。
+## 第 148 轮 (2026-10-20): 模式切换链路审查——三个真缺陷
+
+**审查范围**：`windowSizeChange` → `hideNativeForResize` → `revealNative` → `applyNativeRect/moveNativeRect` → 覆盖层 `syncUnit/u()` → `scheduleSurfaceResize`。
+
+### 缺陷 1：揭示基准时间被反复前推（Index）
+```ts
+if (this.nativeHidden) {
+  this.nativeHideAt = Math.max(this.nativeHideAt, Date.now() - 0);  // == Date.now()
+  return;
+}
+```
+注释写"不要越推越远"，代码却在推。一次拖动/切换会连发几十个 `windowSizeChange`，`nativeHideAt` 恒等于"现在"，于是 `ts >= hideAt+400` 与 `Date.now() >= hideAt+1200` **永不成立**，只有兜底定时器能把画面放回来 ⇒ **切换后视频消失 0.4~1.5s**。
+**修复**：重复事件直接 return，不移动基准；兜底 1500ms → **900ms**（仍大于实测 400-500ms 的 settle），并加日志 `native revealed by safety net`。
+
+### 缺陷 2：全屏时单位换算冻结（Overlay）
+`syncUnit()` 在全屏直接 return（没有 CSS 矩形可测），而 `u()` 优先返回 `unitCache` ⇒ 全屏状态下切模式（密度 1.9125→2.25）后 `unitScale` 更新了但控件仍用旧缓存，尺寸错。
+**修复**：`u()` 在全屏分支优先用 Index 现算的 `unitScale`，回退才是缓存。
+
+### 缺陷 3：`open` 不复位隐藏态（Index）
+若在"切换隐藏中"点开另一个视频，`open` 只等 `revealNative` 的时间闸门，没有任何地方清 `nativeHidden` ⇒ 多黑 400ms 或等兜底。**修复**：`open` 自带完整 rect，直接 `nativeHidden = false` 并清掉兜底定时器。
+
+### 审查后确认没问题的点
+- `nativePointer`/`nativeCssToVp`/`nativeCssW` 都是 `@State`，模式切换会触发重建；
+- `nativePc` 用请求里的 `mode` 判定，不依赖窗口尺寸（注释已说明"切换瞬间窗口尺寸可能不变"）；
+- `cssToVp() = dpr × px2vp(1)` 每次请求现算，不留旧值；
+- 关闭/销毁路径会复位 `nativePc`、`nativeHidden` 并恢复系统栏；
+- 覆盖层 `unitCache` 由 `实测盒宽 / rect CSS 宽` 得到，密度变化后自校正。
+
+### 仍存在的边界（如实）
+- 全屏期间 `rect` 分支跳过几何更新（只更新主题），退出全屏到下一次心跳之间可能有一帧旧尺寸；
+- 覆盖层 `Visibility.Hidden` 期间 `onAreaChange` 若未触发，`lastAreaW` 会滞后，需靠 reveal 后的下一次布局修正。
+
+**验证**：`BUILD SUCCESSFUL in 19 s 205 ms`；HAP **222,072,915 B**，SHA-256 `3DAF71062171650A3664727EDF8810C5AC87B6C16350481862B7D692689D8C4E`；字节码命中 `v148`、`revealed by safety net`，`v147` 已不存在；`obsidian.asar` 未变。
+## 第 149 轮 (2026-10-20): 打扫战场——删除死代码路径，合并文档
+
+**删除**
+| 项 | 规模 | 原因 |
+|---|---|---|
+| `NativeVideoPro.ets` | 13,257 B | 建在系统 `Video` 上，而它读不到仓库路径（R133 日志已证），整条路径不可用 |
+| `systemVideo()` + `SYSTEM_VIDEO`/`PRO_UI` 开关 | ~75 行 | 同上；三路分支收敛为一条 |
+| `syncSystemSrc()` / `systemSrc` / `systemController` / `fileUri` 导入 | ~25 行 | 仅服务上面那条死路径 |
+| 诊断态 11 个（`iconTop/Left/W/H`、`barMeasured/barTop`、`discMeasured/Top/Left`、`overlayTop/overlayH`）+ 3 个 `onAreaChange` 处理器 | ~60 行 | 彩蛋改版后已无读者，且每次布局都会触发无谓的状态写入 |
+| 死方法 5 个（`glyphPct/discPct/cropDelta/boxLeft/n1`）+ `toggleBoost` | ~50 行 | 无调用方 |
+| 死属性 `pointerMode`（含 Index 传参） | ~10 行 | `compactControls()` 恒为 false，无人读取 |
+
+覆盖层 **87,936 B / 2,308 行 → 81,970 B / 2,108 行**（−6.8%），连同删除的 Pro 文件共减少约 **21 KB**。
+
+**合并**：`docs/B-NATIVE-OVERLAY.md` 新增《实现摘要（R108–R149 合并）》——三条硬约束（坐标单位 px、居中只能用撑满的 Column、系统 Video 读不到仓库）、尺寸模型、手势表、主题令牌来源、彩蛋字段、验收状态，全部收敛到一页；原设计章节保留作历史。
+
+**审核结论**：构建通过；`ets/modules.abc` 仍命中 `v149`、`transport=avplayer`、`无音轨`、`视频峰值`、`maxWidth`；`obsidian.asar` 未变。
+
+**验证**：`BUILD SUCCESSFUL in 20 s 558 ms`；HAP **221,977,127 B**，SHA-256 `ABF2CC0438EDBC349B7D518FBD9FB37C22F9257D46BDF33F8B1E35A8B5A7234B`。
