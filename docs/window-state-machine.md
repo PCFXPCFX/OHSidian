@@ -504,8 +504,11 @@ latch 在 native 调用成功之后才推进（调用抛异常不得吞掉同突
 1. 触摸形态的窗口状态只能由形态动作（整屏校正 / 布局全屏）和系统（Home /
    返回 / 任务切换）改变；桌面窗口状态调用（`win.minimize()` /
    `win.maximize()`）**不得**改变它。
-2. 前台恢复不得只依赖 `showAbility()`：本 WMS 对它的 `16000067` 是固定行为，
-   必须保留 `window.show()`（必要时 `restore()`）的兜底路径。
+2. 前台恢复不得只依赖 `showAbility()`：本 WMS 对它的 `16000067` 是固定行为。
+   触摸形态下仅当窗口状态为 `MINIMIZE` 时用 `window.restore()` + `window.show()`
+   兜底（`restore()` 失败也要继续 `show()`）；窗口已在前台时不得再调
+   `window.show()`（启动期会调三次 `showWindow`，冗余调用会带来额外的 WMS
+   往返与焦点抖动）。
 3. 形态判定复用 `isTouchFormFactorStrict()`：严格读（只有成功读到 `'false'`
    才算触摸），读失败保持旧行为——取消用户/引擎动作时，失败方向必须是
    "不改变"而不是"误取消"。

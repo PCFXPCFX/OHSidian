@@ -552,14 +552,24 @@ export class AppWindowAdapter extends BaseAdapter {
       // ability is already foreground, so the rejected call is a no-op -
       // expected, not an error.
       if (err.code === 16000067) {
-        // Round 108: the rejection is benign ONLY while the window is really
-        // in front. If it was minimised (desktop window-state restore or a
-        // title-bar click), this branch used to leave the app in the
-        // background forever - device log: minimize at 42.298, rejected show
-        // at 42.616, then nothing. Fall back to the window-level API.
-        if (this.isTouchFormFactorStrict() && proxy?.getWindow()) {
-          this.bringWindowToFront(proxy.getWindow());
-          return;
+        // Round 111 audit: the rejection is benign ONLY while the window is
+        // really in front. The one state that used to trap the app is
+        // MINIMIZE (device log: minimize at 42.298, rejected show at 42.616,
+        // then nothing). Only that state gets the window-level fallback:
+        // Obsidian calls show() two or three times during startup while the
+        // window is already FULL_SCREEN, and an unconditional window.show()
+        // there would be a redundant WMS round-trip on every launch.
+        if (this.isTouchFormFactorStrict()) {
+          const windowClass = proxy?.getWindow();
+          try {
+            if (windowClass &&
+              windowClass.getWindowStatus() === window.WindowStatusType.MINIMIZE) {
+              this.bringWindowToFront(windowClass);
+              return;
+            }
+          } catch (statusException) {
+            LogUtil.warn(TAG, 'read window status failed: ' + JSON.stringify(statusException));
+          }
         }
         LogUtil.info(TAG, 'showAbility rejected by WMS (16000067), window left as-is');
         return;
@@ -568,23 +578,22 @@ export class AppWindowAdapter extends BaseAdapter {
     });
   }
 
-  // Round 108: explicit foreground fallback for the touch form factor, used
-  // when the ability-level show is rejected (16000067). `restore()` first only
-  // when the window reports MINIMIZE; `show()` is a no-op when already shown.
-  private bringWindowToFront(windowClass: window.Window | undefined): void {
-    if (!windowClass) {
-      return;
-    }
+  // Round 111: foreground recovery for a MINIMISED touch-form-factor window,
+  // used when the ability-level show is rejected with 16000067. A failing
+  // restore() must not skip show(): the window may still be showable.
+  private bringWindowToFront(windowClass: window.Window): void {
     try {
-      const status = windowClass.getWindowStatus();
-      const shown: Promise<void> = status === window.WindowStatusType.MINIMIZE
-        ? windowClass.restore().then(() => windowClass.show())
-        : windowClass.show();
-      shown.then(() => {
-        LogUtil.info(TAG, 'showAbility rejected; window brought to front via window.show()');
-      }).catch((err: BusinessError) => {
-        LogUtil.warn(TAG, 'bring window to front failed: ' + JSON.stringify(err));
-      });
+      windowClass.restore()
+        .catch((restoreError: BusinessError) => {
+          LogUtil.warn(TAG, 'restore minimised window failed: ' + JSON.stringify(restoreError));
+        })
+        .then(() => windowClass.show())
+        .then(() => {
+          LogUtil.info(TAG, 'showAbility rejected; minimised window restored and shown');
+        })
+        .catch((err: BusinessError) => {
+          LogUtil.warn(TAG, 'bring window to front failed: ' + JSON.stringify(err));
+        });
     } catch (exception) {
       LogUtil.warn(TAG, 'bring window to front threw: ' + JSON.stringify(exception));
     }
@@ -820,7 +829,7 @@ export class AppWindowAdapter extends BaseAdapter {
 
   @LogMethod
   maximize(id: number) {
-    // Round 108: in the touch form factor the window already IS the display;
+    // Round 111: in the touch form factor the window already IS the display;
     // win.maximize() is only the desktop window-state restore. This WMS
     // answers "Maximize: The device is not supported" while the promise still
     // resolves, so the old "Succeeded in maximizing the window." log made
@@ -872,7 +881,7 @@ export class AppWindowAdapter extends BaseAdapter {
 
   @LogMethod
   minimize(id: number) {
-    // Round 108: a touch-form-factor window has NO minimised state - the app
+    // Round 111: a touch-form-factor window has NO minimised state - the app
     // is a single full-display window and leaving it must go through the
     // system (Home/back), not through the desktop `win.minimize()` path.
     // The device log showed the engine minimising the window 8 ms after

@@ -846,7 +846,7 @@ changed=false` 说明是首同步而非模式切换;全程无 `forced fullscreen
 | 侧 | 变更 | 目的 |
 |----|------|------|
 | ArkTS `AppWindowAdapter.minimize` | 触摸形态(严格读,读失败保持旧行为)直接忽略并 `warn` | 触摸形态没有最小化状态;断掉"启动即被藏起来"。系统级回桌面不经过该 binding,不受影响 |
-| ArkTS `AppWindowAdapter.showWindow` | `showAbility` 返回 `16000067` 时,触摸形态改走新增 `bringWindowToFront()`:窗口 `MINIMIZE` 则 `restore()` 后 `show()`,否则直接 `show()` | 即使窗口被别的路径收起,也能重新显示出来(旧代码把失败当 no-op 静默吞掉) |
+| ArkTS `AppWindowAdapter.showWindow` | `showAbility` 返回 `16000067` 时,**仅当触摸形态且窗口状态为 `MINIMIZE`** 才走新增 `bringWindowToFront()`(`restore()` 后 `show()`;`restore` 失败仍继续 `show`),其余情况保持"无害 no-op" | 修复"被最小化后回不到前台";同时避免启动期三次 `showWindow` 各多一次 `window.show()` 的冗余 WMS 往返 |
 | ArkTS `AppWindowAdapter.maximize` | 触摸形态直接忽略并记录;不再执行桌面 maximize、不再打假 `Succeeded` | 触摸窗口已是 display;避免污染 Obsidian 的 `isMaximized` 记忆与验收日志 |
 | Docs | `window-state-machine.md` 新增 Round 111:触摸形态"最小化/最大化"不是合法状态变更;前台恢复的兜底路径 | 规格与实现一致,后续改动可静态审查 |
 
@@ -855,7 +855,7 @@ changed=false` 说明是首同步而非模式切换;全程无 `forced fullscreen
 | 维度 | 结论 |
 |---|---|
 | 必要性 | 三条日志级证据:42.298 的 `minimize` 无输入事件、42.616 的 show 失败、42.293 的假成功;每条都对应代码里一个无条件执行点,不是猜测 |
-| 正确性 | 取消 `minimize` 是"非破坏性方向"(应用保持可见);PC 形态完全不受影响(严格读为 false 才取消);`showWindow` 兜底只在 `16000067` + 触摸形态触发,其他错误码走原日志;`maximize` 忽略仅限触摸形态;`bringWindowToFront` 的 `restore()` 只在窗口状态确为 `MINIMIZE` 时调用,`show()` 幂等 |
+| 正确性 | 取消 `minimize` 是"非破坏性方向"(应用保持可见);PC 形态完全不受影响(严格读为 false 才取消);`showWindow` 兜底只在 `16000067` + 触摸形态 + 窗口状态 `MINIMIZE` 时触发(启动期已全屏的三次 show 不走兜底),其他错误码走原日志;`maximize` 忽略仅限触摸形态;`restore()` 失败不短路 `show()` |
 | 安全性 | 不新增权限/外部输入/网络;只操作本应用自己的窗口;新增日志只含窗口 id/错误码;严格读失败时保持旧行为(不会因读失败阻止 PC 形态的最小化) |
 | 代码质量 | 三个改动点都复用既有形态判定 `isTouchFormFactorStrict()`,不新增第二套形态判断;`bringWindowToFront` 单点、带 try/catch;注释写明设备日志时间戳与"为何取消是安全的" |
 | 架构 | 状态机补一条不变量:触摸形态的窗口状态只能由形态动作(整屏/布局)与系统(Home/返回)改变,桌面窗口状态调用(最小化/最大化)不得改变它;前台恢复不依赖 `showAbility`(该 WMS 固定拒绝) |
@@ -881,10 +881,23 @@ changed=false` 说明是首同步而非模式切换;全程无 `forced fullscreen
   保留 `minimize ...` 而非 `ignored`。
 - R111-6 第 107 轮与第 111 轮的关系:107 保证触摸窗口是整屏(不被引擎记忆
   矩形改),111 保证它不会被桌面状态调用藏起来、且被藏起后能回来。
-- R111-7 编译验证:`hvigorw assembleHap` **BUILD SUCCESSFUL**(见下),本轮
-  改动逐段静态核对 `maximize/minimize/showWindow` 的调用方(引擎 JS binding,
-  无 ArkTS 调用方)。
+- R111-7 编译验证:`hvigorw assembleHap` **BUILD SUCCESSFUL**,本轮改动逐段
+  静态核对 `maximize/minimize/showWindow` 的调用方(引擎 JS binding,无 ArkTS
+  调用方)。
 - R111-8 未跑真机;验收以真机为准(要点见下)。
+- R111-9(审计 P1)兜底最初写成了"触摸形态 + 16000067 一律 `window.show()`":
+  冷启动期 Obsidian 会调 `showWindow` 三次(42.290/42.297/42.616),窗口本已
+  `FULL_SCREEN`,那会成为每次启动 3 次冗余 `window.show()`(额外 WMS 往返,
+  可能引起焦点/入场动画抖动)。已收窄为**仅 `MINIMIZE` 状态**才走兜底,其余
+  保持无害 no-op。
+- R111-10(审计 P2)`bringWindowToFront` 原先用
+  `restore().then(show)`:一旦 `restore()` reject,`show()` 被短路,兜底失效。
+  已改为 `restore().catch(warn).then(show)`,恢复失败仍尝试显示。
+- R111-11(审计 P3)注释里的"Round 108"残留(实际为 111)已修正;新日志串
+  `minimised window restored and shown` 与 `window left as-is` 可区分"是否走了
+  兜底",便于真机 grep。
+- R111-12 本轮改动为小范围且已按第 106 轮"严格读/形态门"原则复核;独立只读
+  审计由本轮自查清单(R111-9..11)覆盖,未再另起 agent。
 
 **验证要点**(真机,触摸模式)
 
@@ -893,9 +906,10 @@ changed=false` 说明是首同步而非模式切换;全程无 `forced fullscreen
    `minimize ignored: touch form factor has no minimized state`。
 2. 触摸模式不再出现 `Succeeded in maximizing the window.`(应为
    `maximize ignored: touch form factor window is already the display`)。
-3. 若窗口被系统/桌面路径收起,点击应用图标恢复:应出现
-   `showAbility rejected; window brought to front via window.show()`,窗口回到
-   前台(不是 42.6 那种 `window left as-is` 后继续隐藏)。
+3. 若窗口被最小化(窗口状态 `MINIMIZE`),点击应用图标恢复:应出现
+   `showAbility rejected; minimised window restored and shown`,窗口回到前台;
+   启动期正常的三次 `showAbility rejected` 仍应打 `window left as-is`(不触发
+   冗余 `window.show()`)。
 4. PC 模式(窗口形态)冷启动:`win.maximize()`/`win.minimize()` 仍生效,
    日志不出现 `ignored: touch form factor`。
 5. 换库、多窗口、第 107 轮整屏验收不回归。
@@ -904,6 +918,9 @@ changed=false` 说明是首同步而非模式切换;全程无 `forced fullscreen
 
 - `window.show()` 在该 WMS 上是否真正切前台未验证;若只让窗口可见但应用仍在
   后台任务栈,需追加 `restore()`/`maximize()` 或 `startAbility` 方案(R111-3)。
+- 兜底只覆盖 `MINIMIZE` 状态:窗口被 `hideAbility`/系统隐藏但状态仍报告
+  `FULL_SCREEN` 时没有可用兜底(`showAbility` 固定 16000067),仍会停在后台;
+  这类"隐藏但非最小化"的恢复路径未验证。
 - 引擎侧究竟哪段代码在启动时调 `minimize` 未定位(无输入事件);本轮是
   "取消非法状态"而非"修调用者"。
 - `setFullScreen`/`setSimpleFullScreen` 仍走桌面 maximize 语义,触摸形态下未
