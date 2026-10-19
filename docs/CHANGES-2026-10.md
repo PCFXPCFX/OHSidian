@@ -448,3 +448,225 @@ HEAD 与真机日志复核。
 | 代码质量 | 通道协议与竞态写在注释里;两处构建阻塞修复注明 SDK 依据;`readMode()` 收敛重复 try/catch |
 | 架构 | 不改变 ArkTS↔渲染层既有方向(ArkTS 发布、渲染层消费并回报),复用同一 mode 文件,无新通道 |
 | 耗电性 | 每次手势一个 ≤700ms 的一次性定时器;无新增轮询 |
+
+## 第 106 轮(2026-10-19):换库窗口启动失败 / 多窗口 pcmode 观察者 / 启动期重复副作用
+
+**输入**:真机 hilog 分析(14:48:02–14:48:50,平板触摸形态冷启动 + 换库)。
+第 102 轮的闪动修复在该链路上**验证通过**:`resolvePcModeAtBoot` 的首读
+(`02.286`)早于 `LoadContent`(`02.306`);`pc mode handled: enabled=false,
+changed=false` 说明是首同步而非模式切换;全程无 `forced fullscreen rect:`
+(窗口创建时已是 `[0 0 2800 1840]`,整屏校正的尺寸守卫直接跳过);布局全屏只有
+一次调用(`02.302` 发起、`02.314` 生效)。但同一条日志暴露了 5 个新问题:
+
+1. **P0 换库新窗口创建失败**:`09.070 closeWindow(1)` → `09.074 createWindow`
+   → `09.079 launch from primary window context`(选中的正是正在销毁的
+   browser1)→ `16000067` → geometry-only 也失败 → bare `16200001`;`09.081`
+   旧窗口销毁,新窗口从未创建。`12.079 XComponentManager::CreateWindow
+   browser4 timeout`,随后 20 秒 `getProxy failed, proxyId: browser4/browser0`
+   与 `Failed to obtain the main window`。`24.827` 才出现一个新实例(819,
+   新 xcomponentId browser5,与引擎等待的 browser4 错位),日志末尾两个
+   obsidian 窗口互相抢焦点。
+2. **P1 pcmode observer 是进程级单例**:`07.442 register ... res:false` +
+   `npai_settings_register_observer, already registered`——回调只挂在首个窗口
+   (811)的 ability 上;`09.087` 811 销毁并注销后,存活的 813 在 15 秒里**完全
+   收不到** PC 模式切换,直到 `24.872` 新实例再注册。
+3. **P1 每个窗口重复进程级副作用 + 监听器泄漏**:813(`07.43x`)、819
+   (`24.86x`)各自重跑 `publishSystemFonts`(277–280 条映射)、
+   `publishStyleFonts`(最多 40 次字体描述符解析)、`publishThemeFontPath`、
+   `publishDocumentsDir`;`registerSystemConfigListener` 每个窗口注册一次且
+   **从不 off**,闭包指向已销毁的 ability。
+4. **P2 启动期同值视口突发**:`02.389–02.392` 3ms 内 5 次
+   `re-pushed viewport bounds`(完全相同),`02.512 ProcessJank`。
+5. **P2 触摸全屏上的无效窗口 API**:`setBounds` 四次全被 `1300010` 拒绝;
+   `setWindowLimits` 在 `07.531–07.541` 连发四组(0..MAX → 1800×1463 →
+   固定 1800×1463 → 1800×1519),WMS 每次回 `fullscreen or compatible mode
+   could not update new size`,窗口始终 2800×1840——引擎的尺寸认知与实际
+   窗口分裂。诊断日志 `setBounds requested={}` 也源于 `JSON.stringify` 对
+   napi `WindowBound` 打印空对象。
+
+**修复**
+
+| 侧 | 变更 | 目的 |
+|----|------|------|
+| ArkTS `LaunchHelper` | `LaunchWithOptions` 增加可选 `onAllFailed`;三级重试梯子(完整 → 仅几何 → bare)全部失败、上下文缺失、调用抛异常时各回调一次(回调内异常被吞)。**审计补丁**:每级 rung 单独 try/catch(同步抛也回调),且首个错误不是 16000067 时不再进入梯子、直接回调(16200001 等错误原本会静默跳过验收锚点) | 让"窗口永远不会出现"从引擎侧 20 秒 `proxy not found` 的间接现象变成一条明确的创建失败日志 |
+| ArkTS `AppWindowAdapter` | 新增 `closingWindows: Set<string>`;`closeWindow()` 在 `terminateSelf()` **之前**标记 `browserN`;**审计补丁**:`launchContext` 先按当前 proxy 列表修剪已消失的标记,`closeWindow` 无 context / `terminateSelf` 失败时回滚标记 | `terminateSelf` 是异步的,proxy 要到 `onWindowStageDestroy` 才移除;不标记就会把"正在终止"的窗口当成可用启动上下文 |
+| ArkTS `AppWindowAdapter.launchContext` | 跳过 closing 窗口;优先存活 primary(`DEFAULT_WINDOW_ID`),否则最老存活窗口;全部在关闭时 warn + 回退 activeContext | 换库时旧 primary 已在关闭,原实现仍首选它 → 三次启动必败(16000067/16200001 是终止中上下文的表现) |
+| ArkTS `AppWindowAdapter.createWindow` | 传入 `onAllFailed`:`createWindow: every launch attempt failed for window N` | 失败窗口有单一可 grep 的验收锚点 |
+| ArkTS `WebAbility` | 静态 `liveInstances` + `addLiveInstance/removeLiveInstance`;`onWindowStageCreate` 顶部(所有形态)入表,`onWindowStageDestroy` 顶部出表,`onDestroy` 再兜底出表一次 | 进程级回调需要"当前存活窗口"集合;放在形态分支之外,手机也能收到字体/字号回推;异常的销毁路径不会把死实例留在广播表里 |
+| ArkTS `WebAbility` | `ensurePcmodeObserver()` 进程级单注册 + `broadcastPcmodeChange()` 广播到所有存活实例;最后一个窗口销毁才 `unregisterKeyObserver`;观察者拥有者窗口先死时用存活窗口重绑。**审计补丁**:注册优先用 `getApplicationContext()`(进程级、不随窗口死亡失效),ability context 仅作回退 | 修正"回调绑死首个窗口"与"首个窗口一销毁就失去运行时切换";app context 也消除了"重绑失败后整个进程没有 observer"的路径 |
+| ArkTS `WebAbility` | `bootPublishesDone` 静态 once,收敛 `publishSystemFonts/publishFontId/publishStyleFonts/publishThemeFontPath`;`systemFontsPublished/publishedFontFamilyCount/systemFontsPublishing` 改 `static`。**审计补丁**:`registerSystemConfigListener()` 与 `publishDocumentsDir()` 留在 once 块**外**(各有自己的 once/值比较 guard,首次失败后下一窗口还能重试);`removeLiveInstance` 在字体尚未发布时回滚 `bootPublishesDone`;`onFontIdUpdated` 无存活窗口时同时清 `systemFontsPublished` | 这些写的是**共享** mode 文件、扫的是全局字体描述符;每个窗口重跑是纯浪费,但 once 不能以"注册失败后永不重试"为代价 |
+| ArkTS `WebAbility.registerSystemConfigListener` | 静态 once;`onFontIdUpdated/onFontSizeScaleUpdated` 改为 `dispatch*` 到 `primaryLiveInstance()`,不再闭包捕获 `this` | 消除监听器累积与"死窗口回调"泄漏;字体列表变化仍能触发重发布 |
+| ArkTS `WebAbility.repushViewportBounds` | 相同 bound 且距上次推送 < `REPUSH_DEDUPE_MS`(150ms)时跳过。**审计补丁**:新增 `force` 参数,`scheduleViewportReconcile` 以 `force=true` 调用;推送 latch 移到 native 调用成功之后;窗口舞台重建时清零 latch | 只合并启动期同值突发;对账推永远送达(round 88 的"同值重申"语义不破),native 抛异常也不会吞掉同突发的下一条 |
+| ArkTS `AppWindowAdapter` | 新增 `isFullscreenWindow()`/`isTouchFullscreen()`:`setBounds` 仅在"触摸形态(平板触摸/手机)+ 窗口 `FULL_SCREEN`"时短路;`setBounds` 诊断日志改标量字段。**审计补丁**:**不**短路 `setWindowLimits`/`setResizable`——它们携带状态(尺寸限制/不可缩放),全屏时丢弃会在窗口离开全屏后失效,比多一次 WMS 往返更糟;触摸判定改用严格读(读失败不跳过) | `setBounds` 在触摸全屏下被 WMS 证明必败(1300010);短路后不再连发,并让日志可读(不再 `requested={}`) |
+
+**六维审计**
+
+| 维度 | 结论 |
+|---|---|
+| 必要性 | 每条都能追到日志时间戳:P0 = `09.070–12.081` 的换库失败链;P1 = `07.442 res:false` 与 `09.087` 注销后 15 秒空窗;P1 = `07.43x/24.86x` 的重复字体发布与监听注册;P2 = `02.389–02.392` 五连推 + `02.512` jank;P2 = `07.531–07.541` 的 limits 抖动与 `setBounds` 全拒。没有"顺手重构" |
+| 正确性 | `closingWindows` 在 `terminateSelf` 前**同步**写入,并按 proxy 列表修剪/失败回滚;`launchContext` 只在"无存活窗口"时回退(失败可见);广播遍历快照,单实例异常不影响其他窗口;观察者优先 app context,注销/重绑只在回退注册时可能发生;静态 once 只覆盖**进程级共享**资源(字体/主题/观察者/配置监听),窗口级状态(形态、decor、insets、per-window 条目)仍逐窗口;150ms 去重只吞"同值且同突发",对账推 `force=true` 永不吞;`setBounds` 短路要求 `触摸形态 && FULL_SCREEN`,窗口形态的恢复路径不受影响;limits/resizable 携带状态,不短路 |
+| 安全性 | 不新增权限、网络、外部输入;`closingWindows`/`liveInstances` 只存 window id 与实例引用,不落盘;新日志只含 window id/布尔/异常 JSON,不含路径与令牌;`onAllFailed` 回调异常被吞,不影响启动梯子本身的返回 |
+| 代码质量 | 进程级 vs 窗口级的边界写进静态字段注释与函数注释;新增日志可直接作为验收锚点;`setBounds`/skip 日志带 window id,多窗口真机可核对;`setBounds` 诊断不再依赖 napi 对象的 `JSON.stringify`;无新增 import(`Set`/`Array.slice/indexOf`、`window.WindowStatusType`、`Context` 均为既有能力) |
+| 架构 | 首次把"进程级单例资源"显式建模(静态 once + 存活注册表),修正了"窗口 = 进程"的隐含假设;状态机新增不变量(见 `docs/window-state-machine.md` 文末 Round 106):进程级资源只初始化一次、启动上下文不得来自 closing 窗口、视口推送允许同值突发合并(对账推除外)、触摸全屏下只短路 `setBounds` |
+| 耗电性 | 每个新窗口省掉一次 277–280 条字体映射、最多 40 次描述符解析、主题字体全描述符扫描与一次配置监听注册;省掉 4 次必败 `setBounds` 的 WMS 往返;启动期同值视口推送从 5 次降到 1 次。limits/resizable 仍按引擎请求下发(audit P2-1 的取舍)。新增成本仅为进程内 `Set`/数组操作与一次 `unregister/re-register`(仅窗口切换时) |
+
+**自查审计**
+
+- R106-1 `closingWindows` 会不会误伤后续窗口?引擎 window id 在进程内单调分配
+  (`browserN` 递增),adapter 是进程单例,进程重启即清空;不存在 id 复用。
+- R106-2 `launchContext` 在"所有窗口都在关闭"时回退 activeContext,可能仍是
+  终止中上下文?是,而且**没有**更好的选择:审计建议改用 `ctxAdapter.getContext()`
+  (应用级上下文),但 SDK 的 `ApplicationContext extends Context` 并**没有**
+  `startAbility`(只有 `UIAbilityContext`/`UIExtensionContext`/`AppServiceExtensionContext`
+  有),换过去只会在运行期抛错。因此保留 activeContext 回退 + warn,
+  失败由 `onAllFailed` 暴露;该场景(所有窗口同时关闭)属极端,见"未改项"。
+- R106-20 审计 P2-2:此前 `isTouchFullscreen` 复用 `isTabletPcMode()`(读失败
+  → false = 触摸),等于把"settings 读失败"翻译成"跳过 setBounds"这一**破坏性**
+  分支。已改为 `isTouchFormFactorStrict()`:只有成功读到 `'false'` 才算触摸,
+  读失败/未知按非触摸处理(不跳过),与 WebAbility "读失败保持窗口形态"的
+  既有不变量同向。
+- R106-21 审计 P3:`dispatchFontScaleUpdate` 去掉了单实例 `fontScale` 字段比较
+  (该字段只由 `onConfigurationUpdate` 更新,与 listener 是两条通道,可能落后);
+  交给 `writeFontScaleToFile` 的文件级比较。
+- R106-22 审计 P3:primary 判定仍用 `ConfigData.DEFAULT_WINDOW_ID`(`browser1`),
+  与 `WebBaseAbility` 的"引擎 id 未必是 1"注释不一致 → 本轮不扩接口,改为在
+  退化到"最老存活窗口"时打明确日志
+  (`primary browser1 unavailable`),避免验收时把正常退化误读成失败;给
+  `WebProxy` 增加 `isMain` 标记留待后续。
+- R106-3 是否破坏 round 99("不能从即将销毁的 chooser 启动")?没有:仍优先
+  primary;只有当 primary **已在关闭**时才退到最老存活窗口——round 99 的前提
+  是"存在稳定窗口",该前提在本轮日志的场景里不成立(换库时旧的正在关、
+  chooser 是唯一存活者)。代价与收益记录在"未改项"。
+- R106-4 广播到已销毁实例?`liveInstances` 与 `onWindowStageCreate/Destroy`
+  同步维护,`removeLiveInstance` 在任何早退之前执行;每条广播仍包 try/catch。
+- R106-5 `ensurePcmodeObserver` 返回 `true` 现在表示"进程 observer 已就绪",
+  不再表示"本次注册成功";日志 `res:true` 的语义随之变化(验收按此读)。
+- R106-6 观察者重绑失败怎么办?注册优先用 `getApplicationContext()`(进程级,
+  不随窗口死亡失效),ability context 仅作回退;只有回退注册时 owner 先死才需要
+  重绑,重绑失败 `warn` 并置 `pcmodeObserverRegistered=false`,后续窗口创建会再
+  尝试;期间运行时切换失效,但窗口创建时的读取仍保证首帧形态正确。
+- R106-7 静态字体标志被 `onFontIdUpdated` 重置后,若当时无存活窗口,重发布
+  会丢?不会:无实例分支同时清 `bootPublishesDone` 与 `systemFontsPublished`,
+  下一个窗口启动会重跑发布块并通过 publish-once 守卫;不依赖丢失的那次事件。
+- R106-8 150ms 去重会吞掉 round 88 依赖的"同值重申"吗?不会:对账推
+  (`scheduleViewportReconcile`)以 `force=true` 调用,永不合并;窗口状态切换后
+  的带 reason rect 事件/`WINDOW_SHOWN` 重申走 `OnWindowRectChange`,不经该
+  通道;只有同一帧内多个事件源(size/rect/avoidArea/status)的同值推送会被合并。
+- R106-9 触摸全屏短路 `setBounds` 会妨碍"引擎把全屏窗口恢复成浮窗"吗?
+  不会:短路要求触摸形态(无 PC 模式);窗口形态(`pcMode=true`)不短路,引擎的
+  记忆化 `setBounds` 原样下发。
+- R106-10 `setWindowLimits`/`setResizable` 全屏短路会不会丢状态?审计 P2-1
+  指出会(离开全屏后限制/不可缩放状态失效,且引擎不会补发),因此**已回退**:
+  只短路必然失败且无状态的 `setBounds`;limits/resizable 继续按引擎请求下发,
+  多一次 WMS 往返是可接受代价。
+- R106-11 静态注册表在窗口舞台重建(`onWindowStageDestroy → onWindowStageCreate`
+  同实例)时会不会重复入表/重复注册?`addLiveInstance` 用 `indexOf` 去重;
+  observer/config listener 都有静态 once;`removeLiveInstance` 对不在表中的
+  实例是 no-op;`onDestroy` 的兜底出表与 `onWindowStageDestroy` 重复调用也
+  是 no-op(`splice` 索引 -1、观察者标志已清)。
+- R106-12 编译验证:`hvigorw assembleHap` **BUILD SUCCESSFUL**
+  (最终一轮 2026-10-19 15:47:29,HAP 221,777,488 B);`build.log` 的
+  `electron:default@CompileArkTS` 输入清单包含 `web_engine` 源,该任务多轮
+  重跑(最后一次 14.6s),无 `ArkTS:ERROR`。未跑真机,验收以真机为准。
+- R106-13 本轮做过一次**逐段静态核对**(对照日志时间戳与既有 round
+  88/99/102 不变量),并跑过多次全量编译;另起过独立只读审计 agent,其**第一份**
+  审计在提交前未返回,提交后补到(见 R106-14..19),P1/P2 发现已通过增量提交并入。
+- R106-14 审计 P1:非 16000067 的首个错误(如终止中上下文的 `16200001`)原本
+  不会进入重试梯子、也不会回调 → 已改为 `if` 分支显式回调,且梯子每一级
+  `startRung` 都包同步 try/catch(同步抛同样回调)。P0 的验收锚点现在覆盖
+  "首个错误即失败"与"梯子耗尽"两条路径。
+- R106-15 审计 P2-6:`closingWindows` 会永久保留(terminate 被拒/无 context/
+  引擎 id 复用)→ 已加 `pruneClosingWindows()`(按当前 proxy 列表修剪)、
+  无 context 与 `terminateSelf` 失败时回滚标记。
+- R106-16 审计 P2-7:观察者注册改用 `getApplicationContext()` 优先(进程级
+  不随窗口死亡失效),ability context 仅回退;重绑路径只在回退注册时可能走到。
+- R106-17 审计 P2-2:对账推改为 `force=true` 调用,永不被 150ms 突发合并;
+  latch 移到 `OnWindowSizeChange` 成功之后,窗口舞台重建时清零。
+- R106-18 审计 P2-3/P2-5:`onFontIdUpdated` 无存活窗口时同时清
+  `systemFontsPublished`(否则下一窗口被 publish-once 守卫挡住);
+  `registerSystemConfigListener()`/`publishDocumentsDir()` 移出 once 块
+  (各自的 once/值比较 guard 保留),首次失败后下一窗口仍会重试;
+  `removeLiveInstance` 在字体尚未发布时回滚 `bootPublishesDone`(audit P2-4
+  的自愈部分;异步发布仍使用首个窗口的 ability context,见"未改项")。
+- R106-19 审计 P2-1:`setWindowLimits`/`setResizable` 的"全屏短路"已回退——
+  两者携带状态,离开全屏后丢弃会让限制/不可缩放失效;只保留无状态的
+  `setBounds` 短路。`isTouchFullscreen` 同时覆盖 phone;skip 日志带 window id;
+  "all windows are closing" 从 error 降为 warn(后面还会回退 activeContext,
+  可能成功)。
+
+**验证要点**(真机,重点看换库与多窗口)
+
+1. 换库(A → B):hilog 应出现 `closeWindow: window browser1 marked closing` →
+   `launch from oldest live window context: browserN`(primary 未被关闭时才出现
+   `launch from primary window context`);**不得**出现
+   `createWindow: every launch attempt failed for window`、
+   `12.x XComponentManager::CreateWindow ... timeout`、连续
+   `getProxy failed, proxyId: browserN`。
+2. 换库后只有一个窗口存活且进入前台;任务列表里旧任务消失,新窗口标题为
+   新库名(不出现两个 obsidian 窗口互相抢焦点)。
+3. 多窗口 + 设置里切 PC 模式:每个存活窗口各打一条
+   `update window_pcmode_switch_status, new status:...` 与
+   `pc mode handled: ...`(主窗口做整屏/钳制,副窗口只切布局全屏);
+   关掉主窗口后再切,存活窗口**仍然**响应。
+4. 冷启动日志:每个进程只有一次 `publishSystemFonts: begin`、一次
+   `system configuration listener registered`;换库/新窗口不再重复。
+5. 系统设置里换字体/字号:`onFontIdUpdated` 后仍能发布新映射(dispatch 路径),
+   且不会在已关闭窗口上执行。
+6. 启动期视口:同值突发只出现 1 条 `re-pushed viewport bounds`,其余为
+   `re-push skipped (identical bound within burst)`;状态切换后 300ms 的
+   `re-pushed viewport bounds` **必须**出现(对账推 `force=true`,即使同值
+   也不得被 skip)。
+7. 触摸形态新窗:`setBounds skipped: window <engineId> is fullscreen on touch
+   form factor`;不再连发 `1300010` / `MoveToAsync: window should not move`。
+   **注意**:`setWindowLimits`/`setResizable` 仍会下发(audit P2-1 的取舍),
+   因此 `could not update new size` / `set dragEnabled end` 仍可能出现,
+   不算失败。
+8. 窗口形态冷启动不回归:仍出现 `update window_pcmode_switch_status, new
+   status:true` → 引擎 `setBounds requested=<left>,<top> <w>x<h>`(标量字段
+   可读)→ 窗口恢复到记忆矩形;标题条可拖。
+9. 手机 / 2in1 冷启动与改动前一致(手机触摸布局、2in1 桌面窗口;2in1 仍不做
+   pcmode 启动读取,H15)。
+
+**未改项/已知风险**
+
+- P3:tablet 上必然 801 的 `setWindowTitleMoveEnabled` / `setWindowTopmost` /
+  `setWindowModal` 调用保持原样(本轮不动,避免改变窗口能力探测语义)。
+- `onSystemConfigurationUpdated` 注册后**永不注销**(进程级资源,随进程结束);
+  目前无 off 路径,避免与窗口销毁竞态。
+- `launchContext` 在"所有窗口都在关闭"时仍回退 `getActiveContext()`:SDK 里
+  `ApplicationContext` 没有 `startAbility`(只有 `UIAbilityContext` /
+  `UIExtensionContext` / `AppServiceExtensionContext` 有),进程级上下文不能
+  替代;这种 close-then-create 且无任何存活窗口的组合仍会走三连失败,由
+  `onAllFailed` 日志暴露(唯一失败路径,不再静默)。
+- primary 识别仍按 `browser1` 字面量:引擎 id 复用时可能识别不到 primary,退化
+  为"最老存活窗口"(日志已注明 `primary browser1 unavailable`)。给 `WebProxy`
+  增加 `isMain` 需要改接口与全部实现,留待后续。
+- `closingWindows` 只覆盖引擎显式 `closeWindow`;用户点标题栏 X 或系统侧销毁
+  (无 closeWindow 调用)不会标记 → 极小概率仍会从将死窗口启动,失败时由
+  `onAllFailed` 日志暴露。
+- 换库时若唯一存活窗口是 starter/chooser(它随后会自己关闭),round 99 记录的
+  "新窗口被系统压到后台/焦点回跳"风险仍存在;彻底修法是引擎侧"新窗口
+  `windowStageCreate` 后再关闭旧窗口",属于渲染层/引擎顺序改动,本轮不做。
+- 静态发布按进程一次:若首个窗口在字体服务就绪前发布失败,重试梯子仍在其
+  实例上跑;实例提前销毁且此后无窗口时,下次窗口启动会重跑(见 R106-7),但
+  中间事件会丢。
+- `isTabletPcMode()`(建窗)与 `resolvePcModeAtBoot()` 的读失败默认值仍相反
+  (false vs true),round 102 已记录为已知风险;本轮未统一,需真机验证建窗
+  路径后再动。
+- 2in1 的 pcmode 观察者仍按 H15 注册,本轮广播后**每个** 2in1 窗口都会跑一次
+  `updateWindowPcmodeSwitchStatus`(旧代码只有首个窗口的回调生效)。行为与旧
+  代码单窗口时一致,但暴露面变大;2in1 真机需确认 `forceFullscreenWindow`
+  不会被 `false` 事件触发(该风险在旧代码已存在)。
+- **异步字体/主题发布仍钉在触发它的 ability context 上**(audit P2-4):首个
+  窗口在 5s/8s 超时链完成前被销毁时,`this.context` 已死、写 mode 文件失败;
+  本轮加了 `removeLiveInstance` 的 `bootPublishesDone` 回滚让下一窗口重试,
+  但没有把文件 IO 改成进程级 `ApplicationContext`。彻底修法需要统一换
+  `getApplicationContext().filesDir`,留待真机确认影响面。
+- `setWindowLimits` 的全屏抖动(0..MAX → 1800×1463 → 1800×1519)本轮**保留**
+  (audit P2-1:它携带状态,短路会丢)。日志里仍会看到
+  `fullscreen or compatible mode could not update new size`,属于可接受噪音。
+- 工作区里另有一个并行会话的未提交改动(引擎渲染层的 `startupVisibility`
+  触摸形态显示启动页、native overlay、`electron/` 页面等),**不属于本轮**,
+  也未进入本轮提交;真机验收 P0 时需注意该改动会改变 `StartOptions.startupVisibility`。
+- `onSystemConfigurationUpdated` 注册后**永不注销**(进程级资源,随进程结束);
+  目前无 off 路径,避免与窗口销毁竞态。

@@ -18,8 +18,8 @@
 |------|------|
 | 启动（onWindowStageCreate） | **⓪ 先解析形态**（第 102 轮，见文末 Round 102 小节）：`onWindowStageCreate` **顶部**同步读 `window_pcmode_switch_status`（`resolvePcModeAtBoot`）seed `pcModeEnabled`；随后在 `loadContent` **之前**（设备诊断块之后）执行一次 `updateWindowPcmodeSwitchStatus`——**所有形态相关动作（布局全屏 / 整屏校正 / 钳制）必须在此完成**；`pcModeEnabled` 的字段默认值 `false` **不**代表形态，解析前禁止任何几何动作。① 触摸形态：窗口校正为整屏（**仅主窗口**；已整屏则跳过——重复 resize 会被 WMS 拒 1300002）；窗口 show 之前若被 WMS 拒绝，`loadContent` 回调里保留一次**幂等**的触摸专属重申。② 窗口/PC 形态：**不**强制尺寸（系统按上次状态恢复；记忆化由 Obsidian 主进程 `<userData>/<vaultId>.json` 完成，见 §4）；系统标题条显隐由 `pushSafeAreaInsets()` **单点**决定。③ `setWindowTitleMoveEnabled(true)` 无条件启用（拖动面=系统标题条，见 §5）。 |
 | `window_pcmode_switch_status` 变化 | 重写触摸模式文件 → 重发布 insets/decor → 触摸形态校正整屏 / 窗口形态钳制入屏。**不**再 500/1500ms 双延时补推（见 §3）。 |
-| `windowSizeChange` / `windowRectChange` / `avoidAreaChange` / `WINDOW_SHOWN` | 统一走 `pushSafeAreaInsets()`（insets+decor 发布）+ `computeViewportBound()` 视口重推。引擎推送**无条件**（第 88 轮修订：值比对去重会吞掉同值事件——含 WINDOW_SHOWN 重申与 reason 标记的 rect 事件——引擎窗口状态机断裂，真机复现为"无法动态调整窗口/无法全屏贴合"）。无延时补丁。 |
-| `windowStatusChange`（MAXIMIZE/FULL_SCREEN/FLOATING） | 补推 insets + 视口（第 56 轮，修"最大化后底部被导航条遮住"）。动画落定竞态：事件可能先于动画完成到达——随后**单发一次对账**（约 300ms 后重读矩形，无条件重推；第 87 轮 A2，第 88 轮去掉值比对，见 §3 说明）。 |
+| `windowSizeChange` / `windowRectChange` / `avoidAreaChange` / `WINDOW_SHOWN` | 统一走 `pushSafeAreaInsets()`（insets+decor 发布）+ `computeViewportBound()` 视口重推。引擎推送**无条件**（第 88 轮修订：值比对去重会吞掉同值事件——含 WINDOW_SHOWN 重申与 reason 标记的 rect 事件——引擎窗口状态机断裂，真机复现为"无法动态调整窗口/无法全屏贴合"）。**第 106 轮唯一例外**：`repushViewportBounds()` 路径上，完全相同的 bound 且距上次推送 < 150ms 时合并（只针对同一帧内多个事件源造成的突发；`windowStatusChange` 对账推传 `force=true`，永不被合并）。无延时补丁。 |
+| `windowStatusChange`（MAXIMIZE/FULL_SCREEN/FLOATING） | 补推 insets + 视口（第 56 轮，修"最大化后底部被导航条遮住"）。动画落定竞态：事件可能先于动画完成到达——随后**单发一次对账**（约 300ms 后重读矩形，无条件重推；第 87 轮 A2，第 88 轮去掉值比对，第 106 轮 `force=true` 保证不被突发合并吞掉，见 §3 说明）。 |
 | `keyboardHeightChange` | 直接换算 css px → 发布本窗口条目 `cfg.windows[<id>].keyboard`（主窗口另镜像顶层 `cfg.keyboard`；不轮询，TODO 8；第 87 轮起按窗口拆分，见 §9 B2）。 |
 | 首次启动 viewport 未落定 | **唯一允许的补偿**：`SurfaceReady` 稳定门（同矩形连续 3 次 50ms 轮询）在引擎侧解决，与窗口几何无关。 |
 
@@ -43,6 +43,9 @@
 的同值重申是隐藏期后的再同步锚点；windowRectChange 的 reason 参数是
 最大化/恢复状态机的输入，同值事件被吞后 reason 丢失）。引擎推送通道
 永不去做重；去重只属于文件写入通道（见 §7/§9 的 unchanged 检测）。
+**第 106 轮细化**：唯一的同值合并发生在 `repushViewportBounds()` 内部的
+启动突发（同 bound 且 <150ms），且对账推以 `force=true` 调用，因此上表
+"对账推无条件"仍然成立。
 
 ## 4. 窗口大小/位置记忆化（TODO 1/2）
 
@@ -350,3 +353,72 @@ display 矩形（肉眼"放大"）→ 首读把 `pcModeEnabled` 翻成 true（�
 **不变量（今后改动必须保持）**：形态解析先于任何几何/布局动作；未解析
 ≠ 触摸形态；窗口形态启动只允许"钳制入屏"，不允许任何 resize 到
 display 矩形；布局全屏标志与系统标题条各自只有一个写入者。
+
+### Round 106：进程级资源 / 窗口级资源的边界（换库窗口创建失败与多窗口观察者）
+
+来源是真机 hilog（平板触摸形态冷启动 + 换库）。本轮不改形态判定本身，而是
+修正三类"把进程当窗口"的假设：
+
+**1. 进程级资源只能在进程内初始化一次**
+
+`settings.registerKeyObserver`、`onSystemConfigurationUpdated`、字体/主题/
+文档目录发布写入的都是**共享** mode 文件或进程全局监听。此前每个新窗口都
+重做一遍，且窗口销毁时按窗口注销，导致：
+
+- 第二个窗口注册返回 `res:false`（`already registered`），回调绑死在首个
+  窗口的 ability 上；首个窗口销毁并注销后，存活窗口再也收不到 PC 模式切换；
+- 每个窗口再注册一个配置监听、从不 off，闭包指向已销毁的 ability（泄漏 +
+  死窗口回调）；
+- 每个窗口重发 277–280 条字体映射与一次主题字体全描述符扫描。
+
+现在的边界：
+
+- **进程级**：pcmode 观察者（静态 once + 广播到 `liveInstances` 全体；优先用
+  `getApplicationContext()` 注册，最后一个窗口销毁才注销）、系统配置监听
+  （静态 once，回调 `dispatch` 到 `primaryLiveInstance()`）、字体/主题发布
+  （`bootPublishesDone` 静态 once；字体列表变化时由 `onFontIdUpdated` 重置并
+  重发布；监听器注册与文档目录发布留在 once 块外，首次失败后下一窗口可重试）。
+- **窗口级**：形态解析与应用、布局全屏、decor/insets、视口推送、mode 文件的
+  per-window 条目仍然逐窗口。窗口只负责"进出 `liveInstances`"。
+
+**2. 新窗口的启动上下文不得来自正在关闭的窗口**
+
+`closeWindow()` → `terminateSelf()` 是异步的，proxy 要到
+`onWindowStageDestroy` 才移除。换库流程是"先关旧库窗口、再建新库窗口"，
+`launchContext()` 旧实现仍优先选 primary，而它已在关闭中：`startAbility`
+三级重试全部失败（16000067 → 16200001），引擎等一个永不出现的
+`browserN` 约 20 秒，随后系统另起一个**新实例**（新 xcomponentId）与引擎
+期待的 window id 错位。
+
+不变量：`closeWindow()` 必须**先**把该引擎 window id 记入 `closingWindows`；
+`launchContext()` 不得返回 closing 窗口（优先存活 primary → 最老存活窗口 →
+明确失败日志）。全部窗口都在关闭时回退 `getActiveContext()`：SDK 的
+`ApplicationContext` 没有 `startAbility`，进程级上下文不能替代；这是唯一
+仍会走"三连失败"的极端路径，失败由 `onAllFailed` 日志暴露。
+
+**3. 触摸全屏窗口上的几何 API 是 no-op**
+
+触摸形态下窗口就是整块 display：`moveWindowToAsync` 会被 WMS 以 1300010
+拒绝，`setWindowLimits` 回 `fullscreen or compatible mode could not update
+new size`，`setResizeByDragEnabled` 无效果。引擎在启动/建窗时会连发这些调用
+（日志里 4 次 `setBounds`、4 组 limits、1 次 resizable），既浪费 WMS 往返，
+又让引擎的尺寸认知（1800×1519）与实际窗口（2800×1840）分裂。
+
+不变量：触摸形态（平板触摸 / 手机）+ 窗口 `FULL_SCREEN` 时，adapter 短路
+`setBounds`。触摸判定必须是**严格读**：只有成功读到 `'false'` 才算触摸，读失败
+按非触摸处理（不跳过）——跳过是破坏性动作，不能由一次读失败触发。
+**`setWindowLimits` / `setResizable` 不短路**（审计 P2-1）：这两个
+调用携带状态（"窗口必须保持这个尺寸/不可缩放"），全屏时丢弃会在窗口离开全屏
+后变成"限制从未生效、不可缩放窗口变成可拖拽"——比多一次 WMS 往返更糟。
+窗口形态（`pcModeEnabled=true`）也不短路——`setBounds` 正是引擎恢复记忆矩形
+的手段。
+
+**4. 视口推送允许"同值突发"合并（对账推除外）**
+
+round 88 确立"推送无条件"是为了应对 WMS 动画后不发 `windowSizeChange`；
+但启动期 `windowSizeChange` / `windowRectChange` / `avoidAreaChange` /
+`windowStatusChange` 会在同一帧内连续触发，产生 3ms 内 5 次相同推送
+（随后 ProcessJank）。现在的规则：**完全相同**的 bound 且距上次推送
+< 150 ms 时跳过；状态变化后的 300 ms `scheduleViewportReconcile` 以
+`force=true` 调用，**永远**送达，round 88 的"同值重申"语义不变。推送
+latch 在 native 调用成功之后才推进（调用抛异常不得吞掉同突发的下一条）。

@@ -37,12 +37,24 @@ const TAG: string = 'LaunchHelper';
 export default class LaunchHelper {
   static LaunchWithOptions(uiContext: Context | undefined,
                            want: Want,
-                           options: StartOptions): boolean {
+                           options: StartOptions,
+                           onAllFailed?: () => void): boolean {
+    const notifyFailed = (): void => {
+      if (onAllFailed === undefined) {
+        return;
+      }
+      try {
+        onAllFailed();
+      } catch (callbackException) {
+        LogUtil.warn(TAG, 'onAllFailed callback threw: ' + JSON.stringify(callbackException));
+      }
+    };
     try {
       let context = uiContext as common.UIAbilityContext ||
         uiContext as common.UIExtensionContext;
       if (!context) {
         LogUtil.error(TAG, `excute failed, want: ${JSON.stringify(want)}, options:  ${JSON.stringify(options)}`);
+        notifyFailed();
         return false;
       }
       context.startAbility(want, options)
@@ -56,6 +68,11 @@ export default class LaunchHelper {
           // geometry, which points at the processMode/startupVisibility pair.
           // Retry ladder: geometry-only StartOptions (keeps the intended size
           // and placement), then a bare want (system-default placement).
+          // Round 106 audit P1: any OTHER error means the ladder never starts
+          // (16200001 = "ability not started", the exact code a terminating
+          // context answers with) - report the failure here, otherwise the
+          // P0 acceptance anchor ("every launch attempt failed") would never
+          // be printed on the path it exists for.
           if (error.code === 16000067) {
             let reduced: StartOptions = {};
             if (options.windowLeft !== undefined) {
@@ -82,25 +99,15 @@ export default class LaunchHelper {
               reduced.windowMode = options.windowMode;
             }
             LogUtil.warn(TAG, 'retrying with geometry-only StartOptions');
-            context.startAbility(want, reduced)
-              .then(() => {
-                LogUtil.info(TAG, `geometry-only retry succeeded`);
-              })
-              .catch((retryError: BusinessError) => {
-                LogUtil.error(TAG, `geometry-only retry failed: ${JSON.stringify(retryError)} - launching bare`);
-                context.startAbility(want)
-                  .then(() => {
-                    LogUtil.info(TAG, `bare retry succeeded`);
-                  })
-                  .catch((bareError: BusinessError) => {
-                    LogUtil.error(TAG, `bare launch failed. Cause: ${JSON.stringify(bareError)}`);
-                  });
-              });
+            LaunchHelper.startRung(context, want, reduced, 'geometry-only retry', false, notifyFailed);
+          } else {
+            notifyFailed();
           }
           return false;
         });
     } catch (exception) {
       LogUtil.error(TAG, `excute failed exception. Cause: ${JSON.stringify(exception)}`);
+      notifyFailed();
       return false;
     }
     return true;
@@ -108,5 +115,35 @@ export default class LaunchHelper {
 
   static Launch(uiContext: Context | undefined, want: Want): boolean {
     return LaunchHelper.LaunchWithOptions(uiContext, want, {});
+  }
+
+  // One rung of the retry ladder (round 106 audit: the promise-only chain
+  // missed synchronous throws - startAbility can throw for an invalid/terminating
+  // context - and then never notified the caller; every rung must therefore be
+  // wrapped, and the last rung must notify).
+  private static startRung(context: common.UIAbilityContext | common.UIExtensionContext,
+                           want: Want,
+                           options: StartOptions,
+                           label: string,
+                           isLast: boolean,
+                           notifyFailed: () => void): void {
+    try {
+      context.startAbility(want, options)
+        .then(() => {
+          LogUtil.info(TAG, `${label} succeeded`);
+        })
+        .catch((error: BusinessError) => {
+          if (isLast) {
+            LogUtil.error(TAG, `${label} failed. Cause: ${JSON.stringify(error)}`);
+            notifyFailed();
+            return;
+          }
+          LogUtil.error(TAG, `${label} failed: ${JSON.stringify(error)} - launching bare`);
+          LaunchHelper.startRung(context, want, {}, 'bare launch', true, notifyFailed);
+        });
+    } catch (exception) {
+      LogUtil.error(TAG, `${label} threw: ${JSON.stringify(exception)}`);
+      notifyFailed();
+    }
   }
 }

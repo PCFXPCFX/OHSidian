@@ -77,6 +77,29 @@ export class WebAbility extends WebBaseAbility {
   private static pendingShareWant: Want | undefined = undefined;
   private static pendingShareDispatched: boolean = false;
   private static COLD_SHARE_DELAY_MS: number = 15000;
+  // Round 106: process-wide registry of live ability instances. The settings
+  // key observer is PROCESS-global (a second registerKeyObserver answers false
+  // with "npai_settings_register_observer, already registered"), so the old
+  // per-window registration bound the callback to whichever window registered
+  // first: device log 07.442 res:false for the second window, 09.087 unregister
+  // when the first was destroyed - the surviving window then never received a
+  // PC-mode switch. Register once, broadcast to every live instance.
+  private static liveInstances: Array<WebAbility> = [];
+  private static pcmodeObserverRegistered: boolean = false;
+  private static pcmodeObserverContext: Context | undefined = undefined;
+  // Round 106: process-wide once guards for side effects that write the SHARED
+  // mode file / register process-global listeners. Every new window used to redo
+  // them (device log: window 813 and 819 each republished 277-280 font mappings
+  // and registered another system-configuration listener that was never
+  // removed).
+  private static bootPublishesDone: boolean = false;
+  private static configListenerRegistered: boolean = false;
+  // Round 106: window events (size/rect/avoidArea/status) can all fire inside
+  // the same frame at startup; five identical "re-pushed viewport bounds" were
+  // logged within 3 ms, followed by ProcessJank. Suppress an IDENTICAL bound
+  // pushed within this window; the 300 ms reconciliation still pushes, so the
+  // same-value re-asserts that round 88 relies on are preserved.
+  private static REPUSH_DEDUPE_MS: number = 150;
   private abilityManager: AbilityManager | undefined = undefined;
   private nativeThemeAdapter: NativeThemeAdapter | undefined = undefined;
   // PC-mode (floating windows) state on tablets; kept in sync with the
@@ -93,8 +116,15 @@ export class WebAbility extends WebBaseAbility {
   // round 88: NO value-compare dedup on the engine push channel - the
   // engine consumes every windowSizeChange/windowRectChange event, including
   // same-value ones, e.g. the WINDOW_SHOWN re-assert; skipping them broke
-  // maximize/restore and drag-resize on device); -1 = idle.
+  // maximize/restore and drag-resize on device). Round 106 adds exactly ONE
+  // exception, on the repushViewportBounds path only: an IDENTICAL bound
+  // inside a single startup burst (150 ms) is coalesced; the reconciliation
+  // below is forced and never coalesced. -1 = idle.
   private viewportRecheckTimer: number = -1;
+  // Round 106: burst coalescing for the push (IDENTICAL bound within
+  // REPUSH_DEDUPE_MS only; see the static comment).
+  private lastPushedBoundKey: string = '';
+  private lastPushedAtMs: number = 0;
   // Throttle for geometry-only mode-file writes (round 88): drag-resize
   // fires windowSizeChange per frame and the rect is part of the per-window
   // entry; without the throttle every tick rewrites the file on the UI
@@ -145,10 +175,12 @@ export class WebAbility extends WebBaseAbility {
   // size (utils/SurfaceReady.ets), so every push below reacts to a real
   // window-geometry event. The single exception is the one-shot
   // reconciliation after a window-status transition (round 87 A2, kept
-  // unconditional in round 88 - docs/window-state-machine.md §3). Engine
-  // pushes are NEVER deduped: the engine consumes each event, including
-  // same-value ones (the WINDOW_SHOWN re-assert, reason-tagged rect events);
-  // value-compare skipping broke maximize/restore and drag-resize on device.
+  // unconditional in round 88 and force-pushed in round 106 -
+  // docs/window-state-machine.md §2/§3). Engine pushes are otherwise NEVER
+  // deduped: the engine consumes each event, including same-value ones (the
+  // WINDOW_SHOWN re-assert, reason-tagged rect events); value-compare skipping
+  // broke maximize/restore and drag-resize on device. Round 106 coalesces only
+  // an IDENTICAL bound fired inside one startup burst (see REPUSH_DEDUPE_MS).
   //  - state resolution order (round 102): pcModeEnabled is seeded
   //    synchronously at the TOP of onWindowStageCreate (resolvePcModeAtBoot)
   //    and the boot-time pcmode sync runs BEFORE loadContent, so no touch-only
@@ -955,22 +987,42 @@ export class WebAbility extends WebBaseAbility {
     }
     this.viewportRecheckTimer = setTimeout(() => {
       this.viewportRecheckTimer = -1;
-      this.repushViewportBounds();
+      // Forced: the reconciliation is the round-88 "same-value re-assert" and
+      // must never be coalesced by the round-106 burst exception.
+      this.repushViewportBounds(true);
     }, 300);
   }
 
   // Re-pushes the current window bounds to the engine. Called from real
   // geometry events (avoidAreaChange, windowStatusChange, the A2
-  // reconciliation). UNCONDITIONAL (round 88): the engine consumes every
-  // push, including same-value re-asserts.
-  private repushViewportBounds(): void {
+  // reconciliation). UNCONDITIONAL (round 88) with the round-106 burst
+  // exception: `force` bypasses the 150 ms identical-bound coalescing and is
+  // used by the reconciliation timer.
+  private repushViewportBounds(force: boolean = false): void {
     try {
       const win = this.mainWindow;
       if (!win) {
         return;
       }
       const bound = this.computeViewportBound(win.getWindowProperties());
+      // Round 106: coalesce the startup burst. windowSizeChange /
+      // windowRectChange / avoidAreaChange / windowStatusChange all fired
+      // inside the first frames; five identical pushes went out within 3 ms
+      // (device log 02.389..02.392) and were followed by ProcessJank. Only an
+      // IDENTICAL bound inside REPUSH_DEDUPE_MS is suppressed, and the
+      // reconciliation passes force=true so it is ALWAYS delivered.
+      const key: string = bound.left + ',' + bound.top + ',' + bound.width + ',' + bound.height;
+      const now: number = Date.now();
+      if (!force && key === this.lastPushedBoundKey &&
+        now - this.lastPushedAtMs < WebAbility.REPUSH_DEDUPE_MS) {
+        LogUtil.info(TAG, 're-push skipped (identical bound within burst): ' + key);
+        return;
+      }
       this.nativeContext.OnWindowSizeChange(this.xcomponentId, bound);
+      // Latch AFTER the native call: if it throws, the catch below must not
+      // swallow the next identical event of the same burst (audit P2-2).
+      this.lastPushedBoundKey = key;
+      this.lastPushedAtMs = now;
       LogUtil.info(TAG, 're-pushed viewport bounds: ' + JSON.stringify(bound));
     } catch (exception) {
       LogUtil.warn(TAG, 're-push viewport bounds failed: ' + JSON.stringify(exception));
@@ -1194,21 +1246,24 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
-  // publishSystemFonts completed successfully in this ability instance.
-  private systemFontsPublished: boolean = false;
+  // publishSystemFonts completed successfully in this PROCESS (round 106:
+  // static - the mode file it writes is shared by every window, and the old
+  // per-instance flag made each new window redo the whole 277-280 mapping pass).
+  private static systemFontsPublished: boolean = false;
   // Family count at the successful publish (F-N3): onFontIdUpdated compares
   // the current system list against it and resets the one-shot lock when a
   // runtime font-package install changed the list size.
-  private publishedFontFamilyCount: number = -1;
-  // publishSystemFonts run currently in flight (guards concurrent callers).
-  private systemFontsPublishing: boolean = false;
+  private static publishedFontFamilyCount: number = -1;
+  // publishSystemFonts run currently in flight (guards concurrent callers;
+  // static for the same process-wide reason).
+  private static systemFontsPublishing: boolean = false;
   // probeThemeManifestFont outcome: the active theme slot exists and its
   // manifest parsed, but NO listed font passed the size gate - i.e. the
   // DEFAULT style, whose font is an empty stub (even Ace cannot load it).
   private manifestFontIsStub: boolean = false;
 
   private async publishSystemFonts(): Promise<void> {
-    if (this.systemFontsPublished) {
+    if (WebAbility.systemFontsPublished) {
       // One successful publish per process: the system font list cannot
       // change while we run, and re-running the static + descriptor passes
       // re-loads every typeface (the engine logs 'not variable font!' for
@@ -1218,15 +1273,15 @@ export class WebAbility extends WebBaseAbility {
       LogUtil.info(TAG, 'publishSystemFonts: already published this launch, skipping');
       return;
     }
-    if (this.systemFontsPublishing) {
+    if (WebAbility.systemFontsPublishing) {
       LogUtil.info(TAG, 'publishSystemFonts: run already in progress, skipping');
       return;
     }
-    this.systemFontsPublishing = true;
+    WebAbility.systemFontsPublishing = true;
     try {
       await this.publishSystemFontsInner();
     } finally {
-      this.systemFontsPublishing = false;
+      WebAbility.systemFontsPublishing = false;
     }
   }
 
@@ -1344,15 +1399,15 @@ export class WebAbility extends WebBaseAbility {
       // (first run of a build with a better resolver must still publish).
       if (prevFonts !== undefined && prevFonts === nextFontsJson &&
         prevFiles !== undefined && prevFiles === nextFilesJson) {
-        this.systemFontsPublished = true;
-        this.publishedFontFamilyCount = families.length;
+        WebAbility.systemFontsPublished = true;
+        WebAbility.publishedFontFamilyCount = families.length;
         return;
       }
       cfg['systemFonts'] = nextFontsJson;
       cfg['fontFiles'] = nextFilesJson;
       this.publishModeFileAtomic(filePath, cfg);
-      this.systemFontsPublished = true;
-      this.publishedFontFamilyCount = families.length;
+      WebAbility.systemFontsPublished = true;
+      WebAbility.publishedFontFamilyCount = families.length;
       LogUtil.info(TAG, 'system fonts published: ' + families.length + ' families, ' +
         fontFiles.length + ' file mappings');
     } catch (err) {
@@ -1808,47 +1863,229 @@ export class WebAbility extends WebBaseAbility {
 
   // Registers the API-24 system-configuration listener (font style/size/
   // weight pushes) and republishes the font pieces of the mode file.
+  //
+  // Round 106: registration is PROCESS-wide (static guard) and the callbacks
+  // dispatch to a LIVE window instance instead of closing over the window that
+  // happened to register first. Previously every new window registered another
+  // listener that was never removed: after a vault switch the callbacks ran
+  // publishSystemFonts()/writeFontScaleToFile() on a destroyed ability (closure
+  // leak, log noise, mode-file writes from a dead window).
   private registerSystemConfigListener(): void {
+    if (WebAbility.configListenerRegistered) {
+      LogUtil.info(TAG, 'system configuration listener already registered (process-wide), skipping');
+      return;
+    }
     try {
       const appContext = this.context.getApplicationContext();
       appContext.onSystemConfigurationUpdated({
         onFontIdUpdated: (fontId: string) => {
-          LogUtil.info(TAG, 'onFontIdUpdated: ' + fontId);
-          // F-N3: a runtime font-package install changes the system font
-          // list but fires no other callback - the publish-once lock would
-          // keep the picker stale until the next cold start. Reset the lock
-          // when the list size moved so the republish below refreshes it.
-          try {
-            const list = font.getSystemFontList();
-            if (Array.isArray(list) && this.publishedFontFamilyCount >= 0 &&
-              list.length !== this.publishedFontFamilyCount) {
-              LogUtil.info(TAG, 'font list size changed (' + this.publishedFontFamilyCount +
-                ' -> ' + list.length + '), republishing font picker data');
-              this.systemFontsPublished = false;
-            }
-          } catch (e) {
-            // list unavailable - keep the lock state as-is
-          }
-          // The font system is provably ready here - a safe moment to
-          // (re)publish the picker data if the early-startup attempt raced.
-          this.publishSystemFonts();
-          this.publishFontId(fontId);
-          this.publishStyleFonts();
-          this.publishThemeFontPath();
+          WebAbility.dispatchFontIdUpdate(fontId);
         },
         onFontSizeScaleUpdated: (fontSizeScale: number) => {
-          if (fontSizeScale > 0) {
-            const next: number = Math.round(fontSizeScale * 100) / 100;
-            if (next !== this.fontScale) {
-              this.fontScale = next;
-              this.writeFontScaleToFile(next);
-            }
-          }
+          WebAbility.dispatchFontScaleUpdate(fontSizeScale);
         },
       });
+      WebAbility.configListenerRegistered = true;
       LogUtil.info(TAG, 'system configuration listener registered');
     } catch (exception) {
       LogUtil.warn(TAG, 'onSystemConfigurationUpdated registration failed: ' + JSON.stringify(exception));
+    }
+  }
+
+  // Picks the identifier the SHARED mode-file writes should be attributed to:
+  // the main window when one is alive, else the oldest live one.
+  private static primaryLiveInstance(): WebAbility | undefined {
+    for (let i = 0; i < WebAbility.liveInstances.length; i++) {
+      if (WebAbility.liveInstances[i].isMainAppWindow) {
+        return WebAbility.liveInstances[i];
+      }
+    }
+    if (WebAbility.liveInstances.length > 0) {
+      return WebAbility.liveInstances[0];
+    }
+    return undefined;
+  }
+
+  private static dispatchFontIdUpdate(fontId: string): void {
+    const inst = WebAbility.primaryLiveInstance();
+    if (inst === undefined) {
+      // No window to publish from: let the next window stage re-run the boot
+      // publish block instead of dropping the event (R106-7). The publish
+      // itself is cleared too - otherwise the next block would hit the
+      // publish-once guard and silently skip the new font list (audit P2-3).
+      WebAbility.bootPublishesDone = false;
+      WebAbility.systemFontsPublished = false;
+      LogUtil.warn(TAG, 'onFontIdUpdated: no live window to publish font data');
+      return;
+    }
+    try {
+      LogUtil.info(TAG, 'onFontIdUpdated: ' + fontId);
+      // F-N3: a runtime font-package install changes the system font list but
+      // fires no other callback - the publish-once lock would keep the picker
+      // stale until the next cold start. Reset the lock when the list size
+      // moved so the republish below refreshes it.
+      try {
+        const list = font.getSystemFontList();
+        if (Array.isArray(list) && WebAbility.publishedFontFamilyCount >= 0 &&
+          list.length !== WebAbility.publishedFontFamilyCount) {
+          LogUtil.info(TAG, 'font list size changed (' + WebAbility.publishedFontFamilyCount +
+            ' -> ' + list.length + '), republishing font picker data');
+          WebAbility.systemFontsPublished = false;
+        }
+      } catch (e) {
+        // list unavailable - keep the lock state as-is
+      }
+      // The font system is provably ready here - a safe moment to (re)publish
+      // the picker data if the early-startup attempt raced.
+      inst.publishSystemFonts();
+      inst.publishFontId(fontId);
+      inst.publishStyleFonts();
+      inst.publishThemeFontPath();
+    } catch (exception) {
+      LogUtil.warn(TAG, 'onFontIdUpdated dispatch failed: ' + JSON.stringify(exception));
+    }
+  }
+
+  private static dispatchFontScaleUpdate(fontSizeScale: number): void {
+    if (!(fontSizeScale > 0)) {
+      return;
+    }
+    const inst = WebAbility.primaryLiveInstance();
+    if (inst === undefined) {
+      return;
+    }
+    try {
+      const next: number = Math.round(fontSizeScale * 100) / 100;
+      // Audit P3: no instance-field compare here - onConfigurationUpdate and
+      // this listener are independent channels, so the field can lag behind
+      // the file and would swallow a real change. writeFontScaleToFile already
+      // compares against the file value.
+      inst.fontScale = next;
+      inst.writeFontScaleToFile(next);
+    } catch (exception) {
+      LogUtil.warn(TAG, 'onFontSizeScaleUpdated dispatch failed: ' + JSON.stringify(exception));
+    }
+  }
+
+  // Round 106: process-wide registry used by the pcmode broadcast and the
+  // configuration-listener dispatch (see the static field comments).
+  private static addLiveInstance(inst: WebAbility): void {
+    if (WebAbility.liveInstances.indexOf(inst) === -1) {
+      WebAbility.liveInstances.push(inst);
+    }
+  }
+
+  private static removeLiveInstance(inst: WebAbility): void {
+    const idx: number = WebAbility.liveInstances.indexOf(inst);
+    if (idx >= 0) {
+      WebAbility.liveInstances.splice(idx, 1);
+    }
+    // Audit P2-4: if the boot publisher died before the (async) font/theme
+    // pass completed, let the next window stage redo it - the old per-window
+    // behaviour self-healed here and the process-wide once must not lose that.
+    if (!WebAbility.systemFontsPublished) {
+      WebAbility.bootPublishesDone = false;
+    }
+    if (WebAbility.liveInstances.length > 0) {
+      // The observer was registered with the context of whichever window came
+      // first; if THAT window dies while others live, rebind the observer to a
+      // live window so the final unregister still has a valid context.
+      if (WebAbility.pcmodeObserverRegistered &&
+        WebAbility.pcmodeObserverContext === inst.context) {
+        const obsCtx = WebAbility.pcmodeObserverContext;
+        try {
+          if (obsCtx !== undefined) {
+            settings.unregisterKeyObserver(obsCtx, 'window_pcmode_switch_status',
+              settings.domainName.USER_PROPERTY);
+          }
+        } catch (exception) {
+          LogUtil.warn(TAG, 'pcmode observer rebind unregister failed: ' +
+            JSON.stringify(exception));
+        }
+        WebAbility.pcmodeObserverRegistered = false;
+        WebAbility.pcmodeObserverContext = undefined;
+        const nextOwner = WebAbility.liveInstances[0];
+        if (!WebAbility.ensurePcmodeObserver(nextOwner.context)) {
+          LogUtil.warn(TAG, 'pcmode observer rebind failed; runtime switches stop ' +
+            'working until the next window stage is created');
+        }
+      }
+      return;
+    }
+    if (!WebAbility.pcmodeObserverRegistered) {
+      return;
+    }
+    // Last window of the process: hand the process-global observer back so a
+    // later cold start does not see "already registered" from a dead context.
+    const obsCtx = WebAbility.pcmodeObserverContext;
+    try {
+      if (obsCtx !== undefined) {
+        settings.unregisterKeyObserver(obsCtx, 'window_pcmode_switch_status',
+          settings.domainName.USER_PROPERTY);
+        LogUtil.info(TAG, 'pcmode observer unregistered (last window closed)');
+      }
+    } catch (exception) {
+      LogUtil.warn(TAG, 'unregister pcmode observer failed: ' + JSON.stringify(exception));
+    }
+    WebAbility.pcmodeObserverRegistered = false;
+    WebAbility.pcmodeObserverContext = undefined;
+  }
+
+  // Registers the process-global setting observer exactly once and broadcasts
+  // every change to all live windows. Returns whether the observer is (already)
+  // registered.
+  // Audit P2-7: prefer the APPLICATION context - it is process-scoped, so the
+  // observer no longer depends on the lifetime of whichever window registered
+  // first (a window-context registration can die with its window and leave the
+  // rebind path as the only recovery). The ability context stays as a fallback
+  // for builds where the application context cannot be used here.
+  private static ensurePcmodeObserver(context: Context): boolean {
+    if (WebAbility.pcmodeObserverRegistered) {
+      return true;
+    }
+    const candidates: Array<Context> = [];
+    let appCtx: Context | undefined = undefined;
+    try {
+      appCtx = context.getApplicationContext();
+    } catch (exception) {
+      appCtx = undefined;
+    }
+    if (appCtx !== undefined) {
+      candidates.push(appCtx);
+    }
+    candidates.push(context);
+    for (let i = 0; i < candidates.length; i++) {
+      try {
+        const res: boolean = settings.registerKeyObserver(candidates[i],
+          'window_pcmode_switch_status', settings.domainName.USER_PROPERTY, () => {
+          WebAbility.broadcastPcmodeChange();
+        });
+        if (res) {
+          WebAbility.pcmodeObserverRegistered = true;
+          WebAbility.pcmodeObserverContext = candidates[i];
+          return true;
+        }
+      } catch (exception) {
+        LogUtil.warn(TAG, 'register pcmode observer failed (candidate ' + i + '): ' +
+          JSON.stringify(exception));
+      }
+    }
+    return false;
+  }
+
+  private static broadcastPcmodeChange(): void {
+    // Snapshot: updateWindowPcmodeSwitchStatus can synchronously destroy
+    // nothing, but a live instance may still remove itself via a re-entrant
+    // callback; iterating a copy keeps the broadcast deterministic.
+    const list: Array<WebAbility> = WebAbility.liveInstances.slice();
+    for (let i = 0; i < list.length; i++) {
+      const inst = list[i];
+      try {
+        inst.updateWindowPcmodeSwitchStatus(inst.context);
+      } catch (exception) {
+        LogUtil.warn(TAG, 'pcmode broadcast to ' + inst.xcomponentId +
+          ' failed: ' + JSON.stringify(exception));
+      }
     }
   }
 
@@ -1905,6 +2142,15 @@ export class WebAbility extends WebBaseAbility {
     // remembered-bounds setBounds had to undo them - the visible "window
     // flashes full-size, then returns to the remembered size".
     this.pcModeEnabled = this.resolvePcModeAtBoot();
+    // Round 106: join the process-wide registry on EVERY form factor - it also
+    // feeds the font/scale dispatch (a phone has no pcmode observer but still
+    // needs the configuration-listener callbacks to reach a live window).
+    WebAbility.addLiveInstance(this);
+    // Audit fix: a rebuilt window stage must not inherit the previous stage's
+    // coalescing latch, or the first identical push of the new stage could be
+    // swallowed.
+    this.lastPushedBoundKey = '';
+    this.lastPushedAtMs = 0;
     // Round 102: every window-stage setup start counts as a FIRST sync again
     // (onWindowStageDestroy -> onWindowStageCreate can happen on the same
     // ability instance: display/casting switches, window-stage rebuild). The
@@ -1986,27 +2232,34 @@ export class WebAbility extends WebBaseAbility {
     } catch (exception) {
       LogUtil.warn(TAG, 'read system font scale failed: ' + JSON.stringify(exception));
     }
-    // Publish the user-visible Documents dir (uninstall-safe vault root);
-    // the renderer's default-vault override consumes cfg.documentsDir.
-    // READ_WRITE_DOCUMENTS_DIRECTORY is a user_grant permission: request it
-    // once here (main window only) and republish the dir when granted. The
-    // request is a no-op dialog after the first approval.
+    // Round 106: these publishes write the SHARED mode file and walk every
+    // installed font descriptor; one pass per PROCESS is enough. New windows
+    // used to repeat the whole set (device log: 813 and 819 each republished
+    // 277-280 mappings and re-ran the style/theme scans), and each of them
+    // registered another process-global configuration listener.
+    // Audit P2-5: the listener registration and the (idempotent, value-compared)
+    // documents-dir publish stay OUTSIDE the once block - both have their own
+    // guards, and if the first attempt throws, a later window must retry
+    // instead of leaving the process without the listener until restart.
     this.publishDocumentsDir();
-    this.publishSystemFonts();
-    // System style font: publish the initial fontId (Configuration.fontId)
-    // and the STYLISH family mapping, then keep both fresh via the API-24
-    // system-configuration listener (onFontIdUpdated etc.).
-    try {
-      const initialFontId = this.context.config.fontId;
-      if (typeof initialFontId === 'string' && initialFontId.length > 0) {
-        this.publishFontId(initialFontId);
-      }
-    } catch (exception) {
-      LogUtil.warn(TAG, 'read initial fontId failed: ' + JSON.stringify(exception));
-    }
-    this.publishStyleFonts();
-    this.publishThemeFontPath();
     this.registerSystemConfigListener();
+    if (!WebAbility.bootPublishesDone) {
+      WebAbility.bootPublishesDone = true;
+      this.publishSystemFonts();
+      // System style font: publish the initial fontId (Configuration.fontId)
+      // and the STYLISH family mapping, then keep both fresh via the API-24
+      // system-configuration listener (onFontIdUpdated etc.).
+      try {
+        const initialFontId = this.context.config.fontId;
+        if (typeof initialFontId === 'string' && initialFontId.length > 0) {
+          this.publishFontId(initialFontId);
+        }
+      } catch (exception) {
+        LogUtil.warn(TAG, 'read initial fontId failed: ' + JSON.stringify(exception));
+      }
+      this.publishStyleFonts();
+      this.publishThemeFontPath();
+    }
     if (this.isMainAppWindow) {
       // Startup-time user_grant permissions (main window only). 0 ==
       // REQUEST_PERMISSION_SUCCESS (module-private constant there).
@@ -2062,21 +2315,12 @@ export class WebAbility extends WebBaseAbility {
       // uses this.context, so register/unregister now share one context
       // object (round 102; getContext() also depends on a loaded UI).
       const context: Context = this.context;
-      // Round 102: this call now sits on the MAIN path, before loadContent -
-      // it must never abort the window setup. settings is an external data
-      // service and its calls are documented as throwing; a failure only
-      // costs the runtime switch, the boot-time read below still applies the
-      // current form factor (same split as the read hardening).
-      let res: boolean = false;
-      try {
-        res = settings.registerKeyObserver(context,
-          'window_pcmode_switch_status', settings.domainName.USER_PROPERTY, () => {
-          this.updateWindowPcmodeSwitchStatus(context);
-        });
-      } catch (registerException) {
-        LogUtil.warn(TAG, 'register pcmode observer failed: ' +
-          JSON.stringify(registerException));
-      }
+      // Round 106: join the process-wide broadcast registry FIRST, then make
+      // sure the process-global observer exists. A second window no longer
+      // registers (settings answers false with "already registered") - it just
+      // receives broadcasts. On destruction the window leaves the registry;
+      // the observer is unregistered when the LAST window closes.
+      const res: boolean = WebAbility.ensurePcmodeObserver(context);
       LogUtil.info(TAG, 'register window_pcmode_switch_status,res:' + res + ',xcomponentId:' + this.xcomponentId);
       // Whether or not the observer registered, the current value must be
       // read once: a tablet already in PC mode at launch needs the right
@@ -2375,19 +2619,24 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
+  onDestroy(): void {
+    // Round 106: safety net for terminations that never reach
+    // onWindowStageDestroy (abnormal teardown, stateless windows). Removing
+    // twice is a no-op; leaving a dead instance in the broadcast registry is
+    // not.
+    WebAbility.removeLiveInstance(this);
+    // Keep the super chain intact (subclasses call super.onDestroy()).
+    super.onDestroy();
+  }
+
   onWindowStageDestroy() {
-    // Unregister the PC-mode settings observer regardless of how far setup
-    // got: it was registered on this ability's context in onWindowStage-
-    // Create and keeps a `this` closure alive. Without unregistering, every
-    // system setting change after destruction still ran
-    // updateWindowPcmodeSwitchStatus against a dead window (log flooding,
-    // memory leak, occasional NPE).
-    try {
-      settings.unregisterKeyObserver(this.context, 'window_pcmode_switch_status',
-        settings.domainName.USER_PROPERTY);
-    } catch (exception) {
-      LogUtil.warn(TAG, 'unregister pcmode observer failed: ' + JSON.stringify(exception));
-    }
+    // Round 106: the settings observer is PROCESS-global now (registered once,
+    // broadcasts to every live window). A closing window only leaves the
+    // registry; the observer itself is unregistered when the LAST window of
+    // the process goes away. The old per-window unregister killed the observer
+    // for the windows that were still alive (device log: window 811 destroyed
+    // at 09.087 -> the surviving window stopped receiving PC-mode switches).
+    WebAbility.removeLiveInstance(this);
     // A2: a pending reconciliation must not fire against a dead window.
     if (this.viewportRecheckTimer !== -1) {
       clearTimeout(this.viewportRecheckTimer);

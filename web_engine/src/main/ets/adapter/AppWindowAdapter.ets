@@ -64,6 +64,16 @@ export class AppWindowAdapter extends BaseAdapter {
   // Set synchronously on show=true, cleared when the create callback settles
   // - closes the window between "show requested" and "window assigned".
   private loginWindowCreating: boolean = false;
+  // Round 106: engine window ids that have been told to close but whose ability
+  // is still tearing down (closeWindow -> terminateSelf is async, and the proxy
+  // only disappears in onWindowStageDestroy). createWindow must never launch a
+  // new window FROM such a window: its context is already terminating and every
+  // startAbility fails (16000067, then 16200001). Device log 09.070 closeWindow(1)
+  // -> 09.079 "launch from primary window context" (browser1, the closing one)
+  // -> three failed launches -> browser4 never appeared, the engine waited ~20 s.
+  // Engine window ids are monotonically allocated per process, so entries never
+  // need recycling.
+  private closingWindows: Set<string> = new Set<string>();
 
   constructor(
     @inject(AbilityManager) abilityManager: AbilityManager,
@@ -84,6 +94,62 @@ export class AppWindowAdapter extends BaseAdapter {
 
   private getWindow(id: number): window.Window | undefined {
     return this.abilityManager.getProxy(id)?.getWindow();
+  }
+
+  private isClosing(proxyId: string): boolean {
+    return this.closingWindows.has(proxyId);
+  }
+
+  // Round 106: a FULL_SCREEN window cannot honour move/resize/limits - WMS
+  // rejects moveWindowToAsync with 1300010 and ignores size limits
+  // ("fullscreen or compatible mode could not update new size"). The engine
+  // keeps issuing them (device log: setBounds x4, then limits 0..MAX ->
+  // 1800x1463 -> 1800x1519 while the window stayed 2800x1840), which left the
+  // engine's own size model diverged from the real window.
+  private isFullscreenWindow(windowClass: window.Window | undefined): boolean {
+    if (!windowClass) {
+      return false;
+    }
+    try {
+      return windowClass.getWindowStatus() === window.WindowStatusType.FULL_SCREEN;
+    } catch (exception) {
+      return false;
+    }
+  }
+
+  // setBounds is allowed to take a fullscreen window OUT of fullscreen (the
+  // engine's remembered-rect restore), so the skip needs the form factor too:
+  // only the TOUCH regime (tablet without PC mode, phone) is guaranteed
+  // single-window/full-display.
+  private isTouchFullscreen(windowClass: window.Window | undefined): boolean {
+    if (!this.isFullscreenWindow(windowClass)) {
+      return false;
+    }
+    return this.isTouchFormFactorStrict();
+  }
+
+  // Audit P2-2: for a DESTRUCTIVE decision (skip the engine's remembered-rect
+  // restore) a settings read failure must NOT be translated into "touch".
+  // Only a successful read of 'false' counts as touch on a tablet; unknown or
+  // PC stays non-touch, same direction as WebAbility's "read failure keeps the
+  // window form factor" invariant. Phone has no PC mode at all.
+  private isTouchFormFactorStrict(): boolean {
+    if (deviceInfo.deviceType === 'phone') {
+      return true;
+    }
+    if (deviceInfo.deviceType !== 'tablet') {
+      return false;
+    }
+    try {
+      const ctx = this.ctxAdapter.getActiveContext() || this.ctxAdapter.getContext();
+      const value: string = settings.getValueSync(ctx, 'window_pcmode_switch_status',
+        'true', settings.domainName.USER_PROPERTY);
+      return value === 'false';
+    } catch (exception) {
+      LogUtil.warn(TAG, 'touch form factor read failed, not skipping setBounds: ' +
+        JSON.stringify(exception));
+      return false;
+    }
   }
 
   private getDisplayDensity(): number {
@@ -149,26 +215,69 @@ export class AppWindowAdapter extends BaseAdapter {
   private launchContext(): Context | undefined {
     try {
       const list: WebProxy[] = this.abilityManager.getProxyList();
-      if (list.length > 1) {
-        for (let i = 0; i < list.length; i++) {
-          if (list[i].getWindowId() === ConfigData.DEFAULT_WINDOW_ID) {
-            const primaryCtx = list[i].getWindowContext() as Context | undefined;
-            if (primaryCtx !== undefined) {
-              LogUtil.info(TAG, 'launch from primary window context');
-              return primaryCtx;
-            }
-          }
+      // Round 106: never launch from a window that has been asked to close -
+      // its context is already terminating and startAbility fails every retry
+      // (device log 09.070..09.096: primary closed, then "launch from primary
+      // window context", then 16000067 / 16200001 / 16200001). The primary is
+      // still preferred when it is alive; otherwise the oldest LIVE window.
+      // Audit fix: prune marks whose proxy is gone (a rejected terminateSelf
+      // or an engine id that was never in this proxy list must not blacklist a
+      // live window for the rest of the process).
+      this.pruneClosingWindows(list);
+      let fallback: Context | undefined = undefined;
+      let fallbackId: string = '';
+      for (let i = 0; i < list.length; i++) {
+        if (this.isClosing(list[i].getWindowId())) {
+          LogUtil.warn(TAG, 'launch context: window ' + list[i].getWindowId() +
+            ' is closing, skipping');
+          continue;
         }
-        const oldestCtx = list[0].getWindowContext() as Context | undefined;
-        if (oldestCtx !== undefined) {
-          LogUtil.info(TAG, 'launch from oldest window context: ' + list[0].getWindowId());
-          return oldestCtx;
+        const ctx = list[i].getWindowContext() as Context | undefined;
+        if (ctx === undefined) {
+          continue;
+        }
+        if (list[i].getWindowId() === ConfigData.DEFAULT_WINDOW_ID) {
+          LogUtil.info(TAG, 'launch from primary window context');
+          return ctx;
+        }
+        if (fallback === undefined) {
+          fallback = ctx;
+          fallbackId = list[i].getWindowId();
         }
       }
+      if (fallback !== undefined) {
+        LogUtil.info(TAG, 'launch from oldest live window context: ' + fallbackId +
+          ' (primary ' + ConfigData.DEFAULT_WINDOW_ID + ' unavailable)');
+        return fallback;
+      }
+      // Every window is closing: there is no stable context left. Fall back to
+      // the active context - it may already be terminating, in which case the
+      // failure callback reports it. warn, not error: this path can still
+      // succeed and a device-log grep must not read it as a failure.
+      LogUtil.warn(TAG, 'launch context: all windows are closing, falling back to active context');
     } catch (exception) {
       LogUtil.warn(TAG, 'launchContext failed: ' + JSON.stringify(exception));
     }
     return this.ctxAdapter.getActiveContext();
+  }
+
+  private pruneClosingWindows(list: WebProxy[]): void {
+    if (this.closingWindows.size === 0) {
+      return;
+    }
+    const live: Set<string> = new Set<string>();
+    for (let i = 0; i < list.length; i++) {
+      live.add(list[i].getWindowId());
+    }
+    const stale: Array<string> = [];
+    this.closingWindows.forEach((id: string) => {
+      if (!live.has(id)) {
+        stale.push(id);
+      }
+    });
+    for (let i = 0; i < stale.length; i++) {
+      this.closingWindows.delete(stale[i]);
+    }
   }
 
   @LogMethod
@@ -294,7 +403,13 @@ export class AppWindowAdapter extends BaseAdapter {
       if (param.display_id != -1) {
         options.displayId = param.display_id;
       }
-      LaunchHelper.LaunchWithOptions(this.launchContext(), want, options);
+      LaunchHelper.LaunchWithOptions(this.launchContext(), want, options, () => {
+        // Round 106: the whole retry ladder is exhausted - this window id will
+        // never get an XComponent. Without this line the only trace was the
+        // engine's own "getProxy failed, proxyId: browserN" loop for ~20 s.
+        LogUtil.error(TAG, 'createWindow: every launch attempt failed for window ' +
+          param.window_id + ' - no XComponent will be created for it');
+      });
     };
 
     image.createPixelMap(color, {
@@ -315,12 +430,25 @@ export class AppWindowAdapter extends BaseAdapter {
   @LogMethod
   closeWindow(id: number) {
     let proxy = this.abilityManager.getProxy(id);
+    // Round 106: record the close BEFORE terminateSelf (async). createWindow
+    // may run in the same task and must not choose this window as its launch
+    // context (see closingWindows).
+    let closingId: string = '';
+    if (proxy !== undefined) {
+      closingId = proxy.getWindowId();
+      this.closingWindows.add(closingId);
+      LogUtil.info(TAG, 'closeWindow: window ' + closingId + ' marked closing');
+    }
     let context = proxy?.getWindowContext() as common.UIAbilityContext;
     if (!context) {
       // Without a context the terminate call is a silent no-op and the
       // engine believes the window closed while it is still on screen.
       LogUtil.error(TAG, 'closeWindow: no context for window ' + id +
         ', proxy=' + JSON.stringify(proxy !== undefined));
+      // Audit fix: the close did not happen - do not blacklist a live window.
+      if (closingId !== '') {
+        this.closingWindows.delete(closingId);
+      }
       return;
     }
     context.terminateSelf()
@@ -329,6 +457,12 @@ export class AppWindowAdapter extends BaseAdapter {
       })
       .catch((err: BusinessError) => {
         LogUtil.error(TAG, 'Failed to close window. Cause: ' + JSON.stringify(err));
+        // Audit fix: a rejected terminate means the window may still be alive;
+        // keep it eligible as a launch context (prune would also drop it only
+        // once its proxy disappears, which never happens if it stays up).
+        if (closingId !== '') {
+          this.closingWindows.delete(closingId);
+        }
       });
   }
 
@@ -504,6 +638,17 @@ export class AppWindowAdapter extends BaseAdapter {
       return;
     }
 
+    // Round 106 (P2-5): touch-mode window == the whole display. WMS rejects
+    // the move with 1300010 and there is no rect to restore, so every engine
+    // push only cost a round-trip (device log: setBounds x4 in 60 ms, all
+    // rejected). Window mode is exempt - setBounds is how the engine restores
+    // a remembered floating rect there.
+    if (this.isTouchFullscreen(windowClass)) {
+      LogUtil.info(TAG, 'setBounds skipped: window ' + id + ' is fullscreen on touch form factor');
+      callback && callback();
+      return;
+    }
+
     const windowProp = windowClass?.getWindowProperties();
 
     // Mobile-emulated window requests can carry no geometry at all ({}):
@@ -552,8 +697,11 @@ export class AppWindowAdapter extends BaseAdapter {
 
     // Diagnostic: the engine manages window bounds itself (desktop behavior);
     // on fullscreen windows the system rejects the calls. Log both the
-    // requested and the actual rect to attribute viewport gaps.
-    LogUtil.error(TAG, 'setBounds requested=' + JSON.stringify(bounds) +
+    // requested and the actual rect to attribute viewport gaps. Scalar fields
+    // (round 106): JSON.stringify of the napi-backed WindowBound printed "{}",
+    // so device logs showed "setBounds requested={}" with no geometry.
+    LogUtil.error(TAG, 'setBounds requested=' +
+      bounds.left + ',' + bounds.top + ' ' + bounds.width + 'x' + bounds.height +
       ', hasFrame=' + hasFrame +
       ', actual windowRect=' + JSON.stringify(windowProp?.windowRect) +
       ', drawableRect=' + JSON.stringify(windowProp?.drawableRect));
@@ -595,6 +743,16 @@ export class AppWindowAdapter extends BaseAdapter {
       LogUtil.error(TAG, 'Failed to obtain the main window.');
       return;
     }
+    // Round 106 (P2-5): limits cannot resize a FULL_SCREEN window (WMS logs
+    // "fullscreen or compatible mode could not update new size" and keeps the
+    // rect). The engine's repeated limit churn (0..MAX -> 1800x1463 ->
+    // 1800x1519) made its size model diverge from the real 2800x1840 window.
+    // Round 106 (P2-5) reverted for limits (audit P2-1): a FULL_SCREEN window
+    // ignores the limits today, but the call carries STATE ("this window must
+    // stay 1800x1463") that is lost if the window later leaves fullscreen
+    // without a new setWindowLimits. WMS answering "could not update new size"
+    // is the accepted cost; only setBounds (guaranteed 1300010, no state) is
+    // short-circuited.
 
     const windowProp = windowClass.getWindowProperties();
     let xComBorder: number = windowProp?.drawableRect.left || 0;
@@ -787,6 +945,11 @@ export class AppWindowAdapter extends BaseAdapter {
   @LogMethod
   setResizable(id: number, resizable: boolean) {
     let windowClass = this.getWindow(id);
+    // Round 106 (P2-5) reverted for resizable (audit P2-1): the call carries
+    // STATE (a non-resizable window must stay non-resizable) and costs one
+    // drag-enable toggle, so it is sent even on FULL_SCREEN - dropping it here
+    // would silently re-enable drag-resize for a window that later leaves
+    // fullscreen.
     try {
       windowClass?.setResizeByDragEnabled(resizable).then(() => {}).catch((err: BusinessError) => {
         LogUtil.error(TAG, `Failed to set the window resizable. Cause ${JSON.stringify(err)}`);
