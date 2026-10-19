@@ -1953,3 +1953,34 @@ if (this.nativeHidden) {
 - 这次的问题**不在隐藏**，在**重建的次数、错误预算、以及重建与揭示的时序竞争**。两个问题在同一现象下叠加，只修前一个看起来就像"还是有问题"。
 
 **验证**：`BUILD SUCCESSFUL in 21 s 69 ms`；HAP **221,983,446 B**，SHA-256 `C449A6BA0E480270913BED63297AA1112C80F42C6E54D72FB216B4ED083C1100`；字节码命中 `v150`、`retryResize`、`resizeCover`，`v149` 已不存在。
+## 第 151 轮 (2026-10-20): 按 HiLog 定位——控件尺寸慢一帧，切换时抽动
+
+### 日志证据（用户提供的 HiLog，07:39:47）
+
+```
+47.405  layout area=699.99x393.74  bar=46.2   disc=63.98
+47.536  layout area=823.53x463.24  bar=46.2   disc=63.98   ← 盒子已变大，控件没跟
+47.611  layout area=790.59x444.71  bar=54.35  disc=75.27   ← 控件跟上的是 823
+47.840  layout area=700.00x393.75  bar=52.18  disc=72.26   ← 盒子回来了，控件停在 790
+47.931  layout area=700.00x393.75  bar=46.20  disc=63.98   ← 终于对齐
+```
+
+**判读**：`area=700` 那帧的 `bar=52.18` 只可能由 `area≈790` 算出 ⇒ **尺寸基准取自 `onAreaChange` 的"上一次面积"，恒定慢一帧**。切换时盒子在 700→823→790→700 之间弹，控件就在后面抽一下再对齐。
+
+同时日志里 `layout area` 在 41.8–42.4 与 47.0–47.9 两段以 ~60Hz 连发（面积只差在小数第 7 位）——`onAreaChange` 每帧都写 `@State`，等于每帧重建整个覆盖层子树。
+
+### 修法
+
+| 改动 | 作用 |
+|---|---|
+| 新增 `@Prop frameW/frameH`，由 Index 传入**本次 build 正要应用的盒宽高**（与 `.width()/.height()` 同一次 build） | 尺寸与盒子同帧一致，消除一帧滞后 |
+| `ratioOf()` / `videoFrameW()` / `videoFrameH()` 优先用 `frameW/frameH`，缺失时才回退 `lastAreaW/H` | 同上；全屏传 0 自动回退 |
+| `onAreaChange` 增加 1vp 抖动阈值，未真正移动则 `return` | 掐掉 60Hz 重建风暴 |
+
+### 顺带确认（日志中其他事实）
+
+- `transport=avplayer v150` 正常打印，`state: initialized → prepared → playing` 依次到达，`videoSizeChange 1280x720`；
+- 播放结束后 `state: completed`，控件按 `playing=false` 常显；
+- 07:39:59 出现 `area=595` 一帧后回到 700：盒子本身在变（页面缩放/滚动），新的同步逻辑下控件会与盒子一起变，不再滞后。
+
+**验证**：`BUILD SUCCESSFUL in 22 s 440 ms`；HAP **221,992,794 B**，SHA-256 `5A6FCE5B4D15735C9A78D351EE438E5583C8EDC8C0CA37A6163EC2D1539C7ADB`；字节码命中 `v151`、`frameW`、`retryResize`，`v150` 已不存在；`obsidian.asar` 未变。

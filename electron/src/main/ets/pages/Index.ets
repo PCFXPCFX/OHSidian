@@ -1067,6 +1067,8 @@ struct Index {
             fullscreen: this.nativeFullscreen,
             theme: this.nativeTheme,
             unitScale: this.nativeCssToVp,
+            frameW: this.nativeFullscreen ? 0 : this.nativeWidth(),
+            frameH: this.nativeFullscreen ? 0 : this.nativeHeight(),
             cssWidth: this.nativeCssW,
             controlsBottomClip: this.nativeFullscreen ? 0 : Math.max(0,
               this.nativeY() + this.nativeHeight() - (this.nativeRegionY() + this.nativeRegionHeight())),

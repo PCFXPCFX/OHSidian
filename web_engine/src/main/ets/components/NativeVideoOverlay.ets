@@ -127,6 +127,15 @@ export struct NativeVideoOverlay {
   /** vp per CSS px for this window (Index: dpr * px2vp(1)). 1 = they match. */
   @Prop unitScale: number = 1;
   /**
+   * Box size in vp that Index is applying in the SAME build (.width/.height).
+   * Sizes were previously derived from onAreaChange, which runs one frame
+   * AFTER the box changed: on a mode switch the bar and disc followed the
+   * previous widening and then snapped back (measured in HiLog: area=700 with
+   * bar=52.18, a value that only matches area=790).
+   */
+  @Prop frameW: number = 0;
+  @Prop frameH: number = 0;
+  /**
    * The <video> rect width in CSS px, as the renderer measured it. The overlay
    * box below is exactly that rect converted to vp, so `lastAreaW / cssWidth`
    * is the true CSS->vp factor MEASURED from this window's own layout, with no
@@ -224,7 +233,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.probeMedia();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v150');
+    LogUtil.info(TAG, 'transport=avplayer v151');
   }
 
   aboutToDisappear(): void {
@@ -1168,7 +1177,8 @@ export struct NativeVideoOverlay {
   // when the surface opens) and the transport keeps the same density inline and
   // in fullscreen. The clamps are the spec's floor/ceiling, not taste.
   private ratioOf(r: number, floor: number, ceil: number): number {
-    const w: number = this.lastAreaW > 1 ? this.lastAreaW / this.u() : 700;
+    const box: number = this.frameW > 1 ? this.frameW : this.lastAreaW;
+    const w: number = box > 1 ? box / this.u() : 700;
     return Math.min(ceil, Math.max(floor, w * r));
   }
 
@@ -1266,8 +1276,8 @@ export struct NativeVideoOverlay {
   // unknown yet" and the caller keeps 100% (no visual change for inline embeds,
   // which already have the video's aspect).
   private videoFrameW(): number {
-    const w: number = this.lastAreaW;
-    const h: number = this.lastAreaH;
+    const w: number = this.frameW > 1 ? this.frameW : this.lastAreaW;
+    const h: number = this.frameH > 1 ? this.frameH : this.lastAreaH;
     if (!(w > 1) || !(h > 1) || !(this.videoAspect > 0)) {
       return 0;
     }
@@ -1275,8 +1285,8 @@ export struct NativeVideoOverlay {
   }
 
   private videoFrameH(): number {
-    const w: number = this.lastAreaW;
-    const h: number = this.lastAreaH;
+    const w: number = this.frameW > 1 ? this.frameW : this.lastAreaW;
+    const h: number = this.frameH > 1 ? this.frameH : this.lastAreaH;
     if (!(w > 1) || !(h > 1) || !(this.videoAspect > 0)) {
       return 0;
     }
@@ -1835,7 +1845,7 @@ export struct NativeVideoOverlay {
               .fontColor(this.theme.muted)
               .margin({ top: 1 })
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v150')
+              ' · k=' + this.u().toFixed(3) + ' · v151')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 6 })
@@ -2114,9 +2124,17 @@ export struct NativeVideoOverlay {
       LogUtil.info(TAG, 'layout area=' + w + 'x' + h + ' pointer=' + this.compactControls() +
         ' bar=' + this.barHeight() + ' disc=' + this.discSize() + ' aspect=' + this.videoAspect);
       if (w > 1 && h > 1) {
+        // Only adopt a new measurement when the box really moved. Sub-vp jitter
+        // (the rect is computed from a scaled CSS box) fired this at ~60Hz and
+        // every write rebuilt the whole overlay subtree.
+        const moved: boolean = Math.abs(w - this.lastAreaW) > 1 ||
+          Math.abs(h - this.lastAreaH) > 1;
         this.lastAreaW = w;
         this.lastAreaH = h;
         this.syncUnit();
+        if (!moved) {
+          return;
+        }
       }
       // Surface size follows the aspect, so a window/fullscreen change still
       // triggers the debounced rebuild path.
