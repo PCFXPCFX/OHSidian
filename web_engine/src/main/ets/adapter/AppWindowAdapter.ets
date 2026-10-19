@@ -541,7 +541,8 @@ export class AppWindowAdapter extends BaseAdapter {
 
   @LogMethod
   showWindow(id: number) {
-    let context = this.abilityManager.getProxy(id)?.getWindowContext() as common.UIAbilityContext;
+    let proxy = this.abilityManager.getProxy(id);
+    let context = proxy?.getWindowContext() as common.UIAbilityContext;
     context?.showAbility().then(() => {
       LogUtil.info(TAG, `showAbility success`);
     }).catch((err: BusinessError) => {
@@ -551,11 +552,42 @@ export class AppWindowAdapter extends BaseAdapter {
       // ability is already foreground, so the rejected call is a no-op -
       // expected, not an error.
       if (err.code === 16000067) {
+        // Round 108: the rejection is benign ONLY while the window is really
+        // in front. If it was minimised (desktop window-state restore or a
+        // title-bar click), this branch used to leave the app in the
+        // background forever - device log: minimize at 42.298, rejected show
+        // at 42.616, then nothing. Fall back to the window-level API.
+        if (this.isTouchFormFactorStrict() && proxy?.getWindow()) {
+          this.bringWindowToFront(proxy.getWindow());
+          return;
+        }
         LogUtil.info(TAG, 'showAbility rejected by WMS (16000067), window left as-is');
         return;
       }
       LogUtil.error(TAG, `showAbility fail, err: ${JSON.stringify(err)}`);
     });
+  }
+
+  // Round 108: explicit foreground fallback for the touch form factor, used
+  // when the ability-level show is rejected (16000067). `restore()` first only
+  // when the window reports MINIMIZE; `show()` is a no-op when already shown.
+  private bringWindowToFront(windowClass: window.Window | undefined): void {
+    if (!windowClass) {
+      return;
+    }
+    try {
+      const status = windowClass.getWindowStatus();
+      const shown: Promise<void> = status === window.WindowStatusType.MINIMIZE
+        ? windowClass.restore().then(() => windowClass.show())
+        : windowClass.show();
+      shown.then(() => {
+        LogUtil.info(TAG, 'showAbility rejected; window brought to front via window.show()');
+      }).catch((err: BusinessError) => {
+        LogUtil.warn(TAG, 'bring window to front failed: ' + JSON.stringify(err));
+      });
+    } catch (exception) {
+      LogUtil.warn(TAG, 'bring window to front threw: ' + JSON.stringify(exception));
+    }
   }
 
   @LogMethod
@@ -788,6 +820,16 @@ export class AppWindowAdapter extends BaseAdapter {
 
   @LogMethod
   maximize(id: number) {
+    // Round 108: in the touch form factor the window already IS the display;
+    // win.maximize() is only the desktop window-state restore. This WMS
+    // answers "Maximize: The device is not supported" while the promise still
+    // resolves, so the old "Succeeded in maximizing the window." log made
+    // Obsidian persist isMaximized=true for a window that was never maximized
+    // (device log 18:08:42.293).
+    if (this.isTouchFormFactorStrict()) {
+      LogUtil.info(TAG, 'maximize ignored: touch form factor window is already the display');
+      return;
+    }
     let windowClass = this.getWindow(id);
     if (!windowClass) {
       LogUtil.error(TAG, 'Failed to obtain the main window.');
@@ -830,6 +872,18 @@ export class AppWindowAdapter extends BaseAdapter {
 
   @LogMethod
   minimize(id: number) {
+    // Round 108: a touch-form-factor window has NO minimised state - the app
+    // is a single full-display window and leaving it must go through the
+    // system (Home/back), not through the desktop `win.minimize()` path.
+    // The device log showed the engine minimising the window 8 ms after
+    // startup (42.298) with no input event at all, and the app then stayed in
+    // the background because the follow-up showAbility is rejected with
+    // 16000067. Cancelling here is the non-destructive direction; the settings
+    // read is strict so a read failure keeps the old behaviour (R106 P2-2).
+    if (this.isTouchFormFactorStrict()) {
+      LogUtil.warn(TAG, 'minimize ignored: touch form factor has no minimized state');
+      return;
+    }
     let windowClass = this.getWindow(id);
     if (!windowClass) {
       LogUtil.error(TAG, 'Failed to obtain the main window.');

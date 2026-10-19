@@ -767,3 +767,110 @@ changed=false` 说明是首同步而非模式切换;全程无 `forced fullscreen
 - `LaunchHelper` 的日志标签由 `bare launch` 改为 `windowMode-only launch`,
   旧验收脚本若 grep `bare launch` 需同步更新。
 - 本轮未跑真机;编译为 ArkTS 唯一门(见 R107-8 与提交说明)。
+
+## 第 111 轮(2026-10-19):触摸模式冷启动后窗口被最小化且回不到前台
+
+> 编号说明:并行会话未提交的第 108-110 轮(HEVC 内联播放器系列)已占用
+> 108-110,本轮取 111,不改动那些小节。
+
+**用户报告/输入**:真机日志 18:08:39–18:08:48(触摸形态**冷启动**,含一次
+"应用自己最小化后再也回不到前台")。日志里**没有换库**操作,因此同时作为
+第 102/106/107 轮的回归证据。
+
+**日志证据(时间线)**
+
+| 时间 | 事件 | 判定 |
+|---|---|---|
+| 39.959–39.969 | `window id captured: 1028, main=true` → pcmode 读 `false` → `layout fullscreen true applied` → `pc mode handled: enabled=false, changed=false` | 第 102/106 轮启动链正常 |
+| 40.054–40.058 | 1 次 `re-pushed viewport bounds` + 3 次 `re-push skipped` | 第 106 轮去重生效 |
+| 40.559–40.622 | 4 次 `setBounds skipped: window 1 is fullscreen on touch form factor` | 第 107 轮触摸整屏不变量生效 |
+| **42.290–42.298** | 8ms 内:`showWindow(1)` → `maximize(1)` → `setWindowLimits(450,282,…)` → `showWindow(1)` → **`minimize(1)`** → WMS `Minimize: id 1028` → `Hide` → `onBackground` | 应用被自己最小化 |
+| 42.293 | WMS `Maximize: The device is not supported`,但适配器仍打 `Succeeded in maximizing the window.` | 观测失真 |
+| 42.616 | 引擎再 `showWindow(1)` → `showAbility rejected by WMS (16000067), window left as-is`;此后到日志结束(48s)无任何 show/foreground | 无法回前台 |
+| 全日志 | `InputKeyFlow` 仅 1 条 Subscribe,`ConsumePointerEventInner`/`HandleInputEvent` 为 0 | 不是用户点最小化 |
+
+**根因(以代码为准)**
+
+1. `AppWindowAdapter.minimize()` 无条件执行桌面语义的 `windowClass.minimize()`。
+   触摸形态是"单窗口=整块 display"的形态(状态机 §1/§2),**没有"最小化窗口"
+   这个状态**;引擎侧(桌面窗口状态恢复 / 自绘标题栏)一次 `win.minimize()`
+   就把应用藏起来。工作区里 ArkTS 侧没有任何 `minimize()` 调用方,调用来自
+   引擎 JS 的 `AppWindow.Minimize`。
+2. `AppWindowAdapter.showWindow()` 只发 `context.showAbility()`,而该 WMS
+   构建对 `showAbility` 固定回 `16000067`,代码把它当"启动期无害 no-op"
+   直接吞掉。窗口已在后台时,这条路径**必然失败且没有兜底**——日志 42.616
+   即实证。
+3. `AppWindowAdapter.maximize()` 在触摸形态下对"本来就是 display 的窗口"
+   调用桌面 maximize;WMS 明确 `device not supported`,Promise 仍 resolve,
+   旧日志打 `Succeeded`,会误导 Obsidian 把 `isMaximized=true` 写进记忆状态。
+
+**修复**
+
+| 侧 | 变更 | 目的 |
+|----|------|------|
+| ArkTS `AppWindowAdapter.minimize` | 触摸形态(严格读,读失败保持旧行为)直接忽略并 `warn` | 触摸形态没有最小化状态;断掉"启动即被藏起来"。系统级回桌面不经过该 binding,不受影响 |
+| ArkTS `AppWindowAdapter.showWindow` | `showAbility` 返回 `16000067` 时,触摸形态改走新增 `bringWindowToFront()`:窗口 `MINIMIZE` 则 `restore()` 后 `show()`,否则直接 `show()` | 即使窗口被别的路径收起,也能重新显示出来(旧代码把失败当 no-op 静默吞掉) |
+| ArkTS `AppWindowAdapter.maximize` | 触摸形态直接忽略并记录;不再执行桌面 maximize、不再打假 `Succeeded` | 触摸窗口已是 display;避免污染 Obsidian 的 `isMaximized` 记忆与验收日志 |
+| Docs | `window-state-machine.md` 新增 Round 111:触摸形态"最小化/最大化"不是合法状态变更;前台恢复的兜底路径 | 规格与实现一致,后续改动可静态审查 |
+
+**六维审计**
+
+| 维度 | 结论 |
+|---|---|
+| 必要性 | 三条日志级证据:42.298 的 `minimize` 无输入事件、42.616 的 show 失败、42.293 的假成功;每条都对应代码里一个无条件执行点,不是猜测 |
+| 正确性 | 取消 `minimize` 是"非破坏性方向"(应用保持可见);PC 形态完全不受影响(严格读为 false 才取消);`showWindow` 兜底只在 `16000067` + 触摸形态触发,其他错误码走原日志;`maximize` 忽略仅限触摸形态;`bringWindowToFront` 的 `restore()` 只在窗口状态确为 `MINIMIZE` 时调用,`show()` 幂等 |
+| 安全性 | 不新增权限/外部输入/网络;只操作本应用自己的窗口;新增日志只含窗口 id/错误码;严格读失败时保持旧行为(不会因读失败阻止 PC 形态的最小化) |
+| 代码质量 | 三个改动点都复用既有形态判定 `isTouchFormFactorStrict()`,不新增第二套形态判断;`bringWindowToFront` 单点、带 try/catch;注释写明设备日志时间戳与"为何取消是安全的" |
+| 架构 | 状态机补一条不变量:触摸形态的窗口状态只能由形态动作(整屏/布局)与系统(Home/返回)改变,桌面窗口状态调用(最小化/最大化)不得改变它;前台恢复不依赖 `showAbility`(该 WMS 固定拒绝) |
+| 耗电性 | 无新增定时器/轮询;触摸形态下每次 `minimize`/`maximize` 调用直接返回(省一次 WMS 往返);`showWindow` 只在失败路径多一次 `getWindowStatus()` 读 |
+
+**自查审计**
+
+- R111-1 取消 `minimize` 会不会让用户无法退到后台?不会:触摸形态没有系统
+  标题条/最小化入口;系统 Home/任务切换由 WMS 发起,不经过
+  `AppWindow.Minimize`。PC 形态仍可最小化。
+- R111-2 严格读失败时怎么办?保持旧行为(执行 minimize/maximize),最坏退化
+  为本轮之前的行为;与第 106 轮 P2-2 的"破坏性动作需要严格读"同向。
+- R111-3 `window.show()` 是否足以把应用带回前台?`show()` 让窗口可见,该 WMS
+  下是否切前台需真机确认;若仍停在后台,下一步改用
+  `windowClass.maximize()/restore()` 组合或 `startAbility`,本轮先按最小改动
+  落地并列入验证要点。
+- R111-4 为什么不动 `setFullScreen` / `setSimpleFullScreen`?它们走
+  `windowClass.maximize(ENTER_IMMERSIVE*)`,用于视频等前台全屏切换;触摸形态
+  下窗口已整屏,未在日志中观察到副作用,本轮不动以免影响媒体功能。
+- R111-5 为什么 42.298 会调 `minimize`?日志无输入事件、ArkTS 无调用方,只能
+  确定来自引擎 JS(桌面窗口状态/标题栏路径);本轮按"触摸形态没有该状态"
+  取消,不依赖定位具体调用者。若真机仍出现该调用,说明形态读取失败,日志会
+  保留 `minimize ...` 而非 `ignored`。
+- R111-6 第 107 轮与第 111 轮的关系:107 保证触摸窗口是整屏(不被引擎记忆
+  矩形改),111 保证它不会被桌面状态调用藏起来、且被藏起后能回来。
+- R111-7 编译验证:`hvigorw assembleHap` **BUILD SUCCESSFUL**(见下),本轮
+  改动逐段静态核对 `maximize/minimize/showWindow` 的调用方(引擎 JS binding,
+  无 ArkTS 调用方)。
+- R111-8 未跑真机;验收以真机为准(要点见下)。
+
+**验证要点**(真机,触摸模式)
+
+1. 触摸模式冷启动 5 次:hilog **不得**出现 `Minimize: id:` 与
+   `Hide: Window hide [... reason:1]`;若引擎确实调用了 minimize,应看到
+   `minimize ignored: touch form factor has no minimized state`。
+2. 触摸模式不再出现 `Succeeded in maximizing the window.`(应为
+   `maximize ignored: touch form factor window is already the display`)。
+3. 若窗口被系统/桌面路径收起,点击应用图标恢复:应出现
+   `showAbility rejected; window brought to front via window.show()`,窗口回到
+   前台(不是 42.6 那种 `window left as-is` 后继续隐藏)。
+4. PC 模式(窗口形态)冷启动:`win.maximize()`/`win.minimize()` 仍生效,
+   日志不出现 `ignored: touch form factor`。
+5. 换库、多窗口、第 107 轮整屏验收不回归。
+
+**未改项/已知风险**
+
+- `window.show()` 在该 WMS 上是否真正切前台未验证;若只让窗口可见但应用仍在
+  后台任务栈,需追加 `restore()`/`maximize()` 或 `startAbility` 方案(R111-3)。
+- 引擎侧究竟哪段代码在启动时调 `minimize` 未定位(无输入事件);本轮是
+  "取消非法状态"而非"修调用者"。
+- `setFullScreen`/`setSimpleFullScreen` 仍走桌面 maximize 语义,触摸形态下未
+  加门(避免影响媒体全屏),留待真机确认。
+- `maximize` 在触摸形态被忽略后,Obsidian 记忆里的 `isMaximized` 可能仍为
+  true(历史状态),不再被本次启动刷新;属无害状态(触摸窗口本来就是 display)。
+- 本轮未跑真机;编译为 ArkTS 唯一门。

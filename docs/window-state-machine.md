@@ -473,3 +473,39 @@ latch 在 native 调用成功之后才推进（调用抛异常不得吞掉同突
 3. 启动重试梯子的每一档都必须保留 `windowMode`（形态信息不得在降级中丢失）；
 4. 引擎的桌面 bounds 记忆只在窗口形态下允许落地；触摸形态下的记忆尺寸必须
    被整屏校正覆盖（引擎 `setBounds` 在整屏窗口上被 1300010 拒绝）。
+
+### Round 111：触摸形态没有"最小化/最大化窗口"状态
+
+**真机现象**：触摸模式冷启动约 2.5s 后窗口被最小化、应用退到后台，引擎随后
+的 show 请求被 WMS 以 `16000067` 拒绝，应用停在后台直到日志结束；整份日志
+没有任何输入事件（不是用户点最小化）。
+
+**根因（以代码为准）**
+
+- `AppWindowAdapter.minimize()` 无条件执行桌面语义的 `windowClass.minimize()`。
+  触摸形态是"单窗口 = 整块 display"的形态，窗口没有"最小化"这一状态；引擎侧
+  （桌面窗口状态恢复 / 自绘标题栏）一次 `win.minimize()` 就能把应用藏起来。
+- `AppWindowAdapter.showWindow()` 只发 `showAbility()`，而本 WMS 固定回
+  `16000067`（StartOptions quirk）。旧代码把 16000067 一律当"启动期无害
+  no-op"，于是窗口在后台时**无法恢复**（日志 42.616 实证）。
+- `maximize()` 在触摸形态对已是 display 的窗口执行桌面 maximize；WMS 回
+  `device not supported` 但 Promise resolve，旧日志打 `Succeeded`，会污染
+  Obsidian 的 `isMaximized` 记忆。
+
+**修复（第 111 轮）**
+
+- `minimize()`：触摸形态（严格读）直接忽略；PC 形态不变。
+- `showWindow()`：`16000067` + 触摸形态时走 `bringWindowToFront()`——窗口
+  `MINIMIZE` 先 `restore()` 再 `show()`，否则 `show()`；失败只 warn。
+- `maximize()`：触摸形态直接忽略，不再执行桌面 maximize，也不再打假成功日志。
+
+**不变量（今后改动必须保持）**
+
+1. 触摸形态的窗口状态只能由形态动作（整屏校正 / 布局全屏）和系统（Home /
+   返回 / 任务切换）改变；桌面窗口状态调用（`win.minimize()` /
+   `win.maximize()`）**不得**改变它。
+2. 前台恢复不得只依赖 `showAbility()`：本 WMS 对它的 `16000067` 是固定行为，
+   必须保留 `window.show()`（必要时 `restore()`）的兜底路径。
+3. 形态判定复用 `isTouchFormFactorStrict()`：严格读（只有成功读到 `'false'`
+   才算触摸），读失败保持旧行为——取消用户/引擎动作时，失败方向必须是
+   "不改变"而不是"误取消"。
