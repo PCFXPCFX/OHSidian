@@ -16,7 +16,7 @@
 
 | 事件 | 动作 |
 |------|------|
-| 启动（onWindowStageCreate） | **⓪ 先解析形态**（第 102 轮，见文末 Round 102 小节）：`onWindowStageCreate` **顶部**同步读 `window_pcmode_switch_status`（`resolvePcModeAtBoot`）seed `pcModeEnabled`；随后在 `loadContent` **之前**（设备诊断块之后）执行一次 `updateWindowPcmodeSwitchStatus`——**所有形态相关动作（布局全屏 / 整屏校正 / 钳制）必须在此完成**；`pcModeEnabled` 的字段默认值 `false` **不**代表形态，解析前禁止任何几何动作。① 触摸形态：窗口校正为整屏（**仅主窗口**；已整屏则跳过——重复 resize 会被 WMS 拒 1300002）；窗口 show 之前若被 WMS 拒绝，`loadContent` 回调里保留一次**幂等**的触摸专属重申。② 窗口/PC 形态：**不**强制尺寸（系统按上次状态恢复；记忆化由 Obsidian 主进程 `<userData>/<vaultId>.json` 完成，见 §4）；系统标题条显隐由 `pushSafeAreaInsets()` **单点**决定。③ `setWindowTitleMoveEnabled(true)` 无条件启用（拖动面=系统标题条，见 §5）。 |
+| 启动（onWindowStageCreate） | **⓪ 先解析形态**（第 102 轮，见文末 Round 102 小节）：`onWindowStageCreate` **顶部**同步读 `window_pcmode_switch_status`（`resolvePcModeAtBoot`）seed `pcModeEnabled`；随后在 `loadContent` **之前**（设备诊断块之后）执行一次 `updateWindowPcmodeSwitchStatus`——**所有形态相关动作（布局全屏 / 整屏校正 / 钳制）必须在此完成**；`pcModeEnabled` 的字段默认值 `false` **不**代表形态，解析前禁止任何几何动作。① 触摸形态：窗口校正为整屏（**该形态下所有 EntryAbility 窗口**，不只主窗口——`isMainAppWindow` 只表示"启动 want 无 xcomponentId"，换库窗口 main=false，见 Round 107；已整屏则跳过——重复 resize 会被 WMS 拒 1300002）；窗口 show 之前若被 WMS 拒绝，`loadContent` 回调里保留一次**幂等**的触摸专属重申。② 窗口/PC 形态：**不**强制尺寸（系统按上次状态恢复；记忆化由 Obsidian 主进程 `<userData>/<vaultId>.json` 完成，见 §4）；系统标题条显隐由 `pushSafeAreaInsets()` **单点**决定。③ `setWindowTitleMoveEnabled(true)` 无条件启用（拖动面=系统标题条，见 §5）。 |
 | `window_pcmode_switch_status` 变化 | 重写触摸模式文件 → 重发布 insets/decor → 触摸形态校正整屏 / 窗口形态钳制入屏。**不**再 500/1500ms 双延时补推（见 §3）。 |
 | `windowSizeChange` / `windowRectChange` / `avoidAreaChange` / `WINDOW_SHOWN` | 统一走 `pushSafeAreaInsets()`（insets+decor 发布）+ `computeViewportBound()` 视口重推。引擎推送**无条件**（第 88 轮修订：值比对去重会吞掉同值事件——含 WINDOW_SHOWN 重申与 reason 标记的 rect 事件——引擎窗口状态机断裂，真机复现为"无法动态调整窗口/无法全屏贴合"）。**第 106 轮唯一例外**：`repushViewportBounds()` 路径上，完全相同的 bound 且距上次推送 < 150ms 时合并（只针对同一帧内多个事件源造成的突发；`windowStatusChange` 对账推传 `force=true`，永不被合并）。无延时补丁。 |
 | `windowStatusChange`（MAXIMIZE/FULL_SCREEN/FLOATING） | 补推 insets + 视口（第 56 轮，修"最大化后底部被导航条遮住"）。动画落定竞态：事件可能先于动画完成到达——随后**单发一次对账**（约 300ms 后重读矩形，无条件重推；第 87 轮 A2，第 88 轮去掉值比对，第 106 轮 `force=true` 保证不被突发合并吞掉，见 §3 说明）。 |
@@ -422,3 +422,54 @@ round 88 确立"推送无条件"是为了应对 WMS 动画后不发 `windowSizeC
 < 150 ms 时跳过；状态变化后的 300 ms `scheduleViewportReconcile` 以
 `force=true` 调用，**永远**送达，round 88 的"同值重申"语义不变。推送
 latch 在 native 调用成功之后才推进（调用抛异常不得吞掉同突发的下一条）。
+
+### Round 107：触摸形态的整屏校正不是"主窗口特权"（换库窗口停留在 PC 记忆尺寸）
+
+**真机现象**：触摸模式（PC 模式关闭）下切换仓库，切换成功，但新窗口不是
+整屏，而是"上次窗口模式记忆的尺寸"。
+
+**根因**：状态机 §1/§2 要求"触摸形态下窗口就是整块 display"，但该不变量的
+实现 `forceFullscreenWindow()` 带了一道 `if (!this.isMainAppWindow) return;`
+（Round 88 为保护"引擎创建的浮窗"而加）。而 `isMainAppWindow` 的真实语义是
+"**启动 want 里没有 xcomponentId**"（应用第一个窗口），不是"应用当前的主窗口"：
+
+- 换库窗口由引擎 `createWindow()` 发起，want 必带 `xcomponentId`
+  （`AppWindowAdapter.createWindow`），所以新窗口 `main=false`；
+- 旧窗口随后销毁，新窗口**不会**被重新标记为主窗口，于是永久 `main=false`；
+- 触摸形态的三个校正执行点——启动首同步（`updateWindowPcmodeSwitchStatus`）、
+  `loadContent` 回调重申、运行期切回触摸——全部被这道门挡掉；
+- 引擎随后按桌面版记忆（`<userData>/<vaultId>.json`）`setBounds` 到记忆矩形；
+  此时窗口若为浮窗（见下），`moveWindowToAsync`/`resizeAsync` 成功，窗口
+  就停在记忆尺寸（main 窗口之所以看不到该现象，是因为它已被整屏，`setBounds`
+  被 1300010 拒绝）。
+
+浮窗从哪来（任一即可）：① `LaunchHelper` 三级重试的最后一档原来传 `{}`，
+`windowMode=FULLSCREEN` 丢失，本设备支持自由窗口（`windowModeSupportType=63`）
+时可能以浮窗创建；② 系统在 show/恢复阶段给出浮窗，而代码没有触摸兜底。
+
+第 99-101 轮审计的"已知残留风险 1"已经记录过"触摸模式换库后本会话不再有主
+窗口，仅主窗口的启动期作业不会再跑"——当时只按"启动期语义、运行期无依赖"
+记录；本轮证明整屏校正也在这批作业里，属于运行期依赖，必须修。
+
+**修复（第 107 轮）**
+
+- `forceFullscreenWindow()`：删除 `isMainAppWindow` 门，改为**形态门**——
+  `pcModeEnabled` 直接返回（窗口形态，Round 102 的不变量）；非
+  `tablet`/`phone` 返回（2in1 保持桌面窗口，H15 下 pcModeEnabled 可能为
+  false，不能误强制）。触摸形态下所有 EntryAbility 窗口（主窗口、换库窗口、
+  starter/chooser、panel）都校正为 display 矩形；已整屏仍幂等跳过。
+- `LaunchHelper` 的第三档重试由 "bare"（空 `StartOptions`）改为
+  **"windowMode-only"**：保留 `windowMode`，让第三次尝试仍以触摸全屏创建。
+  被 WMS 拒绝的是 `processMode/startupVisibility`（Round 99 结论），
+  `windowMode` 必须活过梯子。
+- 文档：§2 启动行"仅主窗口"改为"该形态下所有窗口"；`isMainAppWindow`
+  今后只允许用于进程级一次性副作用（启动权限、陈旧条目清理），不得用于
+  形态判定。
+
+**不变量（今后改动必须保持）**
+
+1. 形态不变量（触摸整屏、窗口只钳制）按**形态**判定，不按"是否主窗口"判定；
+2. `isMainAppWindow` = "启动 want 无 xcomponentId"，换库后为 false 是常态；
+3. 启动重试梯子的每一档都必须保留 `windowMode`（形态信息不得在降级中丢失）；
+4. 引擎的桌面 bounds 记忆只在窗口形态下允许落地；触摸形态下的记忆尺寸必须
+   被整屏校正覆盖（引擎 `setBounds` 在整屏窗口上被 1300010 拒绝）。

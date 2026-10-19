@@ -138,8 +138,19 @@ export default class LaunchHelper {
             notifyFailed();
             return;
           }
-          LogUtil.error(TAG, `${label} failed: ${JSON.stringify(error)} - launching bare`);
-          LaunchHelper.startRung(context, want, {}, 'bare launch', true, notifyFailed);
+          LogUtil.error(TAG, `${label} failed: ${JSON.stringify(error)} - launching windowMode-only`);
+          // Round 107: windowMode is a FORM-FACTOR invariant (touch-mode
+          // windows must be fullscreen). The old bare rung dropped it, so the
+          // third fallback could create a FLOATING window on a free-window
+          // tablet; the ArkTS touch correction is what had to repair it, and
+          // after a vault switch that window is main=false (see
+          // WebAbility.forceFullscreenWindow). Round 99 already established the
+          // rejected pair is processMode/startupVisibility, not windowMode.
+          const fallback: StartOptions = {};
+          if (options.windowMode !== undefined) {
+            fallback.windowMode = options.windowMode;
+          }
+          LaunchHelper.startRung(context, want, fallback, 'windowMode-only launch', true, notifyFailed);
         });
     } catch (exception) {
       LogUtil.error(TAG, `${label} threw: ${JSON.stringify(exception)}`);

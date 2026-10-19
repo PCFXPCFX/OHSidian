@@ -1046,16 +1046,21 @@ export class WebAbility extends WebBaseAbility {
   // window-relative top avoid area, so the renderer never received a top
   // inset - the reported "top bar not avoided" symptom.
   //
-  // MAIN WINDOW ONLY: every EntryAbility instance (including new windows)
-  // extends WebAbility and would otherwise yank itself to fullscreen right
-  // after the engine placed it at its requested bounds - often a floating
-  // window with a title bar. Resizing such a window mid-layout wedges it
-  // (WMS "MoveToAsync Layout timeout"): the window shows but is unresponsive
-  // - creation looks broken and the title-bar X does nothing.
+  // FORM-FACTOR GUARD, NOT A MAIN-WINDOW PRIVILEGE (round 107): the touch
+  // rect correction must run on EVERY window of the touch form factor.
+  // `isMainAppWindow` means "the launch want carried no xcomponentId", i.e.
+  // the app's FIRST window - not "the app's current/primary window". A vault
+  // switch creates its window through the engine (createWindow always passes
+  // xcomponentId), so that window is main=false, and the old main window is
+  // destroyed right after: the new window stays main=false forever. With the
+  // old main-only gate the touch correction never ran there, and the engine's
+  // desktop bounds memory (<userData>/<vaultId>.json) resized the (floating)
+  // window to the remembered PC-mode rect - the reported "vault switch in
+  // touch mode leaves the window at the window-mode size".
+  // The window form is excluded by the pcModeEnabled guard below (round 102);
+  // 2in1 must stay untouched (its pcModeEnabled is false because the boot read
+  // is skipped - H15 - but it is a desktop window, not a touch one).
   private forceFullscreenWindow(): void {
-    if (!this.isMainAppWindow) {
-      return;
-    }
     if (this.pcModeEnabled) {
       // Window form factor: forcing the display rect is the TOUCH-only
       // correction (docs/window-state-machine.md §1/§2). On a window-mode
@@ -1067,6 +1072,12 @@ export class WebAbility extends WebBaseAbility {
       // to false; the loadContent re-assert checks the flag first) - it is
       // kept so a future caller cannot silently reintroduce the bug.
       LogUtil.warn(TAG, 'force fullscreen ignored: window form factor');
+      return;
+    }
+    // Touch form factors only: 2in1 keeps desktop window geometry even though
+    // pcModeEnabled is false there (H15 skips the boot read, and the pcmode
+    // observer may still fire), so forcing the display rect would destroy it.
+    if (deviceInfo.deviceType !== 'tablet' && deviceInfo.deviceType !== 'phone') {
       return;
     }
     const winObj = this.mainWindow;

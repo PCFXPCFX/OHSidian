@@ -670,3 +670,100 @@ changed=false` 说明是首同步而非模式切换;全程无 `forced fullscreen
   也未进入本轮提交;真机验收 P0 时需注意该改动会改变 `StartOptions.startupVisibility`。
 - `onSystemConfigurationUpdated` 注册后**永不注销**(进程级资源,随进程结束);
   目前无 off 路径,避免与窗口销毁竞态。
+
+
+## 第 107 轮(2026-10-19):触摸模式换库后窗口停留在 PC 模式记忆尺寸
+
+**用户报告**:触摸模式(PC 模式关闭)下切换仓库,切换成功,但新窗口**不是整屏**,而是"上次窗口模式记忆的窗口大小"。
+
+**根因(以代码为准,对照 `docs/window-state-machine.md` §1/§2)**
+
+`forceFullscreenWindow()` 的第一道门是 `if (!this.isMainAppWindow) return;`(第 88 轮为保护"引擎创建的浮窗"而加)。但 `isMainAppWindow` 的真实语义是"**启动 want 里没有 xcomponentId**"——`WebBaseAbility.onCreate` 仅在 xcomponentId 为空时置 true——**不是**"应用当前的主窗口":
+
+1. 换库窗口由引擎 `createWindow()` 发起,want 必带 `xcomponentId`(`AppWindowAdapter.createWindow` 的 `'xcomponentId': param.window_id`)→ 新窗口 `main=false`;旧窗口随后销毁,新窗口**不会**被重新标记为主窗口(日志实证:`window id captured: 813, main=false`)。
+2. 触摸形态的三个整屏校正执行点全部被这道门挡掉:启动首同步 `updateWindowPcmodeSwitchStatus` → `forceFullscreenWindow()`、`loadContent` 回调的触摸重申、运行期切回触摸的同一条路径。
+3. 引擎随后按桌面版记忆(`<userData>/<vaultId>.json`)`setBounds` 到 PC 模式的记忆矩形;此时新窗口若不是全屏(浮窗),`moveWindowToAsync`/`resizeAsync` 成功 → 窗口停在记忆尺寸。(主窗口看不到该现象:它已被整屏,`setBounds` 被 WMS `1300010` 拒绝。)
+4. 浮窗来源(任一即可):① `LaunchHelper` 三级重试的最后一档传空 `StartOptions`,丢了 `windowMode=FULLSCREEN`,本设备支持自由窗口(`windowModeSupportType=63`)时可能以浮窗创建;② 系统在 show/恢复阶段给回浮窗,而代码没有任何触摸兜底。
+
+第 99-101 轮审计的"已知残留风险 1"已经记录"触摸模式换库后本会话不再有主窗口,仅主窗口的启动期作业不会再跑",但当时判定这些作业"运行期无依赖"——整屏校正正是运行期依赖,该判断本轮修正。
+
+**修复**
+
+| 侧 | 变更 | 目的 |
+|----|------|------|
+| ArkTS `WebAbility.forceFullscreenWindow` | 删除 `isMainAppWindow` 门,改为**形态门**:`pcModeEnabled` 返回(窗口形态不强制)、非 `tablet`/`phone` 返回(2in1 保持桌面窗口);触摸形态下**所有** EntryAbility 窗口(主窗口/换库窗口/starter/panel)都校正为 display 矩形 | 形态不变量按形态判定,不再按"是否主窗口";换库后 `main=false` 的窗口也能恢复整屏 |
+| ArkTS `LaunchHelper.startRung` | 第三档重试从空 `StartOptions`(bare)改为 **"windowMode-only"**:保留 `options.windowMode` | 启动降级不得丢形态信息;第三次尝试仍以触摸全屏创建,减少"以浮窗起步再靠校正"的窗口 |
+| Docs | `window-state-machine.md` §2 启动行"仅主窗口"→"该形态下所有窗口";新增 Round 107 小节与 4 条不变量 | 规格与实现一致;明确 `isMainAppWindow` 只表示启动 want 无 xcomponentId,不得用于形态判定 |
+
+**六维审计**
+
+| 维度 | 结论 |
+|---|---|
+| 必要性 | 真机现象可直接追到代码:触摸换库窗口 `main=false` → 三个整屏校正点全被 `isMainAppWindow` 门挡掉 → 引擎桌面记忆 `setBounds` 成功。第 99-101 轮审计已记录"换库后本会话无主窗口",本轮证明整屏校正在这批作业里且属运行期依赖,不是新增假设 |
+| 正确性 | 形态门与 Round 102 的不变量同向:窗口形态(`pcModeEnabled=true`)绝不强制尺寸,2in1 绝不强制;触摸形态下窗口就是 display,校正幂等(已整屏直接 return,避免 1300002);`loadContent` 重申与启动首同步走同一函数,天然覆盖"show 前 resize 被拒"的兜底;启动梯子只在"全量 StartOptions 与仅几何都失败"时降级,降级仍保留 windowMode,不改变成功路径 |
+| 安全性 | 不新增权限/外部输入/网络;只对**本应用**自己的窗口调用 resize/move;2in1/窗口形态被门排除,不会误改桌面窗口;新增日志不含路径与令牌 |
+| 代码质量 | 删除的是语义错误的条件(`isMainAppWindow` 语义与用法不匹配),不是功能;注释写明语义与历史(第 88 轮为何加、第 99-101 轮为何误判);`windowMode-only` 日志可 grep;`forceFullscreenWindow` 仍单点、无新增调用方 |
+| 架构 | 状态机不变量从"主窗口特权"修正为"形态约束":触摸整屏对所有窗口、窗口形态只钳制、`isMainAppWindow` 仅服务进程级一次性副作用;规格 §2 与 Round 107 同步,后续改动可静态审查 |
+| 耗电性 | 触摸形态新增的窗口校正只在"窗口不是 display 尺寸"时发生(已整屏幂等返回);启动梯子第三档保留 windowMode 可减少"浮窗→校正"的一次 WMS resize 往返;无新增定时器/轮询 |
+
+**自查审计**
+
+- R107-1 删除 `isMainAppWindow` 门会不会把引擎创建的**子窗口**也拉全屏?
+  触摸形态下没有合法的浮窗/子窗口:引擎的 vault 窗口、starter/chooser、
+  panel 在触摸下都必须是 display 矩形(`createWindow` 也强制
+  `WINDOW_MODE_FULLSCREEN`);真正的子窗口走 `SubWindowAdapter`,不经过
+  本类。窗口形态由 `pcModeEnabled` 门排除,2in1 由 deviceType 门排除。
+- R107-2 会不会在窗口模式误强制?不会:`pcModeEnabled=true` 时第一道门直接
+  返回;Round 102 的 `resolvePcModeAtBoot` 保证该字段在首次几何动作前已
+  解析,窗口模式的 `forceFullscreenWindow` 调用全部被挡(已有日志
+  `force fullscreen ignored: window form factor`)。
+- R107-3 2in1 会不会被误强制?不会:2in1 的 `pcModeEnabled` 可能为 false
+  (H15 跳过启动读取),所以加了 `deviceType !== 'tablet' && !== 'phone'`
+  直接返回;2in1 的桌面窗口几何保持原样。
+- R107-4 触摸下每次窗口创建都会多一次 resize 吗?不会:函数内"已整屏则
+  return";新建窗口若启动即全屏则零 WMS 交互;只有"以浮窗起步"的窗口才
+  需要一次 `resize` + `moveWindowTo(0,0)`(正是本次要修的场景)。
+- R107-5 校正与引擎 `setBounds` 的竞态?两者都是异步:我们的启动首同步在
+  `loadContent` 之前发起,引擎的桌面记忆恢复在 `runBrowser` 之后;即使
+  引擎的 `setBounds` 先落地(窗口浮窗时成功),随后到达的校正会把窗口拉回
+  整屏,最终状态正确。不追求"零闪动"(见"未改项")。
+- R107-6 启动梯子第三档保留 `windowMode` 会不会让"本该失败"的启动变成
+  半成功?不会:`windowMode` 是合法 StartOptions 字段,Round 99 已实测被拒
+  的是 `processMode`/`startupVisibility`;保留它只会让系统按全屏创建,
+  失败仍由 `onAllFailed` 上报。
+- R107-7 第 102 轮验收要点 7("非主窗口冷启动不做整屏校正")自本轮起
+  **不再成立**,以本轮 §2/Round 107 为准;该条只保留在历史记录里。
+- R107-8 编译验证:`hvigorw assembleHap` **BUILD SUCCESSFUL**
+  (2026-10-19 16:55:36,HAP 221,792,861 B;`CompileArkTS` 11.5s,无
+  `ArkTS:ERROR`)。改动前后逐段静态核对 `forceFullscreenWindow` 的调用方
+  (启动首同步、`loadContent` 重申、模式切回)与 `startRung` 的三档参数。
+  未跑真机,验收以真机为准。
+
+**验证要点**(真机,触摸模式)
+
+1. 触摸模式切换仓库:新窗口 hilog 应出现 `forced fullscreen rect: 2800x1840 @ (0,0)`
+   (修复前**不会**出现,因为换库窗口 `main=false`);引擎 `setBounds` 被
+   `1300010` 拒绝;肉眼新窗口整屏、底部导航条不遮内容。
+2. 窗口模式(PC)切换仓库:不得出现 `forced fullscreen rect:`;窗口保持
+   浮窗/记忆矩形;标题条可拖动。
+3. 触摸模式下反复换库 3 次:窗口始终整屏;无 `isMainAppWindow` 相关回归
+   (启动权限仍只在第一个窗口申请,`startup permission granted` 次数不变)。
+4. 触摸模式切到 PC 模式再切回:切回时存活窗口被整屏(多窗口场景下所有
+   存活窗口都整屏,触摸语义);窗口模式侧仍只钳制。
+5. 启动梯子:若出现 `geometry-only retry failed ... - launching windowMode-only`
+   → 新窗口仍应全屏创建(旧日志会显示 `launching bare`)。
+6. 2in1/手机冷启动不回归(2in1 桌面窗口不被拉全屏)。
+
+**未改项/已知风险**
+
+- C 方案(触摸形态下 `setBounds` 一律跳过)未做:留作加固项。当前依赖
+  "校正先于/后于 setBounds 都能收敛到整屏",可能在"引擎 setBounds 先成功、
+  校正稍后到达"时有一次短暂跳变(最终状态正确)。
+- 触摸形态下若将来出现**合法浮窗**(目前不存在),本轮改动会把它拉全屏;
+  届时需要按 `isPanel`/子窗口类型加白名单。
+- `isMainAppWindow` 仍用于启动权限申请与 `clearStaleWindowEntries`(进程级
+  一次性语义,正确);但"换库后本会话无主窗口"意味着这些作业本轮仍不会
+  补跑(第 99-101 轮已记录),与整屏校正无关,留待单独立项。
+- `LaunchHelper` 的日志标签由 `bare launch` 改为 `windowMode-only launch`,
+  旧验收脚本若 grep `bare launch` 需同步更新。
+- 本轮未跑真机;编译为 ArkTS 唯一门(见 R107-8 与提交说明)。
