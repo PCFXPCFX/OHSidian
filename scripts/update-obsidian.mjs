@@ -141,7 +141,7 @@ function isVersionLess(a, b) {
  *    migration, system fonts).
  */
 const TOUCH_MODE_PATCH = `;(function(){try{
-if(window.__ohsidianTouchPatch==="19")return;window.__ohsidianTouchPatch="19";
+if(window.__ohsidianTouchPatch==="21")return;window.__ohsidianTouchPatch="22";
 /* Console -> main bridge (round 96b): the renderer console never reaches
    hilog natively. Opt-in via the command "OHSidian: 运行日志捕获 开/关"
    (persisted in localStorage, takes effect on the next app start): the
@@ -899,13 +899,27 @@ document.addEventListener("loadedmetadata",function(ev){
     },8000);
   }catch(e){}
 },true);
-/* Back-press consumer (round 96). The @Entry pages (Index/WindowNode)
-   consume the system back gesture in onBackPress (previously the gesture
-   DESTROYED the hosting ability - the reported "侧划直接退出") and publish
-   cfg.backPress={seq,ts,windowId} into the mode file. Semantics, highest
-   first: close the top overlay with a synthetic Escape -> Obsidian
-   navigate-back -> nothing. Only the FOCUSED window acts (the gesture
-   targets it; hidden windows are already skipped by pollTick).
+/* Back-press consumer (round 96; ladder round 104; root exit round 105).
+   The @Entry pages (Index/WindowNode) consume the system back gesture in
+   onBackPress (previously the gesture DESTROYED the hosting ability - the
+   reported "侧划直接退出") and publish cfg.backPress={seq,ts,windowId} into
+   the mode file. Ladder, highest first (ordered the way mobile Obsidian's
+   own back button behaves): close the top overlay with a synthetic Escape
+   -> close the mobile tab switcher -> close the mobile drawer / sidebar ->
+   Obsidian navigate-back -> report "nothing was consumed".
+   Round 105 (user decision): that last case is no longer silent. The ack
+   rides the same mode file (cfg.backAck={seq,handled}) and carries the
+   verdict of THIS seq only, so a stale ack can never fire; the ArkTS page
+   waits ~350ms for it and, when the renderer consumed nothing while in
+   touch mode, tears the ability down (terminateSelf) - back at the ROOT
+   exits the app like every native HarmonyOS app, which is what round 104
+   left as the residual "no response".
+   Identity: touch mode trusts the single visible window (the same rule
+   focusedEntry() uses for the keyboard and the safe area); desktop/PC mode
+   keeps the document.hasFocus() guard because several windows are visible
+   and only the focused one may act. Round 104 moved the seq advance AFTER
+   that gate - it used to run before, so one false focus reading dropped
+   that gesture permanently.
    Notes: synthetic KeyboardEvent cannot carry keyCode (init dict ignored,
    reads back 0) - Obsidian's Scope/Modal Escape handling matches on key,
    so the event is dispatched ON the overlay element itself, which reaches
@@ -914,32 +928,94 @@ document.addEventListener("loadedmetadata",function(ev){
    a lazy seed would swallow the first gesture when the field is absent)
    so a stale entry left by a previous session never fires a phantom back;
    the ArkTS writer is monotonic against the published file, so seq keeps
-   rising across restarts. */
+   rising across restarts. Root detection reads leaf history, NOT
+   view.navigation truthiness: app:go-back's checkCallback only requires a
+   navigation object, and History.go(-1) with an empty backHistory neither
+   loops nor navigates (it returns once n===t). */
 var lastBackSeq=(function(){try{var b=(readMode()||{}).backPress;return (b&&typeof b.seq==="number")?b.seq:0}catch(e){return 0}})();
+/* Publish the verdict for this gesture. RMW is safe: the ArkTS side writes
+   the mode file only when it ACTS (a gesture, a geometry/focus change),
+   never in a tight loop, and both sides publish with atomic rename. */
+function ackBackPress(seq,handled){
+  try{
+    var c=readMode()||{};
+    c.backAck={seq:seq,handled:!!handled,ts:Date.now()};
+    writeModeFileSync(c);
+  }catch(e){}
+}
+/* One pass of the ladder; returns true when the app consumed the gesture. */
+function backLadder(touch){
+  /* .lightbox = the image/media viewer (lightbox-bg/-content/-media are its
+     children); it pushes a handler on the same mobile back stack as a modal,
+     so it belongs in the overlay rung. Leaving it out both skipped the close
+     and, since round 105, mis-reported "nothing consumed" (the page would
+     have exited with the viewer open). */
+  var overlay=document.querySelector('.modal-container,.modal-bg,.suggestion-container,.menu,.prompt,.lightbox');
+  if(overlay){
+    try{
+      var e={key:'Escape',code:'Escape',bubbles:true,cancelable:true};
+      var t=(overlay.querySelector&&overlay.querySelector("input,textarea"))||overlay;
+      t.dispatchEvent(new KeyboardEvent('keydown',e));
+      t.dispatchEvent(new KeyboardEvent('keyup',e));
+    }catch(e1){}
+    return true;
+  }
+  /* Round 104: the mobile tab switcher is a transient fullscreen overlay
+     (isVisible, detached on hide). It was not in the modal selectors either,
+     so back fell through to app:go-back and the switcher stayed open. */
+  var sw=window.app&&window.app.mobileTabSwitcher;
+  if(sw&&sw.isVisible===true){
+    try{if(typeof sw.hide==="function")sw.hide();else if(typeof sw.close==="function")sw.close()}catch(eS){}
+    return true;
+  }
+  /* Round 104: the mobile drawer / sidebar. Its open state is the workspace
+     container class is-<side>-sidedock-open (SideDock and the mobile Drawer
+     add it in expand()/onExpand(); collapse()/onCollapse() remove it). The
+     modal selectors never matched it, so back fell through to app:go-back,
+     and History.go(-1) with an empty backHistory is a silent no-op: the
+     reported "侧滑完全没反应". Desktop adds this class at construction (both
+     sidebars start expanded), so this branch is touch-only. */
+  var ws=window.app&&window.app.workspace;
+  if(touch&&ws&&ws.containerEl&&ws.containerEl.classList){
+    try{
+      var cl=ws.containerEl.classList;
+      if(cl.contains("is-left-sidedock-open")&&ws.leftSplit&&typeof ws.leftSplit.collapse==="function"&&ws.leftSplit.collapsed!==true){ws.leftSplit.collapse();return true}
+      if(cl.contains("is-right-sidedock-open")&&ws.rightSplit&&typeof ws.rightSplit.collapse==="function"&&ws.rightSplit.collapsed!==true){ws.rightSplit.collapse();return true}
+    }catch(eD){}
+  }
+  var cmds=window.app&&window.app.commands&&window.app.commands.commands;
+  if(cmds&&window.app.commands.executeCommandById){
+    var id=cmds["app:go-back"]?"app:go-back":"";
+    if(!id){var ks=Object.keys(cmds);for(var i=0;i<ks.length;i++){if(/go-back|navigate-back/.test(ks[i])){id=ks[i];break}}}
+    if(id){
+      /* Round 105: decide "did that navigate?" BEFORE executing - leaf
+         history is the only truthful signal (the command itself reports
+         success as long as a navigation object exists). */
+      var canBack=false;
+      try{
+        var leaf=ws&&ws.activeLeaf;
+        var hist=leaf&&(leaf.history||(leaf.view&&leaf.view.navigation));
+        canBack=!!(hist&&hist.backHistory&&hist.backHistory.length>0);
+      }catch(eH){}
+      try{window.app.commands.executeCommandById(id)}catch(e2){}
+      return canBack;
+    }
+  }
+  return false;
+}
 function applyBackPress(){
   try{
     var cfg=readMode();if(!cfg)return;
     var bp=cfg.backPress;
     if(!bp||typeof bp.seq!=="number")return;
     if(bp.seq<=lastBackSeq)return;
+    var touch=false;
+    try{touch=resolveWant(cfg)===true}catch(e0){}
+    if(!touch){try{if(!document.hasFocus())return}catch(eF){}}
     lastBackSeq=bp.seq;
-    try{if(!document.hasFocus())return}catch(eF){}
-    var overlay=document.querySelector('.modal-container,.modal-bg,.suggestion-container,.menu,.prompt');
-    if(overlay){
-      try{
-        var e={key:'Escape',code:'Escape',bubbles:true,cancelable:true};
-        var t=(overlay.querySelector&&overlay.querySelector("input,textarea"))||overlay;
-        t.dispatchEvent(new KeyboardEvent('keydown',e));
-        t.dispatchEvent(new KeyboardEvent('keyup',e));
-      }catch(e1){}
-      return;
-    }
-    var cmds=window.app&&window.app.commands&&window.app.commands.commands;
-    if(cmds&&window.app.commands.executeCommandById){
-      var id=cmds["app:go-back"]?"app:go-back":"";
-      if(!id){var ks=Object.keys(cmds);for(var i=0;i<ks.length;i++){if(/go-back|navigate-back/.test(ks[i])){id=ks[i];break}}}
-      if(id){try{window.app.commands.executeCommandById(id)}catch(e2){}}
-    }
+    var handled=false;
+    try{handled=backLadder(touch)===true}catch(eL){}
+    ackBackPress(bp.seq,handled);
   }catch(e){}
 }
 /* Delete-dialog destination note, called from the patched dialog site

@@ -25,7 +25,7 @@ try {
     process.exit(1);
   }
   const checks = {
-    'app touch patch v19': app.includes('__ohsidianTouchPatch==="19"'),
+    'app touch patch v21': app.includes('__ohsidianTouchPatch==="21"'),
     // Round 98r revert: the vdec-shim experiment is shelved (see
     // docs/CHANGES-2026-09.md HEVC verdict); assert the toggle is GONE.
     'app video-hw toggle removed (98r revert)': !app.includes('ohsidian-video-hw'),
@@ -33,6 +33,18 @@ try {
     'main console bridge (round 96b)': main.includes('__ohsidianConsoleBridge'),
     'app media hang watchdog (round 95c)': app.includes('loadedmetadata') && app.includes('__ohsidianWatched'),
     'app back-press consumer (round 96)': app.includes('applyBackPress'),
+    // Round 104: back press must close the mobile drawer / tab switcher, and
+    // its identity gate must run in touch mode before the seq advance.
+    'app back-press ladder (round 104)':
+      app.includes('is-left-sidedock-open') && app.includes('mobileTabSwitcher'),
+    'app back-press touch identity (round 104)':
+      app.includes('if(!touch){try{if(!document.hasFocus())return}catch(eF){}}'),
+    // Round 105: root back press reports "nothing consumed" back to the page
+    // (which exits the ability), and the media-viewer lightbox joins the
+    // overlay rung so an open viewer is closed instead of exiting.
+    'app back-press root ack (round 105)':
+      app.includes('c.backAck={seq:seq,handled:!!handled') && app.includes('.lightbox'),
+    'app back-press ladder fn (round 105)': app.includes('handled=backLadder(touch)===true'),
     'app media codec guidance (round 95 bug 1)': app.includes('ohsidianOfferSystemPlayer'),
     'app atomic mode-file write (H1)': app.includes('writeModeFileSync'),
     'app trash meta sidecar (F2)': app.includes('.ohsidian-trash-meta.json'),

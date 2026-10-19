@@ -304,3 +304,147 @@ HEAD 与真机日志复核。
    手动切换一次。
 4. 收起旧窗口会丢弃该窗口的视图状态(Obsidian 按仓库保存工作区,重新
    打开会恢复)。
+
+## 第 104 轮(2026-10-19):侧滑返回"完全没反应"
+
+**用户报告**:侧滑返回"完全没反应"(不是退出,也不是连退)。
+
+**核实(以代码为准)**
+
+1. 手势一定被消费:`pages/Index.ets` 与 `pages/WindowNode.ets` 的
+   `onBackPress()` 先 500ms 防抖、再 `BackPressBridge.notify`,**永远
+   return true** —— 窗口不再被销毁(第 96 轮目标达成),所以"没反应"只可
+   能来自渲染层。
+2. 渲染层在多数常见状态**没有任何可执行动作**:
+   - 浮层清单只有 `.modal-container,.modal-bg,.suggestion-container,
+     .menu,.prompt`;移动布局的文件列表/侧栏是抽屉,开合状态是 workspace
+     容器上的 `is-left-sidedock-open`(asar:`expand()/onExpand()` 加、
+     `collapse()/onCollapse()` 去),不在清单里;
+   - 兜底动作 `app:go-back` 的 checkCallback 只要求
+     `activeLeaf.view.navigation`,而 `History.go(-1)` 在 `backHistory`
+     为空时**循环不执行、直接返回**(asar History 类)——无历史时它是纯粹
+     的静默空操作;
+   - 标签页切换器(`app.mobileTabSwitcher`)同样没有入口。
+   三者叠加 = "打开应用 / 打开一篇笔记 / 抽屉打开时侧滑"都不产生任何可见
+   变化。
+3. 还有一处可能造成 100% 静默的闸门:旧实现先把 `lastBackSeq=bp.seq`
+   推进、再判 `document.hasFocus()`;一次判假就把这次手势永久丢弃(不重
+   试)。同一份补丁在第 100 轮已把键盘/几何的身份判定改成"触摸模式直接
+   信任 `cfg.focusedWindow`"(`focusedEntry()`),返回没跟上。
+4. 本链路自第 96 轮起**没有真机验收记录**(清单①-⑧无结论),唯一依据是
+   Vitreus 的 500ms 连退经验。
+
+**修复**(渲染层补丁 v19→v20,`scripts/update-obsidian.mjs`)
+
+| 变更 | 目的 |
+|---|---|
+| 返回阶梯补两级:浮层 Escape → **标签切换器 `hide()`** → **抽屉 `leftSplit/rightSplit.collapse()`** → `app:go-back` | 对齐移动端 Obsidian 自身的返回语义;抽屉/切换器打开时不再"什么都不发生" |
+| 身份判定对齐 `focusedEntry()`:触摸模式不再要求 `document.hasFocus()` | 去掉触摸模式下唯一能"整条链路静默"的闸门 |
+| `lastBackSeq` 推进移到身份闸门之后 | 判假不再吞掉这次手势(可重试) |
+| `verify-asar.cjs` 增两个 marker(v20 + 阶梯/身份) | 发布物自证 |
+
+**验证**
+
+- `scripts/refresh-app-patch.mjs` 重建 asar(v20),`verify-asar.cjs` 语法
+  + 全部 marker 通过;
+- 行为回归(把**发布后的** `applyBackPress()` 与 HEAD 版本同时抽出,在假
+  DOM 上跑 11 例):触摸无焦点+抽屉开 → 只 collapse;无焦点+切换器开 →
+  只 hide;无焦点且无浮层 → 仍执行 `app:go-back`(本轮修复点);桌面无焦
+  点 → 不动作且 seq 不推进;桌面有焦点+抽屉类在 → go-back 且**不**收侧
+  栏;浮层开 → 只有 keydown/keyup Escape;seq 已消费 → 不动;浮层+抽屉同
+  时开 → 浮层优先。对照 HEAD:"无焦点"与"抽屉/切换器打开"三例复现
+  go-back 空转、不关抽屉的旧行为。
+- `hvigorw assembleHap` 构建成功;HAP(2026-10-19 08:17,
+  221,653,586 B)内嵌 asar 已确认含 v20 与阶梯代码。
+
+**真机验收清单**
+
+1. 触摸模式展开左侧栏(文件列表)→ 侧滑:侧栏收起,笔记不后退;
+2. 打开标签页切换器 → 侧滑:切换器关闭;
+3. 打开设置/命令面板 → 侧滑:浮层关闭,笔记不后退;
+4. 文件列表点笔记 A → 点笔记 B → 侧滑:回到 A;
+5. 只打开一篇笔记(无历史)→ 侧滑:**无动作**(第 96 轮取舍,未改);
+6. `hdc shell hilog -x | grep "back press published"`:每次侧滑一条、seq
+   单调;没有则该手势没进 ArkTS 侧(另行处理)。
+
+**六维审计**
+
+| 维度 | 结论 |
+|---|---|
+| 必要性 | 三条静默路径都有 asar/源码证据(抽屉类名、History 空转、seq 先推进),不是猜测 |
+| 正确性 | 阶梯顺序与移动端 Obsidian 一致;抽屉分支仅触摸模式(桌面两侧栏构造即展开,不能收);seq 单调与启动播种语义未改 |
+| 安全性 | 不新增权限/网络/外部输入;只调用 Obsidian 自身 API 与既有 mode 文件 |
+| 代码质量 | 补丁模板无反引号/`${}`(`vm.Script` 通过);新增分支带"为什么"注释与证据来源;`collapsed!==true` 防御性比较(沿用 A4 教训) |
+| 架构 | 渲染层单点消费,ArkTS 侧未改;身份规则与 `focusedEntry()` 统一,不再有两套"我是谁" |
+| 耗电性 | 无新增轮询/定时器;每手势最多多一次 classList 检查 |
+
+**未改项/已知风险**
+
+- 根状态(无浮层/无抽屉/无历史)仍无动作:第 96 轮的显式取舍,本轮不翻
+  转,避免回到"侧滑退应用"的原始抱怨;若产品要对齐 Android"根状态退出",
+  单独立项。**→ 第 105 轮按用户要求已改为退出应用。**
+- 菜单/浮层关闭动画(150ms)内再侧滑,合成 Escape 打在正在销毁的节点上,
+  该次手势被消耗但不产生二次动作。
+- `ohsidianNativeOccluded()`(B 路由,未提交)用的
+  `.workspace-drawer-active`/`.workspace-drawer.is-active` 在 1.13.7 不存
+  在,原生播放器覆盖层不会被抽屉遮挡检测到;属 B 路由收尾项,本轮不动。
+
+## 第 105 轮(2026-10-19):根状态下侧滑退出应用
+
+**需求**(用户):第 104 轮保留了"根状态无动作"的旧取舍,用户明确要求
+"需要退出应用"——没有可返回的东西时,侧滑应当关闭应用。
+
+**实现**(渲染补丁 v20→v21)
+
+| 变更 | 目的 |
+|---|---|
+| 新增"裁决"通道:手势处理完把 `cfg.backAck={seq,handled}` 写回 mode 文件 | ArkTS 侧无法预知渲染层是否消费了手势;裁决只对本次 seq 有效,旧裁决永不复用 |
+| 阶梯末级不再直接返回,改为回报 `handled:false` | 根状态第一次有了明确信号,不再"静默" |
+| `.lightbox`(图片/媒体全屏查看器)并入浮层档 | 它和模态一样压在移动端返回栈上;不并进去会被判成"根状态"而误退出 |
+| 根判定读叶历史 `leaf.history.backHistory.length`,不看 `view.navigation` 是否存在 | `app:go-back` 的 checkCallback 只要求 navigation 对象;`History.go(-1)` 在空历史时既不循环也不导航 |
+| 两个 @Entry 页(`Index` 与 `WindowNode`,后者由 BrowserAbility 承载;触摸模式下存活的仓库窗口可能是它)都在发布后 350ms 取裁决:`UNHANDLED` + 触摸模式 → `terminateSelf()`;`UNKNOWN` 重试一次;`HANDLED`/仍未知 → 保持打开 | 退出只在"确认没人处理"时发生;漏读裁决绝不可能关应用;两个页面都覆盖到 |
+| 桌面/PC 模式由 `isTouchMode()`(读 mode 文件的 override/systemMode)拦住 | PC 多窗口下返回不撕掉整个会话 |
+| `BackPressBridge` 增加统一 `readMode()`、三态 `shouldExit()`;`notify` 返回本次 seq | 三处读文件的 try/catch 收敛;两个页面共用同一判定,发布者能等到自己的裁决 |
+
+**验证**
+
+- asar v21:语法 + 全部 marker 通过(`verify-asar.cjs` 新增两条 round-105
+  marker)。
+- 渲染层行为回归 12 例全过:抽屉 / 切换器 / 浮层(含 lightbox)/ 历史 →
+  各自消费并回报 `true`;根状态 → 回报 `false`;桌面未聚焦 → 不回报;seq
+  已消费 → 不回报;回报写入不丢 mode 文件其他字段。
+- `hvigorw assembleHap` 全量重编译通过(这是本轮唯一能验证 ArkTS 改动的
+  手段——仓里没有 ArkTS 单测);HAP(11:59:39,221,678,645 B)内嵌 asar 已
+  确认含 v21 守卫、`backAck`、`.lightbox`、根判定与阶梯函数。
+- 构建阻塞修复(B 路由未提交代码,非本轮功能,已单独注释):`AVPlayer.seek()`
+  在该 SDK 声明为 `void`(不能 `.then()`),`ImagePacker.packing()` 的
+  `PackingOption.quality` 是必填字段。两处最小修复后工作区才恢复可编译。
+
+**真机验收**
+
+1. 只打开一篇笔记(无浮层/无抽屉/无历史)→ 侧滑:**应用退出**(任务列表
+   里该任务同时消失,`removeMissionAfterTerminate:true`);
+2. 有历史(笔记 A→B)→ 侧滑:回到 A,不退应用;
+3. 抽屉 / 标签页切换器 / 设置浮层 / 图片查看器打开 → 侧滑只关那一层;
+4. PC 窗口模式(多窗口)→ 侧滑不退应用;
+5. `hdc shell hilog -x | grep -E "back press published|OHSidian back exit"`:
+   每次侧滑一条 `published`;根状态应无 `back exit` 失败日志。
+
+**已知取舍**
+
+- 退出有约 350–700ms 的判定延迟(渲染层 mode 轮询 200ms):这是"确认没人
+  处理"的代价,也保证不会误杀。
+- 仓库选择器(starter 页)不注入这套补丁,那里的侧滑仍是系统默认(未被
+  消费 → 系统退出),与"退出应用"的预期一致。
+- 退出前不做额外保存:Obsidian 的 vault 写入是即时的,不存在未落盘编辑。
+
+**六维审计**
+
+| 维度 | 结论 |
+|---|---|
+| 必要性 | 用户明确要求;不实现则第 104 轮"根状态无动作"仍会被当成"没反应" |
+| 正确性 | 裁决按 seq 绑定;`UNKNOWN` 不退出(失败即安全);桌面模式双重拦截(渲染层 `hasFocus` + ArkTS `isTouchMode`) |
+| 安全性 | 不新增权限/网络/外部输入;新增仅写既有 mode 文件;退出走标准 `terminateSelf()` |
+| 代码质量 | 通道协议与竞态写在注释里;两处构建阻塞修复注明 SDK 依据;`readMode()` 收敛重复 try/catch |
+| 架构 | 不改变 ArkTS↔渲染层既有方向(ArkTS 发布、渲染层消费并回报),复用同一 mode 文件,无新通道 |
+| 耗电性 | 每次手势一个 ≤700ms 的一次性定时器;无新增轮询 |
