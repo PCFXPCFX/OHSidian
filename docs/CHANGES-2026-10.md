@@ -1984,3 +1984,127 @@ if (this.nativeHidden) {
 - 07:39:59 出现 `area=595` 一帧后回到 700：盒子本身在变（页面缩放/滚动），新的同步逻辑下控件会与盒子一起变，不再滞后。
 
 **验证**：`BUILD SUCCESSFUL in 22 s 440 ms`；HAP **221,992,794 B**，SHA-256 `5A6FCE5B4D15735C9A78D351EE438E5583C8EDC8C0CA37A6163EC2D1539C7ADB`；字节码命中 `v151`、`frameW`、`retryResize`，`v150` 已不存在；`obsidian.asar` 未变。
+
+## 第 152 轮(2026-10-20):触摸模式"第一次"窗口不铺满（整屏校正被 1300002 拒绝且无重试）
+
+> 编号说明:并行会话已提交/占用到第 151 轮,本轮窗口修复取 152,不改动
+> 106-151 的既有小节(其中 106/111 与本报的窗口轮次重号,见文末"已知风险")。
+
+**用户报告**:触摸模式下"第一次"窗口不铺满——PC 模式切回触摸、或从 PC
+记忆矩形冷启动时,窗口停在浮窗尺寸(如 `578,219 1644x1233`),要等系统自己
+把窗口 maximize 才铺满。
+
+**日志证据**(07:39:31–07:40:03,HiLog,进程 49177,窗口 1493)
+
+| 时间 | 事件 | 判定 |
+|---|---|---|
+| 32.011–32.075 | 冷启动窗口直接 `[0 0 2800 1840]`;32.798–32.944 4 次 `setBounds skipped: window 1 is fullscreen on touch form factor` | 冷启动本身铺满,第 102/106/107 轮链路正常 |
+| 47.016 | `new status:true` → 浮窗 `578,219 1644x1233`(PC 模式) | 正常 |
+| **58.815** | `new status:false`(切回触摸) | 触发整屏校正 |
+| 58.843 | `layout fullscreen true applied for pcMode=false` | layout 过渡开始 |
+| **58.844** | **`force fullscreen (rect) failed: {"code":1300002}`** | 同步校正被 WMS 以"窗口状态异常"拒绝 |
+| 58.910 | `UpdateRect: [578 219 1644 1233] -> [0 0 2800 1840] reason:1`(MAXIMIZE) | **靠 WMS 自己 maximize 才铺满**,不是代码保证 |
+| 58.982 / 59.142 | `re-pushed viewport bounds: 0,0 2800x1840` | 内容尺寸随后跟上 |
+
+**根因(以代码为准)**
+
+1. `forceFullscreenWindow()` 的 `catch` 只 `warn`,**没有任何重试**。而
+   `1300002` 正是"layout/模式过渡尚未落定"时 `resize` 的典型返回——
+   `setWindowLayoutFullScreen(true)` 与 `resize` 之间只隔 1ms。
+2. 触摸整屏校正的三个调用点(启动首同步、`loadContent` 重申、模式切回)全部
+   是**同步一次**;冷启动路径的两个点都在窗口 show 之前,同样可能被
+   1300002 拒绝。
+3. `windowStatusChange` 处理器只推 viewport/insets(第 87 轮 A2),
+   **不再检查"触摸形态但窗口仍是浮窗"**,错过窗口落定后的校正机会。
+
+**修复**
+
+| 侧 | 变更 | 目的 |
+|----|------|------|
+| ArkTS `WebAbility.forceFullscreenWindow` | `catch` 中错误码为 `1300002` 时调用新增 `scheduleFullscreenRetry()`:350ms 后**单发**重试;重试前若已切回窗口形态则放弃;成功后清零预算;只重试一次 | 给"过渡期被拒"的整屏校正一次落定后的机会,同时不演变成第 87/88 轮禁止的定时梯子 |
+| ArkTS `WebAbility.windowStatusChange` | `!pcModeEnabled` 且状态为 `FLOATING`/`MAXIMIZE` 时再调一次 `forceFullscreenWindow()`(幂等,已整屏立即返回) | 即使延时重试也失败,只要窗口落定为浮窗就再校正一次;覆盖"WMS 不自动 maximize"的情况 |
+| ArkTS 定时器生命周期 | 窗口舞台重建时清零重试预算并清除挂起定时器;`onWindowStageDestroy` 一并清除 | 不得对已销毁/重建的窗口执行 resize |
+| Docs | `window-state-machine.md` §3"唯一允许的延时动作"改为"对账推 + 触摸整屏校正单发重试";新增 Round 152 与 3 条不变量 | 规格与实现一致,防止延时补偿再次扩散 |
+
+**六维审计**
+
+| 维度 | 结论 |
+|---|---|
+| 必要性 | 日志直接给出失败点(58.844 `1300002`)与"谁来铺满"(58.910 WMS maximize);修复对应代码里唯一缺少的"落定后重试" |
+| 正确性 | 重试只在 `1300002` 且仍为触摸形态时发生,单发一次;`forceFullscreenWindow` 自身幂等(已整屏 return),状态事件重入不会抖动;`FLOATING`/`MAXIMIZE` 才触发事件校正,`MINIMIZE`(系统收起)不触发;定时器在重建/销毁时清除 |
+| 安全性 | 不新增权限/外部输入;只对自身窗口调用 `resize/moveWindowTo`;新增日志只含尺寸/错误码;窗口形态(`pcModeEnabled=true`)与 2in1 仍被门排除 |
+| 代码质量 | 重试预算与"单发"语义写进字段注释;`scheduleFullscreenRetry` 单点、可静态审查;不新增 import;日志串 `retrying forced fullscreen rect after 1300002` 可 grep |
+| 架构 | 状态机补齐"延时补偿"白名单:对账推 + 整屏校正单发重试,二者都要求"单发、不堆叠、不与 WMS 落定长期赛跑";Round 152 记录不变量 |
+| 耗电性 | 仅在一次 `1300002` 失败后挂一个 350ms 一次性定时器;成功路径零新增;无轮询、无梯子 |
+
+**自查审计**
+
+- R152-1 重试会不会死循环?不会:`fullscreenRetryCount` 上限 1,且重试成功
+  后清零、窗口舞台重建时清零;第二次失败只 `warn` 不再排定时器。
+- R152-2 切回 PC 模式后重试会不会把浮窗拉全屏?不会:定时器回调先看
+  `pcModeEnabled`,窗口形态直接放弃(并保留"不改变窗口"的安全方向)。
+- R152-3 状态事件校正会不会与 `resize` 互相触发成环?`forceFullscreenWindow`
+  先比较 `windowRect` 是否已达 display 尺寸,已整屏立即返回;我们 resize
+  成功后 WMS 报 `FULL_SCREEN`,不满足 `FLOATING/MAXIMIZE` 条件;只有仍是浮窗
+  才再次校正。
+- R152-4 `MINIMIZE`(系统回桌面)会不会被误校正?条件只含 `FLOATING`/
+  `MAXIMIZE`,不含 `MINIMIZE`;触摸形态的最小化本身已被第 111 轮取消。
+- R152-5 冷启动路径会不会多一次无意义 resize?不会:冷启动窗口通常已整屏,
+  尺寸比较直接 return;只有确实浮窗(如 PC 记忆矩形)才 resize。
+- R152-6 定时器泄漏?窗口舞台重建与 `onWindowStageDestroy` 都清除,且回调
+  只使用 `this.mainWindow` 并做判空。
+- R152-7 为什么不用 `maximize()` 代替 `resize`?Round 111 已确认该设备
+  `maximize` 返回"device not supported"且 Promise 仍 resolve;显式矩形才是
+  可靠手段(第 11/102 轮结论)。
+- R152-8 编译验证:`hvigorw assembleHap` **BUILD SUCCESSFUL**(见下),
+  未跑真机。
+
+**验证要点**(真机,触摸模式)
+
+1. PC 模式切回触摸:应出现 `retrying forced fullscreen rect after 1300002` →
+   `forced fullscreen rect: 2800x1840 @ (0,0)`;窗口在 ~350ms 内铺满,
+   不再依赖 `reason:1` 的系统 maximize。
+2. 反复切换 PC↔触摸 5 次:每次窗口都回到 `[0 0 2800 1840]`;若某次仍失败,
+   应在状态事件后看到第二次 `forced fullscreen rect`(或至少不再停在浮窗)。
+3. 从 PC 记忆矩形冷启动(上次在 PC 模式把窗口拖小后切回触摸再启动):
+   窗口应铺满;hilog 出现一次 `retrying forced fullscreen rect after 1300002`
+   或状态事件触发的 `forced fullscreen rect`。
+4. 窗口形态(PC)下不得出现任何 `forced fullscreen rect` /
+   `retrying forced fullscreen rect`。
+5. 第 107/111 轮验收不回归(换库整屏、触摸最小化被忽略)。
+
+**未改项/已知风险**
+
+- `1300002` 之外的拒绝码(如 1300001 权限、窗口已销毁)不重试,只记录——
+  那些不是过渡期问题。
+- 重试只覆盖一次;若 WMS 在 350ms 后仍处于过渡态,依赖 `windowStatusChange`
+  的落定事件兜底;两者都失效时窗口会停在浮窗(与修复前一致),日志可见。
+- 文档轮次重号(106/111)来自并行会话提交,本轮未重排;如需统一编号需单独
+  做一次纯文档重编号。
+- 本轮未跑真机;编译为 ArkTS 唯一门。
+## 第 152 轮 (2026-10-20): 视频功能的缺陷台账（本轮修 7 项，剩余 6 项待办）
+
+### 本轮修复
+
+| # | 缺陷 | 证据 | 修法 |
+|---|---|---|---|
+| 1 | 揭示按**时间**判定，可能在重排完成前用带新时间戳的旧矩形揭示 | `revealNative(ts)` 只有 `ts >= hideAt+400` | 改为**几何变化判定**：与隐藏时记录的 `hiddenW/H/Left/Top` 比对，另留 120ms 稳定窗与 900ms 兜底；日志打印 `moved=/timedOut=` |
+| 2 | 揭示到重建之间，旧帧被拉伸显示在新盒子里 | `resizeCover` 只在 `retryResize` 置位 | 盒子一变（`onAreaChange` 且 moved）就置遮罩 |
+| 3 | `completed` 状态不重建 surface，播完切模式后重播画面拉伸 | `scheduleSurfaceResize` 的状态门槛 | 门槛加入 `completed` |
+| 4 | 遮罩可能永久驻留（prepare 卡住时永远到不了 playing/paused） | 无超时 | 2.5s 兜底清遮罩，且状态真变化时取消计时器 |
+| 5 | `probeMedia()` 在 `aboutToAppear` **同步**读文件与 moov，阻塞首帧 | `fileIo.readSync` 在 UI 线程 | 改为 `scheduleMediaProbe()`，延迟 500ms；`aboutToDisappear` 清计时器 |
+| 6 | 全屏期间不记录 inline 几何，退出全屏后到下一次心跳可能一帧旧尺寸 | rect 分支 `!nativeFullscreen` 才 `moveNativeRect` | 全屏时也 `moveNativeRect`（只记录，不改变全屏布局） |
+| 7 | 控制条尺寸慢一帧（R151 已修）与 60Hz 重建风暴 | HiLog 47.840 帧 `area=700 / bar=52.18` | `@Prop frameW/frameH` + 1vp 抖动阈值 |
+
+### 视频侧仍待办（按影响排序）
+
+| # | 问题 | 影响 | 备注 |
+|---|---|---|---|
+| A | `seekGuardUntil` 是固定 700ms，大跨度 seek 超过它时 `timeUpdate` 会把滑块拉回旧值 | 长视频拖到远处后位置回跳 | 应改为等 `seekDone` 事件解除守卫 |
+| B | 单击延迟 320ms 才响应播放/暂停 | 手感迟钝 | 为双击让路；可对"控制条区域"的单击立即响应 |
+| C | `videoAspect` 未知时用**盒子比例**兜底 | 极端情况画面比例错 | 可改为不设 aspect（保持 100%） |
+| D | 无键盘快捷键（空格/←→/↑↓/F） | 边看边记场景不便 | 需主进程把按键路由到原生层 |
+| E | 无时间戳链接 / 转录联动 | 不能"从笔记跳到视频某处" | 渲染层特性 |
+| F | 错误重试预算 2 次，用尽后只能手动重试 | 偶发解码错误后需交互 | 可加指数退避 |
+
+**验证**：`BUILD SUCCESSFUL in 20 s 56 ms`；HAP **222,000,066 B**，SHA-256 `4EFA2EFC6D512FF51207B7F4919472B5FDCE06726A346FFBD7FC6BA1DD3636DA`；字节码命中 `v152`、`coverTimer`、`scheduleMediaProbe`，`v151` 已不存在；`obsidian.asar` 未变。

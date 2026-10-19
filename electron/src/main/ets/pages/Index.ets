@@ -141,6 +141,14 @@ struct Index {
   // at the old coordinates for a few frames.
   @State private nativeHidden: boolean = false;
   private nativeHideAt: number = 0;
+  // Geometry captured when we hid. The reveal is gated on the incoming rect
+  // actually differing from this, not just on elapsed time: the renderer can
+  // send a rect with a fresh timestamp but the PRE-switch geometry, and a
+  // time-only gate then revealed the surface in the old place for a frame.
+  private hiddenW: number = 0;
+  private hiddenH: number = 0;
+  private hiddenLeft: number = 0;
+  private hiddenTop: number = 0;
   private nativeShowTimer: number = -1;
   private nativeWin: window.Window | null = null;
   private nativeBarsHidden: boolean = false;
@@ -310,13 +318,15 @@ struct Index {
         }
         // A mode switch hides the surface (keep decoding); the first rect
         // produced after the relayout settles is what reveals it again.
-        this.revealNative(req.ts);
+        this.revealNative(req);
         if (this.nativeRequest !== null && !this.nativeFullscreen) {
           this.moveNativeRect(req);
         } else if (this.nativeRequest !== null) {
-          // Fullscreen still needs the theme heartbeat; only geometry updates
-          // are suppressed while the surface is expanded.
+          // Fullscreen: the surface fills the window, but the INLINE geometry is
+          // still recorded - otherwise leaving fullscreen painted the last
+          // pre-fullscreen box until the next heartbeat.
           this.applyNativeTheme(req);
+          this.moveNativeRect(req);
         }
         return;
       }
@@ -993,6 +1003,10 @@ struct Index {
     }
     this.nativeHidden = true;
     this.nativeHideAt = Date.now();
+    this.hiddenW = this.nativeW;
+    this.hiddenH = this.nativeH;
+    this.hiddenLeft = this.nativeLeft;
+    this.hiddenTop = this.nativeTop;
     if (this.nativeShowTimer >= 0) {
       clearTimeout(this.nativeShowTimer);
     }
@@ -1006,23 +1020,31 @@ struct Index {
     }, 900);
   }
 
-  private revealNative(ts: number): void {
-    if (!this.nativeHidden) {
+  private revealNative(req: NativeVideoRequest): void {
+    if (!this.nativeHidden || req.rect === null) {
       return;
     }
-    // A mode switch takes: window resize -> WebEngine viewport config ->
-    // Chromium relayout -> the renderer's next rAF rect. Measured on device at
-    // ~250ms, so a 120ms gate still let the OLD rect (with a fresh timestamp)
-    // through and restored the old coordinates. 400ms covers the relayout;
-    // the 1.5s safety net in hideNativeForResize still guarantees a reveal.
-    if (ts >= this.nativeHideAt + 400 || Date.now() >= this.nativeHideAt + 1200) {
-      this.nativeHidden = false;
-      if (this.nativeShowTimer >= 0) {
-        clearTimeout(this.nativeShowTimer);
-        this.nativeShowTimer = -1;
-      }
-      console.info('NativeVideoIpc', 'native revealed after resize');
+    const k: number = this.cssToVp();
+    const w: number = req.rect.width * k;
+    const h: number = req.rect.height * k;
+    const left: number = req.rect.left * k;
+    const top: number = req.rect.top * k;
+    // Proof that the page really re-laid out: the box differs from the one we
+    // captured when hiding. `timedOut` stays as the safety net.
+    const moved: boolean = Math.abs(w - this.hiddenW) > 2 || Math.abs(h - this.hiddenH) > 2 ||
+      Math.abs(left - this.hiddenLeft) > 2 || Math.abs(top - this.hiddenTop) > 2;
+    const settled: boolean = req.ts >= this.nativeHideAt + 120;
+    const timedOut: boolean = Date.now() >= this.nativeHideAt + 900;
+    if (!timedOut && !(moved && settled)) {
+      return;
     }
+    // Gate passed: the page has re-laid out (or we timed out waiting).
+    this.nativeHidden = false;
+    if (this.nativeShowTimer >= 0) {
+      clearTimeout(this.nativeShowTimer);
+      this.nativeShowTimer = -1;
+    }
+    console.info('NativeVideoIpc', 'native revealed moved=' + moved + ' timedOut=' + timedOut);
   }
 
   private async applySystemBars(hide: boolean): Promise<void> {

@@ -210,6 +210,8 @@ export struct NativeVideoOverlay {
   private resumeMs: number = -1;
   private resumePlay: boolean = false;
   private resizeTimer: number = -1;
+  private probeTimer: number = -1;
+  private coverTimer: number = -1;
   private hideTimer: number = -1;
   private hintTimer: number = -1;
   private tapTimer: number = -1;
@@ -231,9 +233,9 @@ export struct NativeVideoOverlay {
 
   aboutToAppear(): void {
     this.released = false;
-    this.probeMedia();
+    this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v151');
+    LogUtil.info(TAG, 'transport=avplayer v152');
   }
 
   aboutToDisappear(): void {
@@ -242,6 +244,14 @@ export struct NativeVideoOverlay {
     this.clearHideTimer();
     this.clearHintTimer();
     this.clearTapTimer();
+    if (this.probeTimer >= 0) {
+      clearTimeout(this.probeTimer);
+      this.probeTimer = -1;
+    }
+    if (this.coverTimer >= 0) {
+      clearTimeout(this.coverTimer);
+      this.coverTimer = -1;
+    }
     if (this.resizeTimer >= 0) {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = -1;
@@ -267,7 +277,7 @@ export struct NativeVideoOverlay {
     this.metaVfr = false;
     this.metaVideoBps = 0;
     this.metaVideoMax = 0;
-    this.probeMedia();
+    this.scheduleMediaProbe();
     if (!this.started || this.released) {
       return;
     }
@@ -528,6 +538,10 @@ export struct NativeVideoOverlay {
           this.completed = false;
           this.switching = false;
           this.resizeCover = false;
+          if (this.coverTimer >= 0) {
+            clearTimeout(this.coverTimer);
+            this.coverTimer = -1;
+          }
           // A retry normally clears the budget only after the session has
           // proven stable. Resetting on every 'playing' lets a decoder that
           // enters playing then fails immediately retry forever.
@@ -1092,7 +1106,8 @@ export struct NativeVideoOverlay {
     if (!changed || this.player === null) {
       return;
     }
-    if (this.playerState !== 'prepared' && this.playerState !== 'playing' && this.playerState !== 'paused') {
+    if (this.playerState !== 'prepared' && this.playerState !== 'playing' &&
+      this.playerState !== 'paused' && this.playerState !== 'completed') {
       return;
     }
     if (this.resizeTimer >= 0) {
@@ -1103,7 +1118,8 @@ export struct NativeVideoOverlay {
     this.resizeTimer = setTimeout(() => {
       this.resizeTimer = -1;
       if (!this.released && this.player !== null &&
-        (this.playerState === 'prepared' || this.playerState === 'playing' || this.playerState === 'paused')) {
+        (this.playerState === 'prepared' || this.playerState === 'playing' ||
+          this.playerState === 'paused' || this.playerState === 'completed')) {
         // A user resize is not a decode error; retryResize() also resets the
         // budget and dedupes against the onLoad trigger of the same switch.
         this.retryResize('surface area');
@@ -1408,6 +1424,21 @@ export struct NativeVideoOverlay {
       }
       p = bEnd;
     }
+  }
+
+  // The probe opens the file and reads its moov box synchronously. Doing that
+  // from aboutToAppear blocks the first frame ("opening a clip stalls for a
+  // moment"), so give the player a beat before reading the container.
+  private scheduleMediaProbe(): void {
+    if (this.probeTimer >= 0) {
+      clearTimeout(this.probeTimer);
+    }
+    this.probeTimer = setTimeout(() => {
+      this.probeTimer = -1;
+      if (!this.released) {
+        this.scheduleMediaProbe();
+      }
+    }, 500);
   }
 
   private probeMedia(): void {
@@ -1845,7 +1876,7 @@ export struct NativeVideoOverlay {
               .fontColor(this.theme.muted)
               .margin({ top: 1 })
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v151')
+              ' · k=' + this.u().toFixed(3) + ' · v152')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 6 })
@@ -2134,6 +2165,25 @@ export struct NativeVideoOverlay {
         this.syncUnit();
         if (!moved) {
           return;
+        }
+        // The surface still holds a frame rendered for the OLD box, so between
+        // this event and the rebuilt surface the picture is stretched. Cover
+        // that interval instead of showing a distorted frame.
+        const rebuilding: boolean = this.player !== null &&
+          (this.playerState === 'prepared' || this.playerState === 'playing' ||
+            this.playerState === 'paused');
+        if (rebuilding) {
+          this.resizeCover = true;
+          // The cover must never outlive a failed rebuild: prepare can stall
+          // without ever reaching playing/paused, and a stuck opaque cover reads
+          // as "the video disappeared".
+          if (this.coverTimer >= 0) {
+            clearTimeout(this.coverTimer);
+          }
+          this.coverTimer = setTimeout(() => {
+            this.coverTimer = -1;
+            this.resizeCover = false;
+          }, 2500);
         }
       }
       // Surface size follows the aspect, so a window/fullscreen change still
