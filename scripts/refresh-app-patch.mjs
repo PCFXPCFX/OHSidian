@@ -82,11 +82,13 @@ for (const [file, patch, marker] of [
        'settings font list injection'],
     ];
     for (const [bsrc, bdst, name] of bodyPatches) {
-      if (src.includes(bdst)) {
-        console.log('[refresh] body patch already applied: ' + name);
-      } else if (src.includes(bsrc)) {
+      // src first - see update-obsidian.mjs: the drawer dst also occurs in
+      // upstream's "manage-vaults" branch.
+      if (src.includes(bsrc)) {
         src = src.replace(bsrc, bdst);
         console.log('[refresh] body patch applied: ' + name);
+      } else if (src.includes(bdst)) {
+        console.log('[refresh] body patch already applied: ' + name);
       } else {
         console.log('[refresh] WARNING: body patch site missing: ' + name);
       }

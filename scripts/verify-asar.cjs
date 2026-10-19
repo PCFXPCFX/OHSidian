@@ -91,7 +91,11 @@ try {
     // or touch-mode vault switching dead-ends (drawer). Verify the patched
     // forms explicitly instead of trusting update-obsidian.mjs warnings.
     'main version-floor gate patched': main.includes('bo=Math.max(parseInt(fo.split(".")[0]),28)'),
-    'app drawer switch routed': app.includes('i.app.openVaultChooser()'),
+    // src-first body patch: 'i.app.openVaultChooser()' alone also occurs in
+    // upstream's "manage-vaults" branch, so assert the patched call site and
+    // that the unpatched drawer handler is gone.
+    'app drawer switch routed': app.includes('(Wf(n),i.app.openVaultChooser())'),
+    'app drawer switch source replaced': !app.includes('setItem("mobile-selected-vault",n),location.reload()'),
     'main deeplink cursor file (no main-file rewrite)': main.includes('.cursor.json'),
     'main default vault fix': main.includes('__ohsidianDefaultVault'),
     'main deeplink bridge': main.includes('__ohsidianDeepLink'),

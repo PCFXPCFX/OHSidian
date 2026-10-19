@@ -259,11 +259,15 @@ async function main() {
       'the delete dialog keeps the stock ".trash folder" wording'],
   ];
   for (const [src, dst, okMsg, warnMsg] of APP_BODY_PATCHES) {
-    if (appSrc.includes(dst)) {
-      log('body patch already applied: ' + okMsg);
-    } else if (appSrc.includes(src)) {
+    // src FIRST: the drawer dst token ("i.app.openVaultChooser()") also exists
+    // in upstream's "manage-vaults" branch, so testing dst first makes a
+    // pristine app.js look "already applied" and silently skips the real
+    // replacement (touch-mode vault switching then stays on reload()).
+    if (appSrc.includes(src)) {
       appSrc = appSrc.replace(src, dst);
       log(okMsg);
+    } else if (appSrc.includes(dst)) {
+      log('body patch already applied: ' + okMsg);
     } else {
       log('WARNING: ' + warnMsg);
     }
