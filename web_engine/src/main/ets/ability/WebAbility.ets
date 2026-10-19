@@ -1168,15 +1168,18 @@ export class WebAbility extends WebBaseAbility {
   // vaults there so they are visible in 文件管理 and SURVIVE UNINSTALL -
   // the app sandbox (userData) is wiped when the app is removed. A vault
   // inside Documents and its .trash are user-manageable files.
-  private publishDocumentsDir(): void {
+  private publishDocumentsDir(grantedHint?: boolean): void {
+    const permissionManager: PermissionManagerAdapter = Inject.get(PermissionManagerAdapter);
+    const granted: boolean = grantedHint === undefined
+      ? permissionManager.isPermissionGrantedSync('directory_document')
+      : grantedHint;
     let documentsDir: string = '';
-    try {
-      documentsDir = environment.getUserDocumentDir();
-    } catch (exception) {
-      LogUtil.warn(TAG, 'getUserDocumentDir failed: ' + JSON.stringify(exception));
-    }
-    if (!documentsDir) {
-      return;
+    if (granted) {
+      try {
+        documentsDir = environment.getUserDocumentDir();
+      } catch (exception) {
+        LogUtil.warn(TAG, 'getUserDocumentDir failed: ' + JSON.stringify(exception));
+      }
     }
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
@@ -1192,12 +1195,19 @@ export class WebAbility extends WebBaseAbility {
       } catch (e) {
         cfg = {};
       }
-      if (cfg['documentsDir'] === documentsDir) {
+      const changed: boolean = cfg['documentsDir'] !== documentsDir ||
+        cfg['documentsDirGranted'] !== granted;
+      if (!changed) {
         return;
       }
+      // Empty (not stale) when the permission is missing/revoked: the
+      // renderer used to treat any non-empty documentsDir as "granted" and
+      // then pointed the default vault / trash / logs at an unusable path.
       cfg['documentsDir'] = documentsDir;
+      cfg['documentsDirGranted'] = granted;
       this.publishModeFileAtomic(filePath, cfg);
-      LogUtil.info(TAG, 'documents dir published: ' + documentsDir);
+      LogUtil.info(TAG, 'documents dir published: granted=' + granted +
+        ', dir=' + documentsDir);
     } catch (err) {
       LogUtil.error(TAG, 'failed to write documentsDir to mode file: ' + JSON.stringify(err));
     }
@@ -2281,10 +2291,13 @@ export class WebAbility extends WebBaseAbility {
       // web feature runs, so users are not greeted with a wall of dialogs.
       const dirRequests: Array<string> = ['directory_document', 'directory_download'];
       let dirPending: number = dirRequests.length;
+      let documentsGranted: boolean | undefined = undefined;
       const republish = (): void => {
         dirPending--;
         if (dirPending === 0) {
-          this.publishDocumentsDir();
+          // Pass the REAL result so a first-launch denial clears documentsDir
+          // in the same pass (instead of leaving the pre-request value).
+          this.publishDocumentsDir(documentsGranted);
         }
       };
       dirRequests.forEach((permType: string) => {
@@ -2299,6 +2312,9 @@ export class WebAbility extends WebBaseAbility {
             } else {
               LogUtil.warn(TAG, 'startup permission NOT granted: ' + permType +
                 ' code=' + granted);
+            }
+            if (permType === 'directory_document') {
+              documentsGranted = granted === 0;
             }
             republish();
           });

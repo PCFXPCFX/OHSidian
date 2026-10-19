@@ -25,7 +25,7 @@ try {
     process.exit(1);
   }
   const checks = {
-    'app touch patch v21': app.includes('__ohsidianTouchPatch==="21"'),
+    'app touch patch marker': /__ohsidianTouchPatch==="\d+"/.test(app),
     // Round 98r revert: the vdec-shim experiment is shelved (see
     // docs/CHANGES-2026-09.md HEVC verdict); assert the toggle is GONE.
     'app video-hw toggle removed (98r revert)': !app.includes('ohsidian-video-hw'),
@@ -56,6 +56,21 @@ try {
     'app restore-fonts command': app.includes('restoreSystemFonts'),
     'app vault migrate cmd': app.includes('ohsidian-vault-visible'),
     'app trash hook': app.includes('__ohsidianTrashHook'),
+    // 2026-10-19 file-management safety patch: one timestamped move for both
+    // trash destinations, an owner marker so the purge only cleans our own
+    // trash, granted-aware documentsDir and a non-empty migration target guard.
+    'app trash unified move + owner marker': app.includes('stampTree') && app.includes('.ohsidian-trash-owner.json'),
+    'app migration non-empty target guard': app.includes('safeCopyDir') && app.includes('targetExisted'),
+    // 2026-10-19 second audit: one completion callback (empty dirs used to
+    // fire it early), strict trash containment, fallback stamping, symlink
+    // preservation on cross-device moves, purge ctime race guard.
+    'app migration single completion (2nd audit)': app.includes('if(!items.length)return doneDir(null)') && app.includes('var finish=function(err){'),
+    'app trash strict containment (2nd audit)': app.includes('if(src.indexOf(baseResolved+pathMod.sep)!==0){'),
+    'app trash fallback stamping (2nd audit)': app.includes('stampFallbackEntry') && app.includes('fsMod.symlinkSync(linkTarget,d)'),
+    'main purge ctime guard (2nd audit)': main.includes('st.ctimeMs||0'),
+    'app documentsDirGranted gate': app.includes('documentsDirPath') && app.includes('documentsDirGranted'),
+    'main default vault writable probe': main.includes('__ohDvWritable'),
+    'main purge owner marker': main.includes('__ohTrashOwnerFile'),
     'app mode-switch file sync': app.includes('syncActiveFileToTargetLayout'),
     'app font scale follower': app.includes('applyFontScale'),
     'app style-font follower (OhosThemeFont)': app.includes('"OhosThemeFont","HarmonyOS Sans"'),

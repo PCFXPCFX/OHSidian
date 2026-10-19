@@ -42,6 +42,8 @@ import preferences from '@ohos.data.preferences';
 import prompt from '@ohos.promptAction'
 import { promptAction } from '@kit.ArkUI';
 import { Want, common } from '@kit.AbilityKit';
+import environment from '@ohos.file.environment';
+import fs from '@ohos.file.fs';
 
 const CONFIRM: number = 0;
 const ERROR: number = -1;
@@ -52,6 +54,11 @@ const REQUEST_PERMISSION_FAIL: number = -2;
 const REQUEST_PERMISSION_SUCCESS: number = 0;
 let dataPreferences: preferences.Preferences | null = null;
 let options: preferences.Options = { name: 'myStore' };
+// Serialize preference writes: two windows (or a picker result racing the
+// startup activation) can call saveUris concurrently, and the previous
+// read-modify-write silently dropped the other writer's URIs. The queue keeps
+// every write ordered in this process.
+let persistWriteQueue: Promise<void> = Promise.resolve();
 
 interface ConfirmParams {
   title: string,
@@ -93,6 +100,8 @@ export class PermissionManagerAdapter extends BaseAdapter {
       'ohos.permission.CUSTOM_SCREEN_CAPTURE',
     ]]
   ]);
+  // The system caps persisted URIs per app (500); keep a deliberate margin.
+  private static readonly MAX_PERSIST_URIS: number = 100;
   private atManager: abilityAccessCtrl.AtManager;
   private tokenId: number = 0;
   private ctxAdapter: ContextAdapter;
@@ -176,33 +185,103 @@ export class PermissionManagerAdapter extends BaseAdapter {
 
   @LogMethod
   async checkPermissions(permissionType: string, callback: (granted: boolean) => void): Promise<void> {
-    const permissions = this.needPermissions.get(permissionType) as Array<Permissions>;
-    if (!permissions) {
-      LogUtil.error(TAG, 'unsupported permission:' + permissionType);
-      callback(false);
-      return;
-    }
-    let grantStatus: abilityAccessCtrl.GrantStatus =
-      abilityAccessCtrl.GrantStatus.PERMISSION_DENIED;
-    let bundleInfo: bundleManager.BundleInfo =
-      await bundleManager.getBundleInfoForSelf(bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_APPLICATION);
-    let appInfo: bundleManager.ApplicationInfo = bundleInfo.appInfo;
-    this.tokenId = appInfo.accessTokenId;
-    for (let i = 0; i < permissions.length; i++) {
-      try {
-        grantStatus = this.atManager.checkAccessTokenSync(this.tokenId, permissions[i]);
+    try {
+      const permissions = this.needPermissions.get(permissionType) as Array<Permissions>;
+      if (!permissions || permissions.length === 0) {
+        LogUtil.error(TAG, 'unsupported permission:' + permissionType);
+        callback(false);
+        return;
+      }
+      const bundleInfo: bundleManager.BundleInfo =
+        await bundleManager.getBundleInfoForSelf(bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_APPLICATION);
+      const appInfo: bundleManager.ApplicationInfo = bundleInfo.appInfo;
+      this.tokenId = appInfo.accessTokenId;
+      for (let i = 0; i < permissions.length; i++) {
+        const grantStatus: abilityAccessCtrl.GrantStatus =
+          this.atManager.checkAccessTokenSync(this.tokenId, permissions[i]);
         if (grantStatus !== abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED) {
           LogUtil.error(TAG, 'checkPermission error');
           callback(false);
           return;
         }
-      } catch (err) {
-        LogUtil.error(TAG, `checkAccessToken failed: ${JSON.stringify(err)}`);
-        callback(false);
-        return;
       }
+      callback(true);
+    } catch (err) {
+      // getBundleInfoForSelf / checkAccessTokenSync used to reject this async
+      // method while the renderer kept waiting for the callback - the whole
+      // permission flow then hung. Always answer exactly once.
+      LogUtil.error(TAG, `checkPermissions failed: ${JSON.stringify(err)}`);
+      callback(false);
     }
-    callback(true);
+  }
+
+  // Synchronous grant check for callers that must decide BEFORE opening a
+  // picker (the async checkPermissions above is JS-bound only). The token id
+  // is refreshed because it can change across upgrades / multi-user setups.
+  public isPermissionGrantedSync(permissionType: string): boolean {
+    const permissions: Array<Permissions> | undefined = this.needPermissions.get(permissionType);
+    if (permissions === undefined || permissions.length === 0) {
+      return false;
+    }
+    try {
+      const info: bundleManager.BundleInfo = bundleManager.getBundleInfoForSelfSync(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_APPLICATION);
+      this.tokenId = info.appInfo.accessTokenId;
+      for (let i = 0; i < permissions.length; i++) {
+        if (this.atManager.checkAccessTokenSync(this.tokenId, permissions[i]) !==
+          abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED) {
+          return false;
+        }
+      }
+      return true;
+    } catch (err) {
+      LogUtil.error(TAG, `isPermissionGrantedSync failed: ${JSON.stringify(err)}`);
+      return false;
+    }
+  }
+
+  // <Documents>/OHSidian, the user-visible default vault root. Returns '' when
+  // the Documents permission is missing or the directory is unusable. The
+  // directory is created lazily because DocumentViewPicker's
+  // defaultFilePathUri must point at an existing directory.
+  public getDocumentsVaultRootPath(): string {
+    if (!this.isPermissionGrantedSync('directory_document')) {
+      return '';
+    }
+    let docs: string = '';
+    try {
+      docs = environment.getUserDocumentDir();
+    } catch (err) {
+      LogUtil.warn(TAG, `getUserDocumentDir failed: ${JSON.stringify(err)}`);
+      return '';
+    }
+    if (!docs) {
+      return '';
+    }
+    const base: string = docs.endsWith('/') ? docs.slice(0, docs.length - 1) : docs;
+    const target: string = base + '/OHSidian';
+    try {
+      if (!fs.accessSync(target)) {
+        fs.mkdirSync(target, true);
+      }
+      return target;
+    } catch (err) {
+      // Creating the subdirectory must never make the picker unusable: fall
+      // back to the Documents root (still visible in 文件管理).
+      LogUtil.warn(TAG, `create OHSidian dir failed, fall back to Documents: ${JSON.stringify(err)}`);
+      return base;
+    }
+  }
+
+  // docs-domain URI for DocumentSelectOptions/DocumentSaveOptions; '' means
+  // "do not set defaultFilePathUri". Only paths under /storage/ can be
+  // expressed as file://docs URIs.
+  public getDocumentsVaultRootUri(): string {
+    const path: string = this.getDocumentsVaultRootPath();
+    if (!path || !path.startsWith('/storage/')) {
+      return '';
+    }
+    return 'file://docs' + path;
   }
 
   @LogMethod
@@ -221,14 +300,23 @@ export class PermissionManagerAdapter extends BaseAdapter {
 
   @LogMethod
   public saveUris(uris: string[]) {
-    try {
-      dataPreferences = preferences.getPreferencesSync(this.ctxAdapter.getContext(), options);
-    } catch (err) {
-      LogUtil.error(TAG, `Failed to get preference. Code:${err.code}, message:${err.message}`);
-    }
-    if (dataPreferences) {
+    // MERGE with the URIs already persisted. The previous implementation
+    // replaced the single slot with the latest picker result, so selecting a
+    // second folder silently dropped the first one's persisted permission
+    // (multi-vault users then could not reopen the first vault after restart).
+    persistWriteQueue = persistWriteQueue.then((): void => {
       try {
-        dataPreferences.putSync('defaultDownloadUri', JSON.stringify(uris));
+        // Merge INSIDE the queued write: two windows may otherwise compute
+        // their merge from the same old snapshot and the later write would
+        // drop the earlier window's URI.
+        const merged: string[] = PermissionManagerAdapter.mergeUris(this.getUris(), uris);
+        if (!dataPreferences) {
+          dataPreferences = preferences.getPreferencesSync(this.ctxAdapter.getContext(), options);
+        }
+        if (!dataPreferences) {
+          return;
+        }
+        dataPreferences.putSync('defaultDownloadUri', JSON.stringify(merged));
         dataPreferences.flush((err: BusinessError) => {
           if (err) {
             LogUtil.error(TAG, `Failed to flush. Code:${err.code}, message:${err.message}`);
@@ -239,7 +327,55 @@ export class PermissionManagerAdapter extends BaseAdapter {
       } catch (err) {
         LogUtil.error(TAG, `Failed to save uris. Code:${err.code}, message:${err.message}`);
       }
+    }).catch((err: BusinessError) => {
+      LogUtil.error(TAG, `saveUris queue failed: ${JSON.stringify(err)}`);
+    });
+  }
+
+  // Replace the persisted list verbatim (used to prune dead URIs). Unlike
+  // saveUris() this does NOT merge with the old list, so an empty list really
+  // clears the preference instead of resurrecting dead entries forever.
+  private writeUrisExact(uris: string[]) {
+    persistWriteQueue = persistWriteQueue.then((): void => {
+      try {
+        if (!dataPreferences) {
+          dataPreferences = preferences.getPreferencesSync(this.ctxAdapter.getContext(), options);
+        }
+        if (!dataPreferences) {
+          return;
+        }
+        dataPreferences.putSync('defaultDownloadUri', JSON.stringify(uris));
+        dataPreferences.flush((err: BusinessError) => {
+          if (err) {
+            LogUtil.error(TAG, `Failed to flush. Code:${err.code}, message:${err.message}`);
+          }
+        });
+      } catch (err) {
+        LogUtil.error(TAG, `Failed to write uris. Code:${err.code}, message:${err.message}`);
+      }
+    }).catch((err: BusinessError) => {
+      LogUtil.error(TAG, `writeUrisExact queue failed: ${JSON.stringify(err)}`);
+    });
+  }
+
+  private static mergeUris(oldUris: string[], newUris: string[]): string[] {
+    const out: string[] = [];
+    const seen: Set<string> = new Set<string>();
+    // New URIs first: when the list hits the cap the OLDEST entries are the
+    // ones dropped, never the folder the user just picked.
+    const all: string[] = newUris.concat(oldUris);
+    for (let i = 0; i < all.length; i++) {
+      const uri: string = all[i];
+      if (!uri || seen.has(uri)) {
+        continue;
+      }
+      seen.add(uri);
+      out.push(uri);
+      if (out.length >= PermissionManagerAdapter.MAX_PERSIST_URIS) {
+        break;
+      }
     }
+    return out;
   }
 
   @LogMethod
@@ -252,7 +388,10 @@ export class PermissionManagerAdapter extends BaseAdapter {
     if (dataPreferences) {
       try {
         let uris: string = dataPreferences.getSync('defaultDownloadUri', '[]') as string;
-        return JSON.parse(uris);
+        const parsed: Object = JSON.parse(uris);
+        // A corrupted/legacy value must not make mergeUris() throw and
+        // silently drop the new URI.
+        return Array.isArray(parsed) ? parsed as string[] : [];
       } catch (err) {
         LogUtil.error(TAG, `Failed to get uris. Code:${err.code}, message:${err.message}`);
       }
@@ -267,21 +406,56 @@ export class PermissionManagerAdapter extends BaseAdapter {
       callback(EMPTY_ARRAY);
       return;
     }
-    let policies = new Array<fileShare.PolicyInfo>();
-    uris.forEach((uri) => {
-      let policyReadWrite: fileShare.PolicyInfo = {
-        uri: uri,
-        operationMode: fileShare.OperationMode.READ_MODE |
-        fileShare.OperationMode.WRITE_MODE,
+    let finished = false;
+    const finish = (code: number): void => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      callback(code);
+    };
+    fileShare.activatePermission(this.buildPolicies(uris)).then(() => {
+      finish(ACTIVATE_SUCCESS);
+    }, (err: BusinessError<Array<fileShare.PolicyErrorResult>>) => {
+      // One stale/revoked URI used to reject the whole batch, leaving EVERY
+      // persisted folder unactivated for the session. Retry one URI at a time
+      // and rewrite the preference list with the survivors (including an empty
+      // list, otherwise a dead list is retried forever on every launch).
+      LogUtil.warn(TAG, `batch activate failed, degrading per-uri: ${JSON.stringify(err)}`);
+      const alive: string[] = [];
+      let pending: number = uris.length;
+      const done = (): void => {
+        pending--;
+        if (pending === 0) {
+          if (alive.length !== uris.length) {
+            this.writeUrisExact(alive);
+          }
+          finish(alive.length > 0 ? ACTIVATE_SUCCESS : EMPTY_ARRAY);
+        }
       };
-      policies.push(policyReadWrite);
+      uris.forEach((uri: string) => {
+        fileShare.activatePermission(this.buildPolicies([uri]))
+          .then(() => {
+            alive.push(uri);
+            done();
+          }, (uriErr: BusinessError) => {
+            LogUtil.error(TAG, `drop bad persisted uri: ${uri} ${JSON.stringify(uriErr)}`);
+            done();
+          });
+      });
     });
-    fileShare.activatePermission(policies).then(() => {
-      callback(ACTIVATE_SUCCESS);
-    }).catch((err: BusinessError<Array<fileShare.PolicyErrorResult>>) => {
-      callback(err.code);
-      LogUtil.error(TAG, `activeFileAccessPersist failed: ${JSON.stringify(err)}`);
-    });
+  }
+
+  private buildPolicies(uris: string[]): Array<fileShare.PolicyInfo> {
+    const policies: Array<fileShare.PolicyInfo> = [];
+    for (let i = 0; i < uris.length; i++) {
+      policies.push({
+        uri: uris[i],
+        operationMode: fileShare.OperationMode.READ_MODE |
+          fileShare.OperationMode.WRITE_MODE,
+      });
+    }
+    return policies;
   }
 
   @LogMethod
@@ -290,16 +464,13 @@ export class PermissionManagerAdapter extends BaseAdapter {
       LogUtil.error(TAG, 'No URI needs to be persisted');
       return;
     }
-    let policies = new Array<fileShare.PolicyInfo>();
-    uris.forEach((uri) => {
-      let policyReadWrite: fileShare.PolicyInfo = {
-        uri: uri,
-        operationMode: fileShare.OperationMode.READ_MODE |
-        fileShare.OperationMode.WRITE_MODE,
-      };
-      policies.push(policyReadWrite);
-    });
-    fileShare.persistPermission(policies)
+    // Persist FIRST and only record the URI after the system accepted it:
+    // the previous fire-and-forget + unconditional saveUris() left the
+    // preference list claiming a permission that was never persisted.
+    fileShare.persistPermission(this.buildPolicies(uris))
+      .then(() => {
+        this.saveUris(uris);
+      })
       .catch((err: BusinessError<Array<fileShare.PolicyErrorResult>>) => {
         LogUtil.error(TAG, `fileAccessPersist failed: ${JSON.stringify(err)}`);
       });
@@ -311,6 +482,9 @@ export class PermissionManagerAdapter extends BaseAdapter {
     let activeContext = this.ctxAdapter.getActiveContext();
     if (!activeContext) {
       LogUtil.error(TAG, 'openPermissionConfirm, Failed to get active context');
+      // The renderer awaits this callback; a silent return left the permission
+      // Promise pending forever (camera / microphone / pasteboard flows).
+      callback(ERROR);
       return;
     }
     let confirmParams: ConfirmParams = {

@@ -87,54 +87,108 @@ export class FilePickerAdapter extends BaseAdapter {
   @LogMethod
   showDirDocumentViewPicker(file_access_persist: boolean,
     callback: (path: string) => void) {
-    let DocumentSelectOptions = new picker.DocumentSelectOptions();
-    DocumentSelectOptions.selectMode = picker.DocumentSelectMode.FOLDER;
-    let documentPicker = new picker.DocumentViewPicker();
-    documentPicker.select(DocumentSelectOptions)
-      .then((selectResult) => {
-        try {
-          if (file_access_persist) {
-            this.permissionManagerAdapter.fileAccessPersist(selectResult);
-            this.permissionManagerAdapter.saveUris(selectResult);
+    const docsUri: string = this.permissionManagerAdapter.getDocumentsVaultRootUri();
+    const attempt = (useDefaultPath: boolean): void => {
+      let DocumentSelectOptions = new picker.DocumentSelectOptions();
+      DocumentSelectOptions.selectMode = picker.DocumentSelectMode.FOLDER;
+      if (useDefaultPath && docsUri) {
+        // Mobile "choose folder" used to open the system default location
+        // with no relation to 文档/OHSidian. Start where vaults actually live;
+        // the user can still navigate anywhere (no restriction).
+        DocumentSelectOptions.defaultFilePathUri = docsUri;
+      }
+      let documentPicker = new picker.DocumentViewPicker();
+      documentPicker.select(DocumentSelectOptions)
+        .then((selectResult) => {
+          try {
+            if (file_access_persist) {
+              // persistPermission is asynchronous and now records the URI only
+              // after the system accepted it.
+              this.permissionManagerAdapter.fileAccessPersist(selectResult);
+            }
+            selectResult = this.dirFilter(selectResult);
+            callback(JSON.stringify(selectResult));
+          } catch (err) {
+            callback('');
+            LogUtil.error(TAG, `select Foloder failed with err: ${JSON.stringify(err)}`);
           }
-          selectResult = this.dirFilter(selectResult);
-          callback(JSON.stringify(selectResult));
-        } catch (err) {
+        }).catch((err: Error) => {
+          if (useDefaultPath && docsUri) {
+            // A stale default URI must not make the picker unusable.
+            LogUtil.warn(TAG, 'retrying folder picker without defaultFilePathUri');
+            attempt(false);
+            return;
+          }
           callback('');
-          LogUtil.error(TAG, `select Foloder failed with err: ${JSON.stringify(err)}`);
-        }
-      }).catch((err: Error) => {
-      callback('');
-      LogUtil.error(TAG, `select failed with err: ${JSON.stringify(err)}`);
-    });
+          LogUtil.error(TAG, `select failed with err: ${JSON.stringify(err)}`);
+        });
+    };
+    attempt(true);
   }
 
   @LogMethod
   showSaveAsDocumentViewPicker(params: SaveAsDialogParams, callback: (path: string) => void) {
-    let DocumentSaveOptions = new picker.DocumentSaveOptions();
-    DocumentSaveOptions.newFileNames = [`${params.file_name}`];
-    DocumentSaveOptions.defaultFilePathUri = FilePickerAdapter.PREFIX + params.dir_name;
+    let dirName: string = '';
+    try {
+      dirName = params.dir_name.trim();
+    } catch (err) {
+      dirName = '';
+    }
+    // Validate the renderer-provided directory before turning it into a
+    // file://docs URI: empty / relative / sandbox / already-URI values all
+    // used to produce an invalid default and the picker rejected the call,
+    // which surfaced to the user as "save canceled" with no reason.
+    let defaultUri: string = '';
+    if (dirName.startsWith('file://')) {
+      defaultUri = dirName;
+    } else if (dirName.startsWith('/storage/') &&
+      !dirName.startsWith('/storage/Users/currentUser/appdata/')) {
+      try {
+        if (fs.accessSync(dirName)) {
+          defaultUri = FilePickerAdapter.PREFIX + dirName;
+        }
+      } catch (err) {
+        defaultUri = '';
+      }
+    }
+    if (!defaultUri) {
+      defaultUri = this.permissionManagerAdapter.getDocumentsVaultRootUri();
+    }
     const context = this.ctxAdapter.getContext();
     let allFileDescription = context.resourceManager.getStringSync(this.allFIleDescriptionId);
+    let filterDescriptions: Array<string> = [];
     if (params.extensions.length > 0) {
-      let filterDescriptions: Array<string> = this.getFilterArray(params.extensions, params.descriptions);
       // Keep every suffix group: taking only [0] hid all but the first
       // choice, so "save as txt/json" was impossible when md came first.
-      DocumentSaveOptions.fileSuffixChoices = filterDescriptions;
+      filterDescriptions = this.getFilterArray(params.extensions, params.descriptions);
       if (params.include_all_files) {
-        DocumentSaveOptions.fileSuffixChoices.push(allFileDescription + "|.*");
+        filterDescriptions.push(allFileDescription + "|.*");
       }
     } else {
-      DocumentSaveOptions.fileSuffixChoices = [allFileDescription + "|.*"];
+      filterDescriptions = [allFileDescription + "|.*"];
     }
-    let documentPicker = new picker.DocumentViewPicker();
-    documentPicker.save(DocumentSaveOptions).then((saveResult) => {
-      saveResult = this.dirFilter(saveResult);
-      callback(JSON.stringify(saveResult));
-    }).catch((err: Error) => {
-      callback('');
-      LogUtil.error(TAG, `save failed with err: ${JSON.stringify(err)}`);
-    });
+    const attempt = (useDefaultPath: boolean): void => {
+      let DocumentSaveOptions = new picker.DocumentSaveOptions();
+      DocumentSaveOptions.newFileNames = [`${params.file_name}`];
+      if (useDefaultPath && defaultUri) {
+        DocumentSaveOptions.defaultFilePathUri = defaultUri;
+      }
+      DocumentSaveOptions.fileSuffixChoices = filterDescriptions;
+      let documentPicker = new picker.DocumentViewPicker();
+      documentPicker.save(DocumentSaveOptions).then((saveResult) => {
+        saveResult = this.dirFilter(saveResult);
+        callback(JSON.stringify(saveResult));
+      }).catch((err: Error) => {
+        if (useDefaultPath && defaultUri) {
+          LogUtil.warn(TAG, 'retrying save picker without defaultFilePathUri');
+          attempt(false);
+          return;
+        }
+        callback('');
+        LogUtil.error(TAG, `save failed with err: ${JSON.stringify(err)}`);
+      });
+    };
+    attempt(true);
   }
 
   private dirFilter(docs: string[]): string[] {

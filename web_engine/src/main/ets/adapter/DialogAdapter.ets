@@ -90,6 +90,11 @@ export class DialogAdapter extends BaseAdapter {
   private abilityManager: AbilityManager = new AbilityManager();
   private static PATH_PREFIX: string = 'file://docs'; 
   private static DEFAULT_DIR: string = 'file://docs/storage/Users/currentUser';
+  // Only paths under the docs-domain root can be expressed as file://docs
+  // URIs. The app's own sandbox (/data/storage/... and the appdata mount) can
+  // NOT, so mapping them produced an invalid picker default.
+  private static DOCS_DOMAIN_ROOT: string = '/storage/';
+  private static APPDATA_PREFIX: string = '/storage/Users/currentUser/appdata/';
   private static MAX_SELECT_NUMBER: number = 500;
   private ctxAdapter: ContextAdapter;
   private permissionManagerAdapter: PermissionManagerAdapter;
@@ -156,7 +161,6 @@ export class DialogAdapter extends BaseAdapter {
   @LogMethod
   showOpenDialog(settings: string, callback: (filePaths: string[], canceled: boolean) => void) {
     LogUtil.info(TAG, 'ShowOpenDialog ' + settings);
-    let DocumentSelectOptions = new picker.DocumentSelectOptions();
     let dialogSettings: IOpenDialogSettings;
     try {
       dialogSettings = JSON.parse(settings) as IOpenDialogSettings;
@@ -165,42 +169,84 @@ export class DialogAdapter extends BaseAdapter {
       callback([], true);
       return;
     }
-    if (dialogSettings.properties_open_directory) {
-      DocumentSelectOptions.selectMode = picker.DocumentSelectMode.FOLDER;
-      if (dialogSettings.properties_open_mixed)
-        DocumentSelectOptions.selectMode = picker.DocumentSelectMode.MIXED;
-    }
-    if (dialogSettings.properties_multi_selections) {
-      DocumentSelectOptions.maxSelectNumber = DialogAdapter.MAX_SELECT_NUMBER;
-    }
     const context = this.ctxAdapter.getContext();
     let allFileDescription = context.resourceManager.getStringSync(this.allFIleDescriptionId);
-    if (dialogSettings.filters && dialogSettings.filters.length > 0) {
-      DocumentSelectOptions.fileSuffixFilters = this.getFilterArray(dialogSettings.filters);
-    } else {
-      DocumentSelectOptions.fileSuffixFilters = [allFileDescription + "|.*"];
-    }
     let dirAndFile: string[] = this.handleDefaultPath(dialogSettings.default_path);
     LogUtil.info(TAG, 'showOpenDialog dirAndFile: ' + `${dirAndFile[0]}-${dirAndFile[1]}`);
-    DocumentSelectOptions.defaultFilePathUri = dirAndFile[0];
-    let documentPicker = new picker.DocumentViewPicker();
-    documentPicker.select(DocumentSelectOptions).then((DocumentSelectResult: Array<string>) => {
-      LogUtil.info(TAG, 'DocumentViewPicker.select successfully, DocumentSelectResult uri: ' + JSON.stringify(DocumentSelectResult));
-      if (DocumentSelectResult.length === 0) {
-        callback([], true);
-      } else {
-        let filePaths = this.convertUrisToPaths(DocumentSelectResult);
-        // 持久化文件夹访问权限，下次打开无需重复授权
-        if (dialogSettings.properties_open_directory) {
-          this.permissionManagerAdapter.fileAccessPersist(DocumentSelectResult);
-          this.permissionManagerAdapter.saveUris(DocumentSelectResult);
+
+    const buildOptions = (useDefaultPath: boolean): picker.DocumentSelectOptions => {
+      let options = new picker.DocumentSelectOptions();
+      if (dialogSettings.properties_open_directory) {
+        options.selectMode = picker.DocumentSelectMode.FOLDER;
+        if (dialogSettings.properties_open_mixed) {
+          options.selectMode = picker.DocumentSelectMode.MIXED;
         }
-        callback(filePaths, false);
       }
-    }).catch((err: BusinessError) => {
-      LogUtil.error(TAG, 'DocumentViewPicker.select failed with err: ' + JSON.stringify(err));
-      callback([], true);
-    });
+      if (dialogSettings.properties_multi_selections) {
+        options.maxSelectNumber = DialogAdapter.MAX_SELECT_NUMBER;
+      }
+      if (dialogSettings.filters && dialogSettings.filters.length > 0) {
+        options.fileSuffixFilters = this.getFilterArray(dialogSettings.filters);
+      } else {
+        options.fileSuffixFilters = [allFileDescription + "|.*"];
+      }
+      if (useDefaultPath && dirAndFile[0]) {
+        options.defaultFilePathUri = dirAndFile[0];
+      }
+      return options;
+    };
+
+    let settled = false;
+    const finish = (filePaths: string[], canceled: boolean): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      callback(filePaths, canceled);
+    };
+
+    const attempt = (useDefaultPath: boolean): void => {
+      let documentPicker = new picker.DocumentViewPicker();
+      documentPicker.select(buildOptions(useDefaultPath))
+        .then((DocumentSelectResult: Array<string>) => {
+          if (settled) {
+            return;
+          }
+          try {
+            LogUtil.info(TAG, 'DocumentViewPicker.select successfully, DocumentSelectResult uri: ' +
+              JSON.stringify(DocumentSelectResult));
+            if (DocumentSelectResult.length === 0) {
+              finish([], true);
+              return;
+            }
+            let filePaths = this.convertUrisToPaths(DocumentSelectResult);
+            // 持久化文件夹访问权限，下次打开无需重复授权（persist 成功后才落盘）
+            if (dialogSettings.properties_open_directory) {
+              this.permissionManagerAdapter.fileAccessPersist(DocumentSelectResult);
+            }
+            finish(filePaths, false);
+          } catch (err) {
+            // The renderer callback must never be invoked twice: a throw here
+            // used to fall into the .catch below and open a SECOND picker.
+            LogUtil.error(TAG, 'showOpenDialog completion failed: ' + JSON.stringify(err));
+            finish([], true);
+          }
+        }).catch((err: BusinessError) => {
+          if (settled) {
+            return;
+          }
+          LogUtil.error(TAG, 'DocumentViewPicker.select failed with err: ' + JSON.stringify(err));
+          if (useDefaultPath && dirAndFile[0]) {
+            // A stale default URI must never make the picker unusable: retry
+            // once at the system default location instead of reporting cancel.
+            LogUtil.warn(TAG, 'retrying picker without defaultFilePathUri');
+            attempt(false);
+            return;
+          }
+          finish([], true);
+        });
+    };
+    attempt(true);
   }
 
   @LogMethod
@@ -214,62 +260,126 @@ export class DialogAdapter extends BaseAdapter {
       callback('', true);
       return;
     }
-    let DocumentSaveOptions = new picker.DocumentSaveOptions();
-    let dirAndFile: string[] = this.handleDefaultPath(dialogSettings.default_path);
-    LogUtil.info(TAG, 'ShowSaveDialog dirAndFile: ' + `${dirAndFile[0]}-${dirAndFile[1]}`);
-    DocumentSaveOptions.defaultFilePathUri = dirAndFile[0];
-    DocumentSaveOptions.newFileNames = [`${dirAndFile[1]}`];
     const context = this.ctxAdapter.getContext();
     let allFileDescription = context.resourceManager.getStringSync(this.allFIleDescriptionId);
-    if (dialogSettings.filters && dialogSettings.filters.length > 0) {
-      DocumentSaveOptions.fileSuffixChoices = this.getFilterArray(dialogSettings.filters);
-    } else {
-      DocumentSaveOptions.fileSuffixChoices = [allFileDescription + "|.*"];
-    }
-    let documentPicker = new picker.DocumentViewPicker();
-    documentPicker.save(DocumentSaveOptions).then((DocumentSaveResult: Array<string>) => {
-      LogUtil.info(TAG, 'DocumentViewPicker.save successfully, DocumentSaveResult uri: ' + JSON.stringify(DocumentSaveResult));
-      if (DocumentSaveResult.length === 0) {
-        callback('', true);
-      } else {
-        let filePaths = this.convertUrisToPaths(DocumentSaveResult);
-        callback(filePaths[0], false);
+    let dirAndFile: string[] = this.handleDefaultPath(dialogSettings.default_path);
+    LogUtil.info(TAG, 'ShowSaveDialog dirAndFile: ' + `${dirAndFile[0]}-${dirAndFile[1]}`);
+    let settled = false;
+    const finish = (filePath: string, canceled: boolean): void => {
+      if (settled) {
+        return;
       }
-    }).catch((err: BusinessError) => {
-      LogUtil.error(TAG, 'DocumentViewPicker.save failed with err: ' + JSON.stringify(err));
-      callback('', true);
-    });
+      settled = true;
+      callback(filePath, canceled);
+    };
+    const buildOptions = (useDefaultPath: boolean): picker.DocumentSaveOptions => {
+      let options = new picker.DocumentSaveOptions();
+      options.newFileNames = [`${dirAndFile[1]}`];
+      if (useDefaultPath && dirAndFile[0]) {
+        options.defaultFilePathUri = dirAndFile[0];
+      }
+      if (dialogSettings.filters && dialogSettings.filters.length > 0) {
+        options.fileSuffixChoices = this.getFilterArray(dialogSettings.filters);
+      } else {
+        options.fileSuffixChoices = [allFileDescription + "|.*"];
+      }
+      return options;
+    };
+    const attempt = (useDefaultPath: boolean): void => {
+      let documentPicker = new picker.DocumentViewPicker();
+      documentPicker.save(buildOptions(useDefaultPath)).then((DocumentSaveResult: Array<string>) => {
+        if (settled) {
+          return;
+        }
+        try {
+          LogUtil.info(TAG, 'DocumentViewPicker.save successfully, DocumentSaveResult uri: ' +
+            JSON.stringify(DocumentSaveResult));
+          if (DocumentSaveResult.length === 0) {
+            finish('', true);
+            return;
+          }
+          let filePaths = this.convertUrisToPaths(DocumentSaveResult);
+          finish(filePaths[0], false);
+        } catch (err) {
+          LogUtil.error(TAG, 'showSaveDialog completion failed: ' + JSON.stringify(err));
+          finish('', true);
+        }
+      }).catch((err: BusinessError) => {
+        if (settled) {
+          return;
+        }
+        LogUtil.error(TAG, 'DocumentViewPicker.save failed with err: ' + JSON.stringify(err));
+        if (useDefaultPath && dirAndFile[0]) {
+          // Same stale-default protection as showOpenDialog: retry without the
+          // default URI instead of silently reporting "canceled".
+          LogUtil.warn(TAG, 'retrying save picker without defaultFilePathUri');
+          attempt(false);
+          return;
+        }
+        finish('', true);
+      });
+    };
+    attempt(true);
   }
 
-  private handleDefaultPath(default_path: string) {
-    let dirAndFile: string[] = [DialogAdapter.DEFAULT_DIR, ''];
+  // Resolve the engine-provided default path only when it can actually be
+  // expressed in the docs domain. Returns undefined for undefined/empty
+  // input, sandbox paths (/data/storage/...) and the appdata mount - those
+  // used to be prefixed with file://docs and became invalid picker URIs.
+  private tryResolveDirAndFile(default_path: string): string[] | undefined {
+    let path: string = '';
     try {
-      let path: string = default_path.trim();
-      let exist = fs.accessSync(path);
-      if (!exist) {
-        let fileNameIndex: number = path.lastIndexOf('/');
-        let dirPath: string = path.slice(0, fileNameIndex);
-        let fileName: string = path.slice(fileNameIndex + 1);
-        if (fs.accessSync(dirPath)) {
-          dirAndFile[0] = DialogAdapter.PATH_PREFIX + dirPath;
-        }
-        dirAndFile[1] = fileName;
-      } else {
-        let stat = fs.statSync(path);
+      path = default_path.trim();
+    } catch (err) {
+      return undefined;
+    }
+    if (!path) {
+      return undefined;
+    }
+    if (path.startsWith('file://')) {
+      return [path, ''];
+    }
+    if (!path.startsWith(DialogAdapter.DOCS_DOMAIN_ROOT) ||
+      path.startsWith(DialogAdapter.APPDATA_PREFIX)) {
+      return undefined;
+    }
+    try {
+      if (fs.accessSync(path)) {
+        const stat = fs.statSync(path);
         if (stat.isDirectory()) {
-          dirAndFile[0] = DialogAdapter.PATH_PREFIX + path;
-        } else if (stat.isFile()) {
-          let fileNameIndex: number = path.lastIndexOf('/');
-          let dirPath: string = path.slice(0, fileNameIndex);
-          let fileName: string = path.slice(fileNameIndex + 1);
-          dirAndFile[0] = DialogAdapter.PATH_PREFIX + dirPath;
-          dirAndFile[1] = fileName;
+          return [DialogAdapter.PATH_PREFIX + path, ''];
         }
+        const fileIndex: number = path.lastIndexOf('/');
+        return [DialogAdapter.PATH_PREFIX + path.slice(0, fileIndex), path.slice(fileIndex + 1)];
+      }
+      const dirIndex: number = path.lastIndexOf('/');
+      const dirPath: string = path.slice(0, dirIndex);
+      const fileName: string = path.slice(dirIndex + 1);
+      if (dirPath && fs.accessSync(dirPath)) {
+        // Save dialog: the target file does not exist yet, only its directory.
+        return [DialogAdapter.PATH_PREFIX + dirPath, fileName];
       }
     } catch (err) {
-      LogUtil.error(TAG, 'handleDefaultPath failed with err: ' + JSON.stringify(err));
+      LogUtil.error(TAG, 'tryResolveDirAndFile failed with err: ' + JSON.stringify(err));
     }
-    return dirAndFile;
+    return undefined;
+  }
+
+  // Default location policy for directory pickers / save dialogs:
+  //   1. an explicit, valid engine default (respect it - e.g. "move vault");
+  //   2. granted Documents permission -> 文档/OHSidian (user-visible, survives
+  //      uninstall); created lazily by PermissionManagerAdapter;
+  //   3. otherwise the user root, so the user can choose freely.
+  private handleDefaultPath(default_path: string): string[] {
+    const fromEngine: string[] | undefined = this.tryResolveDirAndFile(default_path);
+    if (fromEngine !== undefined) {
+      return fromEngine;
+    }
+    const docsUri: string = this.permissionManagerAdapter.getDocumentsVaultRootUri();
+    if (docsUri) {
+      return [docsUri, ''];
+    }
+    return [DialogAdapter.DEFAULT_DIR, ''];
   }
 
   private getFilterArray(filters: IFilter[]): Array<string> {

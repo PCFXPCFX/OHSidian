@@ -239,6 +239,17 @@ function writeModeFileSync(cfg){
     return true;
   }catch(e){return false}
 }
+/* Resolve the user-visible Documents root ONLY when the permission is really
+   granted. ArkTS publishes documentsDirGranted alongside documentsDir (Sprint
+   2, 2026-10-19); older mode files (field absent) keep the previous rule so an
+   upgrade does not change behaviour. */
+function documentsDirPath(cfg){
+  try{
+    if(!cfg||typeof cfg.documentsDir!=="string"||!cfg.documentsDir)return "";
+    if(cfg.documentsDirGranted===false)return "";
+    return cfg.documentsDir;
+  }catch(e){return ""}
+}
 /* Round 87 (B2): window geometry lives per window under cfg.windows[<OHOS
    window id>] - concurrent windows used to clobber each other's top-level
    insets within one 200ms poll. The renderer has no OHOS window id (the
@@ -1027,14 +1038,14 @@ function applyBackPress(){
 window.__ohsidianTrashNote=function(){
   try{
     var cfg=readMode();
-    var docs=cfg&&typeof cfg.documentsDir==="string"&&cfg.documentsDir;
+    var docs=documentsDirPath(cfg);
     var v=window.app&&window.app.vault;
     var name=(v&&typeof v.getName==="function"&&v.getName())||"vault";
     var lang="zh";
     try{var l=localStorage.getItem("language");if(l&&/^en/i.test(l))lang="en"}catch(eL){}
     if(docs)return "zh"===lang
-      ?"文件将移至 文档/OHSidianTrash/"+name+"/，30 天后自动清除。"
-      :"Moved to Documents/OHSidianTrash/"+name+"/; auto-purged after 30 days.";
+      ?"文件将优先移至 文档/OHSidianTrash/"+name+"/（30 天后自动清除）；若文档回收站不可用会回退到仓库内 .trash，并提示实际去向。"
+      :"Moved to Documents/OHSidianTrash/"+name+"/ when available (auto-purged after 30 days); otherwise falls back to the vault's hidden .trash with a notice.";
     return "zh"===lang
       ?"未授权文档目录：文件将移至仓库内 .trash（文件管理不可见），30 天后自动清除。"
       :"Documents permission not granted: moved to the vault's hidden .trash; auto-purged after 30 days.";
@@ -1064,66 +1075,206 @@ function hookTrash(){
     };
     /* Redirect the LOCAL trash into Documents. trashLocal receives a
        vault-relative path and must resolve only after the file has moved
-       (vault.trash updates its index once the promise resolves). */
+       (vault.trash updates its index once the promise resolves).
+
+       Data-safety rewrite (2026-10-19):
+       - the Documents move falls back to copyTree+remove when rename fails
+         (EXDEV: a sandbox vault and /storage/Users/.../Documents are different
+         mounts), instead of silently leaving the file in the hidden .trash;
+       - the vault-local fallback is performed HERE too (not by the stock
+         trashLocal), so EVERY moved file gets a deletion timestamp - the
+         purge used the original content mtime otherwise and could unlink a
+         just-deleted old note on the next launch;
+       - an owner marker is written so the purge only cleans trashes that this
+         feature created (never a user/plugin .trash). */
     var ad=v.adapter;
-    if(ad&&typeof ad.trashLocal==="function"&&!ad.__ohsidianTrashRelocate){
-      ad.__ohsidianTrashRelocate=true;
-      var origLocal=ad.trashLocal;
-      ad.trashLocal=function(rel){
+    if(!ad||typeof ad.trashLocal!=="function"||ad.__ohsidianTrashRelocate)return;
+    ad.__ohsidianTrashRelocate=true;
+    var origLocal=ad.trashLocal;
+    var pathMod=require("path"),fsMod=require("fs");
+    var metaSuffix=".ohsidian-trash-meta.json";
+    var ownerFile=".ohsidian-trash-owner.json";
+    var ownerStamp=function(root){
+      try{
+        var marker=pathMod.join(root,ownerFile);
+        if(!fsMod.existsSync(marker)){
+          fsMod.writeFileSync(marker,JSON.stringify({owner:"OHSidian",createdAt:Date.now()}),"utf8");
+        }
+      }catch(eO){}
+    };
+    var stampOne=function(p){
+      try{var now=new Date();fsMod.utimesSync(p,now,now);return}
+      catch(eU){
+        try{fsMod.writeFileSync(p+metaSuffix,JSON.stringify({deletedAt:Date.now()}),"utf8")}catch(eM){}
+      }
+    };
+    var stampTree=function(p,depth){
+      if(depth>64)return;
+      try{
+        var st=fsMod.lstatSync(p);
+        if(st.isDirectory()&&!st.isSymbolicLink()){
+          var names=[];try{names=fsMod.readdirSync(p)}catch(eR){names=[]}
+          for(var i=0;i<names.length;i++)stampTree(pathMod.join(p,names[i]),depth+1);
+          stampOne(p);
+        }else if(!st.isSymbolicLink()){
+          stampOne(p);
+        }
+      }catch(eS){}
+    };
+    var uniqueDest=function(dir,name){
+      var ext=pathMod.extname(name),stem=pathMod.basename(name,ext);
+      var dest=pathMod.join(dir,name);
+      for(var n=2;fsMod.existsSync(dest);n++){
+        dest=pathMod.join(dir,stem+" ("+n+")"+ext);
+      }
+      return dest;
+    };
+    var removeTreeSync=function(p,depth){
+      if(depth>64)return;
+      var st;try{st=fsMod.lstatSync(p)}catch(eL){return}
+      if(st.isDirectory()&&!st.isSymbolicLink()){
+        var names=[];try{names=fsMod.readdirSync(p)}catch(eR){names=[]}
+        for(var i=0;i<names.length;i++)removeTreeSync(pathMod.join(p,names[i]),depth+1);
+        try{fsMod.rmdirSync(p)}catch(eD){}
+      }else{
+        try{fsMod.unlinkSync(p)}catch(eU){}
+      }
+    };
+    var copyTreeSync=function(s,d,depth){
+      if(depth>64)throw new Error("trash move: nesting too deep");
+      var st=fsMod.lstatSync(s);
+      if(st.isSymbolicLink()){
+        /* Preserve the link itself instead of silently dropping it; if the
+           platform cannot create one, throw so the caller falls back to the
+           same-filesystem rename (which keeps the link). */
+        var linkTarget=fsMod.readlinkSync(s);
+        fsMod.symlinkSync(linkTarget,d);
+        return;
+      }
+      if(st.isDirectory()){
+        fsMod.mkdirSync(d,{recursive:true});
+        var names=fsMod.readdirSync(s);
+        for(var i=0;i<names.length;i++){
+          copyTreeSync(pathMod.join(s,names[i]),pathMod.join(d,names[i]),depth+1);
+        }
+      }else{
+        fsMod.copyFileSync(s,d);
+        try{fsMod.utimesSync(d,st.atime,st.mtime)}catch(eT){}
+      }
+    };
+    var moveSync=function(src,dest){
+      try{fsMod.renameSync(src,dest);return true}
+      catch(eR){
         try{
-          var base=typeof ad.getBasePath==="function"?ad.getBasePath():(ad.basePath||"");
-          var cfg=readMode();
-          var docs=cfg&&typeof cfg.documentsDir==="string"?cfg.documentsDir:"";
-          if(!base||!docs||!rel||!rel.trim())return origLocal.call(ad,rel);
-          var pathMod=require("path"),fsMod=require("fs");
+          var st=fsMod.lstatSync(src);
+          if(st.isDirectory()&&!st.isSymbolicLink()){copyTreeSync(src,dest,0);removeTreeSync(src,0)}
+          else if(st.isSymbolicLink()){return false}
+          else{fsMod.copyFileSync(src,dest);fsMod.unlinkSync(src)}
+          return true;
+        }catch(eC){
+          try{console.warn("[OHSidian] trash cross-device move failed:",eC&&eC.message||eC)}catch(eW){}
+          try{removeTreeSync(dest,0)}catch(eX){}
+          return false;
+        }
+      }
+    };
+    var reconcile=function(rel){
+      try{
+        if(typeof ad.reconcileInternalFile==="function")return ad.reconcileInternalFile(rel);
+      }catch(eRc){}
+      return Promise.resolve();
+    };
+    var stampFallbackEntry=function(relText,baseResolved){
+      try{
+        var dir=pathMod.join(baseResolved,".trash",pathMod.dirname(relText));
+        var targetName=pathMod.basename(relText);
+        var names=fsMod.readdirSync(dir);
+        for(var i=0;i<names.length;i++){
+          var nm=names[i];
+          var looksSame=(nm===targetName||nm.indexOf(targetName+" ")===0||nm.indexOf(targetName+".")===0);
+          if(!looksSame)continue;
+          var fp=pathMod.join(dir,nm);
+          var st=fsMod.lstatSync(fp);
+          /* Only stamp entries this delete just produced (engine naming may
+             differ on collisions). */
+          if(Date.now()-(st.ctimeMs||0)<120000)stampTree(fp,0);
+        }
+      }catch(eS){}
+    };
+    var localFallback=function(rel,baseResolved){
+      var res;
+      try{res=origLocal.call(ad,rel)}catch(e){return Promise.resolve()}
+      var relText=typeof rel==="string"?rel.trim():"";
+      if(relText&&baseResolved)try{stampFallbackEntry(relText,baseResolved)}catch(eS){}
+      if(res&&typeof res.then==="function"){
+        return res.then(function(v){
+          if(relText&&baseResolved)try{stampFallbackEntry(relText,baseResolved)}catch(eS){}
+          return v;
+        });
+      }
+      return res;
+    };
+    ad.trashLocal=function(rel){
+      try{
+        var base=typeof ad.getBasePath==="function"?ad.getBasePath():(ad.basePath||"");
+        var relText=typeof rel==="string"?rel.trim():"";
+        if(!base||!relText){
+          try{console.warn("[OHSidian] trash relocate refused empty path:",rel)}catch(eW0){}
+          return Promise.resolve();
+        }
+        var baseResolved=pathMod.resolve(base);
+        var src=pathMod.resolve(baseResolved,relText);
+        /* S2: canonicalize and confine STRICTLY. rel comes from vault.trash
+           (normalized), but a plugin can call adapter.trashLocal directly with
+           ".." segments or "."; equality with the vault root must be rejected
+           too (rel="." used to rename the whole vault into the trash). */
+        if(src.indexOf(baseResolved+pathMod.sep)!==0){
+          try{console.warn("[OHSidian] trash relocate refused escaping path:",rel)}catch(eW){}
+          return Promise.resolve();
+        }
+        if(!fsMod.existsSync(src))return localFallback(rel,baseResolved);
+        var docs=documentsDirPath(readMode());
+        if(docs){
           var name=(typeof v.getName==="function"&&v.getName())||pathMod.basename(base);
           name=String(name).replace(/[\\\/:*?\"<>|]/g,"_").replace(/^\.+$/,"_")||"vault";
-          var src=pathMod.join(base,rel);
-          if(!fsMod.existsSync(src))return origLocal.call(ad,rel);
-          /* S2: canonicalize and confine. rel comes from vault.trash
-             (normalized), but a plugin can call adapter.trashLocal directly
-             with ".." segments; unchecked, pathMod.join would resolve them
-             OUTSIDE the trash root and scatter files across Documents. The
-             containment check anchors on trashRoot/<vault> (NOT trashRoot):
-             rel=".." would resolve to exactly trashRoot and pass a
-             root-anchored check, while src=join(base,"..") renamed the
-             vault's PARENT directory into the trash. Strict containment
-             also rejects rel="." (degenerate) - both fall back to the
-             stock trashLocal. */
           var trashRoot=pathMod.resolve(docs,"OHSidianTrash");
           var targetRoot=pathMod.resolve(trashRoot,name);
-          var resolvedTrash=pathMod.resolve(targetRoot,rel);
-          if(resolvedTrash.indexOf(targetRoot+pathMod.sep)!==0){
-            try{console.warn("[OHSidian] trash relocate refused escaping path, local fallback:",rel)}catch(eW){}
-            return origLocal.call(ad,rel);
+          var destDir=pathMod.join(targetRoot,pathMod.dirname(relText));
+          var resolvedDest=pathMod.resolve(destDir);
+          if(resolvedDest!==targetRoot&&resolvedDest.indexOf(targetRoot+pathMod.sep)!==0){
+            try{console.warn("[OHSidian] trash relocate refused escaping path:",rel)}catch(eW2){}
+            return Promise.resolve();
           }
-          var destDir=pathMod.join(targetRoot,pathMod.dirname(rel));
-          fsMod.mkdirSync(destDir,{recursive:true});
-          var ext=pathMod.extname(src);
-          var stem=pathMod.basename(src,ext);
-          var dest=pathMod.join(destDir,stem+ext);
-          for(var n=2;fsMod.existsSync(dest);n++){
-            dest=pathMod.join(destDir,stem+" ("+n+")"+ext);
+          try{
+            fsMod.mkdirSync(destDir,{recursive:true});
+            ownerStamp(trashRoot);
+            var dest=uniqueDest(destDir,pathMod.basename(src));
+            if(moveSync(src,dest)){
+              stampTree(dest,0);
+              return reconcile(rel);
+            }
+          }catch(eDoc){
+            try{console.warn("[OHSidian] trash relocate to Documents failed:",eDoc&&eDoc.message||eDoc)}catch(eW3){}
           }
-          fsMod.renameSync(src,dest);
-          /* Stamp deletion time: rename keeps the old mtime, and the purge
-             measures age in the trash by mtime. F2: when utimesSync fails
-             (readonly FS, SELinux denial) the moved file keeps its ORIGINAL
-             mtime - a years-old note deleted today would be purged on the
-             next startup, losing the 30-day recovery window. Record the
-             deletion time in a sidecar the purge prefers over mtime. */
-          try{var now=new Date();fsMod.utimesSync(dest,now,now)}
-          catch(eU){
-            try{console.warn("[OHSidian] utimesSync failed, writing trash meta:",eU&&eU.message||eU)}catch(eW2){}
-            try{fsMod.writeFileSync(dest+".ohsidian-trash-meta.json",JSON.stringify({deletedAt:Date.now()}),"utf8")}catch(eM){}
-          }
-          return Promise.resolve();
-        }catch(e){
-          try{console.warn("[OHSidian] trash relocate failed, local fallback:",e&&e.message||e)}catch(e2){}
-          return origLocal.call(ad,rel);
         }
-      };
-    }
+        var localRoot=pathMod.join(baseResolved,".trash");
+        var localDir=pathMod.join(localRoot,pathMod.dirname(relText));
+        fsMod.mkdirSync(localDir,{recursive:true});
+        ownerStamp(localRoot);
+        var localDest=uniqueDest(localDir,pathMod.basename(src));
+        if(moveSync(src,localDest)){
+          stampTree(localDest,0);
+          if(docs){
+            try{new Notice("OHSidian: 文档回收站不可用，文件已移至仓库内隐藏 .trash（30 天内可恢复）")}catch(eN){}
+          }
+          return reconcile(rel);
+        }
+        return localFallback(rel,baseResolved);
+      }catch(e){
+        try{console.warn("[OHSidian] trash relocate failed, local fallback:",e&&e.message||e)}catch(e2){}
+        return localFallback(rel,baseResolved);
+      }
+    };
     if(typeof v.getConfig==="function"){
       var origGetConfig=v.getConfig;
       v.getConfig=function(key){
@@ -1489,104 +1640,153 @@ function migrateVaultToVisibleFolder(){
   try{
     var v=window.app&&window.app.vault;
     if(!v){try{new Notice("OHSidian: 仓库未就绪")}catch(e){}return}
+    if(globalThis.__ohsidianMigrating){try{new Notice("OHSidian: 迁移正在进行中，请稍候")}catch(e){}return}
     /* If the current vault lives in the app sandbox (userData, wiped on
        uninstall) and the Documents root is available, offer the ONE-TAP
        default migration: copy to <documents>/OHSidian/<当前仓库名> and
        reopen. Otherwise fall back to the directory picker. */
     var remote=require("@electron/remote");
     if(!remote||!remote.dialog){try{new Notice("OHSidian: 无法调起文件夹选择器")}catch(e){}return}
-    var pickMigration=function(){remote.dialog.showOpenDialog({
-      properties:["openDirectory","createDirectory"],
-      buttonLabel:"迁移仓库到这里"
-    }).then(function(res){
+    var fsMod=require("fs"),pathMod=require("path");
+    var flushEditors=function(){
       try{
-        if(!res||!res.filePaths||!res.filePaths.length)return;
-        var target=res.filePaths[0];
-        var fsMod=require("fs"),pathMod=require("path");
-        var srcDir;
-        try{srcDir=v.adapter.getFullPath("/")}catch(e){}
-        if(!srcDir){try{new Notice("OHSidian: 无法定位仓库根目录")}catch(e){}return}
-        /* copyDir(s,d) with s inside d (or equal) would recurse into the
-           partially-copied tree and never terminate */
-        var norm=function(p){try{return pathMod.resolve(p)}catch(e){return p}};
-        if(norm(target)===norm(srcDir)||norm(target).indexOf(norm(srcDir)+pathMod.sep)===0){
-          try{new Notice("OHSidian: 目标目录在当前仓库内,请选择仓库以外的位置")}catch(e){}return;
-        }
-        try{new Notice("OHSidian: 开始迁移仓库到 "+target)}catch(e){}
-        var copied=0;
-        var copyDir=function(s,d,cb){
-          fsMod.mkdir(d,{recursive:!0},function(){
-            fsMod.readdir(s,function(err,items){
-              if(err)return cb(err);
-              var pending=items.length,fail=null;
-              if(!pending)return cb(null);
-              var done=function(e2){fail=fail||e2;if(--pending===0)cb(fail)};
-              items.forEach(function(name){
-                var sp=pathMod.join(s,name),dp=pathMod.join(d,name);
-                fsMod.stat(sp,function(err2,st){
-                  if(err2)return done(err2);
-                  if(st.isDirectory()){copyDir(sp,dp,done)}
-                  else{fsMod.copyFile(sp,dp,function(e3){if(!e3)copied++;done(e3)})}
-                });
-              });
-            });
+        if(window.app&&window.app.workspace&&typeof window.app.workspace.iterateAllLeaves==="function"){
+          window.app.workspace.iterateAllLeaves(function(leaf){
+            try{if(leaf&&leaf.view&&typeof leaf.view.save==="function")leaf.view.save()}catch(eS){}
           });
-        };
-        copyDir(srcDir,target,function(err){
-          if(err){try{new Notice("OHSidian: 迁移失败 "+err.message)}catch(e){}return}
-          try{new Notice("OHSidian: 已复制 "+copied+" 个文件,正在打开新仓库…")}catch(e){}
-          try{
-            var r=remote.ipcRenderer.sendSync("vault-open",target,!1);
-            if(r!==!0){try{new Notice("OHSidian: 打开新仓库返回 "+r)}catch(e){}}
-          }catch(e){try{new Notice("OHSidian: 打开新仓库失败 "+e.message)}catch(e2){}}
-        });
-      }catch(e){try{new Notice("OHSidian: 迁移失败 "+e.message)}catch(e2){}}
-    },function(){/* canceled by user */});};
-    var docsDir=null;
-    try{docsDir=(readMode()||{}).documentsDir||null}catch(e){}
-    var inSandbox=false;
-    try{
-      var cur=v.adapter.getFullPath("/");
-      var ud=require("@electron/remote").app.getPath("userData");
-      inSandbox=!!(cur&&ud&&cur.indexOf(ud)===0);
-    }catch(e){}
-    if(docsDir&&inSandbox){
-      /* one-tap default migration into the visible Documents root */
-      var name="Obsidian Vault";
-      try{name=require("path").basename(v.adapter.getFullPath("/"))||name}catch(e){}
-      var dest=require("path").join(docsDir,"OHSidian",name);
-      try{new Notice("OHSidian: 当前仓库在应用沙箱内,卸载会丢数据。开始迁移到 文档/OHSidian/"+name+" …")}catch(e){}
-      var fsMod=require("fs"),pathMod=require("path");
-      var srcDir;
-      try{srcDir=v.adapter.getFullPath("/")}catch(e){}
-      if(!srcDir){try{new Notice("OHSidian: 无法定位仓库根目录")}catch(e){}return}
-      var copied=0;
-      var copyDir2=function(s,d,cb){
-        fsMod.mkdir(d,{recursive:!0},function(){
-          fsMod.readdir(s,function(err,items){
-            if(err)return cb(err);
+        }
+      }catch(e){}
+    };
+    var dirNonEmpty=function(p){
+      try{
+        if(!fsMod.existsSync(p))return false;
+        var st=fsMod.lstatSync(p);
+        if(st.isSymbolicLink())return true;
+        if(!st.isDirectory())return true;
+        return fsMod.readdirSync(p).length>0;
+      }catch(e){return true}   /* unknown -> treat as non-empty (never overwrite) */
+    };
+    var safeCopyDir=function(s,d,cb){
+      var copied=0,failed=0,skipped=0;
+      var finished=false;
+      var finish=function(err){
+        if(finished)return;
+        finished=true;
+        cb(err,{copied:copied,failed:failed,skipped:skipped});
+      };
+      var walk=function(ss,dd,depth,doneDir){
+        if(depth>64)return doneDir(new Error("目录嵌套过深，已停止迁移"));
+        fsMod.mkdir(dd,{recursive:!0},function(eMk){
+          if(eMk)return doneDir(eMk);
+          fsMod.readdir(ss,function(err,items){
+            if(err)return doneDir(err);
+            /* Empty directory: only this branch's parent completion fires -
+               the old code called the GLOBAL callback here, which made the
+               migration report "done" (and open the vault) after the first
+               empty directory while the rest of the tree was still copying. */
+            if(!items.length)return doneDir(null);
             var pending=items.length,fail=null;
-            if(!pending)return cb(null);
-            var done=function(e2){fail=fail||e2;if(--pending===0)cb(fail)};
+            var done=function(e2){
+              if(e2){fail=fail||e2;failed++}
+              if(--pending===0)doneDir(fail);
+            };
             items.forEach(function(nm){
-              var sp=pathMod.join(s,nm),dp=pathMod.join(d,nm);
-              fsMod.stat(sp,function(err2,st){
+              var sp=pathMod.join(ss,nm),dp=pathMod.join(dd,nm);
+              fsMod.lstat(sp,function(err2,st){
                 if(err2)return done(err2);
-                if(st.isDirectory()){copyDir2(sp,dp,done)}
-                else{fsMod.copyFile(sp,dp,function(e3){if(!e3)copied++;done(e3)})}
+                if(st.isSymbolicLink()){skipped++;return done(null)}
+                if(st.isDirectory()){walk(sp,dp,depth+1,done)}
+                else{
+                  fsMod.copyFile(sp,dp,function(e3){
+                    if(e3)return done(e3);
+                    copied++;
+                    try{
+                      fsMod.utimes(dp,st.atime,st.mtime,function(){done(null)});
+                    }catch(eU){done(null)}
+                  });
+                }
               });
             });
           });
         });
       };
-      copyDir2(srcDir,dest,function(err){
-        if(err){try{new Notice("OHSidian: 迁移失败 "+err.message+",可改用文件夹选择器")}catch(e){}pickMigration();return}
-        try{new Notice("OHSidian: 已复制 "+copied+" 个文件到 文档/OHSidian/"+name+",正在打开新仓库…")}catch(e){}
+      walk(s,d,0,finish);
+    };
+    var startMigration=function(target){
+      var srcDir;
+      try{srcDir=v.adapter.getFullPath("/")}catch(e){}
+      if(!srcDir){try{new Notice("OHSidian: 无法定位仓库根目录")}catch(e){}return}
+      var norm=function(p){try{return pathMod.resolve(p)}catch(e){return p}};
+      var srcNorm=norm(srcDir),dstNorm=norm(target);
+      if(dstNorm===srcNorm||dstNorm.indexOf(srcNorm+pathMod.sep)===0){
+        try{new Notice("OHSidian: 目标目录在当前仓库内,请选择仓库以外的位置")}catch(e){}return;
+      }
+      var targetExisted=false;
+      try{targetExisted=fsMod.existsSync(target)}catch(e){}
+      /* Never merge into a non-empty directory: copyFile overwrites silently
+         and a repeated migration would roll the copy back to the old content. */
+      if(dirNonEmpty(target)){
+        try{new Notice("OHSidian: 目标目录非空，请选择空目录或新建目录（已取消，未写入任何文件）")}catch(e){}return;
+      }
+      globalThis.__ohsidianMigrating=true;
+      var opened=false;
+      try{new Notice("OHSidian: 开始迁移仓库到 "+target)}catch(e){}
+      safeCopyDir(srcDir,target,function(err,stats){
+        globalThis.__ohsidianMigrating=false;
+        if(err){
+          /* Only remove a target this run created, and only if the vault was
+             never opened: after sendSync("vault-open") the directory is the
+             live vault (Obsidian writes .obsidian into it), so a late error
+             must never rm -rf it. */
+          if(!targetExisted&&!opened){try{fsMod.rmSync(target,{recursive:true,force:true})}catch(eR){}
+            try{new Notice("OHSidian: 迁移失败 "+err.message+"（已清理未完成的副本）")}catch(e){}
+          }else{
+            try{new Notice("OHSidian: 迁移失败 "+err.message+"（目标目录内可能残留部分副本，请检查后删除）")}catch(e){}
+          }
+          return;
+        }
+        var n=(stats&&typeof stats.copied==="number")?stats.copied:0;
+        var sk=(stats&&typeof stats.skipped==="number")?stats.skipped:0;
+        opened=true;
+        try{new Notice("OHSidian: 已复制 "+n+" 个文件到 "+target+"（跳过软链接 "+sk+" 个），正在打开新仓库…")}catch(e){}
         try{
-          var r=remote.ipcRenderer.sendSync("vault-open",dest,!1);
+          var r=remote.ipcRenderer.sendSync("vault-open",target,!1);
           if(r!==!0){try{new Notice("OHSidian: 打开新仓库返回 "+r)}catch(e){}}
         }catch(e){try{new Notice("OHSidian: 打开新仓库失败 "+e.message)}catch(e2){}}
       });
+    };
+    var pickMigration=function(){
+      var docsRoot=documentsDirPath(readMode());
+      var opts={properties:["openDirectory","createDirectory"],buttonLabel:"迁移仓库到这里"};
+      if(docsRoot)opts.defaultPath=pathMod.join(docsRoot,"OHSidian");
+      remote.dialog.showOpenDialog(opts).then(function(res){
+        try{
+          if(!res||!res.filePaths||!res.filePaths.length)return;
+          flushEditors();
+          var target=res.filePaths[0];
+          setTimeout(function(){startMigration(target)},300);
+        }catch(e){try{new Notice("OHSidian: 迁移失败 "+e.message)}catch(e2){}}
+      },function(){/* canceled by user */});
+    };
+    var docsDir=documentsDirPath(readMode())||null;
+    var inSandbox=false;
+    try{
+      var cur=v.adapter.getFullPath("/");
+      var ud=require("@electron/remote").app.getPath("userData");
+      var relSandbox=cur&&ud?pathMod.relative(ud,cur):"";
+      inSandbox=!!(cur&&ud&&relSandbox&&relSandbox.indexOf("..")!==0&&!pathMod.isAbsolute(relSandbox));
+    }catch(e){}
+    if(docsDir&&inSandbox){
+      /* one-tap default migration into the visible Documents root */
+      var name=pathMod.basename(v.adapter.getFullPath("/"))||"Obsidian Vault";
+      name=String(name).replace(/[\\\/:*?\"<>|]/g,"_").replace(/^\.+$/,"_")||"Obsidian Vault";
+      var dest=pathMod.join(docsDir,"OHSidian",name);
+      for(var i=2;dirNonEmpty(dest);i++){
+        dest=pathMod.join(docsDir,"OHSidian",name+" ("+i+")");
+      }
+      flushEditors();
+      try{new Notice("OHSidian: 当前仓库在应用沙箱内,卸载会丢数据。开始迁移到 "+dest+" …")}catch(e){}
+      setTimeout(function(){startMigration(dest)},300);
     }else{
       pickMigration();
     }
@@ -1874,6 +2074,7 @@ var __ohDvRegister=function(){
     var __ohDvResolve=function(){
       try{
         var cfg=JSON.parse(__ohDvFs.readFileSync(__ohDvPathMod.join(__ohDvUserData,"ohsidian-mode.json"),"utf8"));
+        if(cfg&&cfg.documentsDirGranted===false)return null;
         var docs=cfg&&cfg.documentsDir;
         if(typeof docs==="string"&&docs.length>0){
           try{__ohDvFs.accessSync(docs)}catch(e){return null}
@@ -1882,24 +2083,50 @@ var __ohDvRegister=function(){
       }catch(e){}
       return null;
     };
+    var __ohDvWritable=function(dir){
+      try{
+        var probe=__ohDvPathMod.join(dir,".ohsidian-write-test-"+process.pid+"-"+Date.now());
+        __ohDvFs.writeFileSync(probe,"ok","utf8");
+        try{__ohDvFs.unlinkSync(probe)}catch(eU){}
+        return true;
+      }catch(e){return false}
+    };
     var __ohDvEnsure=function(p){
       try{__ohDvFs.mkdirSync(p,{recursive:true})}catch(e){}
+      if(!__ohDvWritable(p)){
+        try{console.warn("[OHSidian] default vault dir not writable, falling back:",p)}catch(eW){}
+        return null;
+      }
       return p;
     };
     require("electron").ipcMain.on("get-default-vault-path",function(evt){
       try{
         var docsVault=__ohDvResolve();
-        if(docsVault){evt.returnValue=__ohDvEnsure(docsVault);return}
+        if(docsVault){
+          var docsEnsured=__ohDvEnsure(docsVault);
+          if(docsEnsured){
+            evt.returnValue=docsEnsured;
+            try{console.log("[OHSidian] default vault root -> documents/OHSidian")}catch(eL){}
+            return;
+          }
+        }
         /* fallback: previous OHSidian behaviour (sandbox userData) */
-        evt.returnValue=__ohDvEnsure(__ohDvPathMod.join(__ohDvUserData,"Obsidian Vault"));
+        var fallback=__ohDvEnsure(__ohDvPathMod.join(__ohDvUserData,"Obsidian Vault"));
+        evt.returnValue=fallback||__ohDvPathMod.join(__ohDvUserData,"Obsidian Vault");
+        try{console.log("[OHSidian] default vault root -> userData (documents unavailable)")}catch(eL2){}
       }catch(e){
         try{evt.returnValue=__ohDvPathMod.join(__ohDvUserData,"Obsidian Vault")}catch(e2){}
       }
     });
-    try{console.log("[OHSidian] default vault root -> documents (fallback userData)")}catch(e){}
   }catch(e){}
 };
-if(__ohDvApp.isReady()){__ohDvRegister()}else{__ohDvApp.on("ready",__ohDvRegister)}
+/* Register one tick AFTER the engine's own whenReady().then registration:
+   sync IPC replies use the last writer of event.returnValue, and the engine
+   registers its stock handler in a microtask after ready. A setTimeout runs
+   after those microtasks, so this override is the last listener. (If the
+   platform turns out to use first-writer- wins, behaviour is unchanged.) */
+var __ohDvRegisterLater=function(){setTimeout(__ohDvRegister,0)};
+if(__ohDvApp.isReady()){__ohDvRegisterLater()}else{__ohDvApp.on("ready",__ohDvRegisterLater)}
 }catch(e){}})();
 /* Console bridge main-process side (round 96b): receives renderer console
    lines (opt-in, see the TOUCH patch) and (1) re-prints them with the
@@ -1920,7 +2147,7 @@ var __cbResolve=function(){
     var docs=null;
     try{
       var cfg=JSON.parse(__cbFs.readFileSync(__cbPath.join(ud,"ohsidian-mode.json"),"utf8"));
-      if(cfg&&typeof cfg.documentsDir==="string"&&cfg.documentsDir)docs=cfg.documentsDir;
+      if(cfg&&typeof cfg.documentsDir==="string"&&cfg.documentsDir&&cfg.documentsDirGranted!==false)docs=cfg.documentsDir;
     }catch(e0){}
     var base=docs?__cbPath.join(docs,"OHSidian"):ud;
     try{__cbFs.mkdirSync(base,{recursive:true})}catch(e1){}
@@ -1963,13 +2190,15 @@ try{console.log("[OHSidian] console bridge ready (renderer opt-in: 命令面板 
 if(globalThis.__ohsidianTrashPurge)return;globalThis.__ohsidianTrashPurge=true;
 var __ohTrashMaxAge=30*24*60*60*1000;
 var __ohTrashMetaSuffix=".ohsidian-trash-meta.json";
+var __ohTrashOwnerFile=".ohsidian-trash-owner.json";
 var __ohTrashPurgeOnce=function(){try{
   var el=require("electron"),fsMod=require("fs"),pathMod=require("path");
   var ud=el.app.getPath("userData");
   var roots=[];
   try{
     var cfg=JSON.parse(fsMod.readFileSync(pathMod.join(ud,"ohsidian-mode.json"),"utf8"));
-    if(cfg&&typeof cfg.documentsDir==="string"&&cfg.documentsDir)roots.push(pathMod.join(cfg.documentsDir,"OHSidianTrash"));
+    var docs=cfg&&typeof cfg.documentsDir==="string"&&cfg.documentsDir&&cfg.documentsDirGranted!==false?cfg.documentsDir:"";
+    if(docs)roots.push(pathMod.join(docs,"OHSidianTrash"));
   }catch(e){}
   try{
     var oj=JSON.parse(fsMod.readFileSync(pathMod.join(ud,"obsidian.json"),"utf8"));
@@ -1980,33 +2209,58 @@ var __ohTrashPurgeOnce=function(){try{
     }
   }catch(e){}
   var now=Date.now();
-  var purged=0;
+  var recentGuard=10*60*1000;
+  var purged=0,touched=0;
+  var seen={};
+  var owned=function(root){
+    try{return fsMod.existsSync(pathMod.join(root,__ohTrashOwnerFile))}catch(e){return false}
+  };
   var walk=function(dir,depth){
-    if(depth>16)return;
+    if(depth>64)return;
     var es;try{es=fsMod.readdirSync(dir,{withFileTypes:true})}catch(e){return}
     for(var i=0;i<es.length;i++){
       var en=es[i];if(!en||en.name==="."||en.name==="..")continue;
+      if(en.name===__ohTrashOwnerFile)continue;
       var fp=pathMod.join(dir,en.name);
       try{
         if(en.isDirectory()){walk(fp,depth+1);try{fsMod.rmdirSync(fp)}catch(eE){}}
         else if(en.isFile()){
+          /* Sidecars are removed together with their file, never on their own. */
+          if(fp.slice(-__ohTrashMetaSuffix.length)===__ohTrashMetaSuffix)continue;
           var st=fsMod.statSync(fp);
+          /* A concurrent purge in another process could observe the entry
+             between rename and utimes (old mtime, new ctime); never touch a
+             freshly changed entry. */
+          if(now-(st.ctimeMs||0)<recentGuard)continue;
           var ageBase=st.mtimeMs;
           /* F2: prefer the recorded deletion time over the file's own mtime
              (which is the ORIGINAL content mtime when utimesSync failed). */
-          if(fp.slice(-__ohTrashMetaSuffix.length)!==__ohTrashMetaSuffix){
-            try{
-              var mc=JSON.parse(fsMod.readFileSync(fp+__ohTrashMetaSuffix,"utf8"));
-              if(mc&&typeof mc.deletedAt==="number"&&mc.deletedAt>0)ageBase=mc.deletedAt;
-            }catch(eM){}
+          try{
+            var mc=JSON.parse(fsMod.readFileSync(fp+__ohTrashMetaSuffix,"utf8"));
+            if(mc&&typeof mc.deletedAt==="number"&&mc.deletedAt>0)ageBase=mc.deletedAt;
+          }catch(eM){}
+          /* Do not purge what another window may have just moved in: the
+             rename -> utimes window used to expose the original mtime. */
+          if(now-ageBase<recentGuard)continue;
+          if(now-ageBase>__ohTrashMaxAge){
+            try{fsMod.unlinkSync(fp);purged++}catch(eU){}
+            try{fsMod.unlinkSync(fp+__ohTrashMetaSuffix)}catch(eS){}
           }
-          if(now-ageBase>__ohTrashMaxAge){fsMod.unlinkSync(fp);purged++}
         }
       }catch(eE){}
     }
   };
-  for(var i=0;i<roots.length;i++)walk(roots[i],0);
-  try{console.log("[OHSidian] trash purge: roots="+roots.length+", removed="+purged)}catch(e){}
+  for(var r=0;r<roots.length;r++){
+    var root=roots[r];
+    /* Only clean trashes this feature created. A user/plugin-created .trash
+       (or an OHSidianTrash from before this marker existed) is left alone. */
+    if(!owned(root))continue;
+    if(seen[root])continue;
+    seen[root]=1;
+    touched++;
+    walk(root,0);
+  }
+  try{console.log("[OHSidian] trash purge: roots="+roots.length+", owned="+touched+", removed="+purged)}catch(e){}
 }catch(e){}};
 setTimeout(__ohTrashPurgeOnce,60000);
 /* F-N16: best-effort second pass at quit - covers sessions shorter than
