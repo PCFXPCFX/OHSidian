@@ -245,7 +245,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v153');
+    LogUtil.info(TAG, 'transport=avplayer v155');
   }
 
   aboutToDisappear(): void {
@@ -953,6 +953,10 @@ export struct NativeVideoOverlay {
       this.dragging = false;
       this.seekTo(this.positionMs);
     }
+    // A drag is not the confirming tap: touch-down set revealPending, and if it
+    // survived the gesture the NEXT single tap was swallowed as "confirm",
+    // so pausing after a seek took two taps.
+    this.revealPending = false;
     this.showControls();
     LogUtil.info(TAG, 'gesture end axis=' + axis + ' pos=' + this.positionMs);
   }
@@ -966,6 +970,7 @@ export struct NativeVideoOverlay {
       // A cancelled gesture must not commit a seek; restore the slider preview.
       this.positionMs = this.gestureStartPos;
     }
+    this.revealPending = false;
     this.showControls();
   }
 
@@ -1252,7 +1257,7 @@ export struct NativeVideoOverlay {
   }
 
   private timeWidth(): number {
-    return this.ratioOf(0.098, 62, 96) * this.u();
+    return this.ratioOf(0.112, 72, 120) * this.u();
   }
 
   private trackThickness(): number {
@@ -1852,7 +1857,12 @@ export struct NativeVideoOverlay {
         .alignItems(HorizontalAlign.Center)
         .backgroundColor(MEDIA_VOID)
         .hitTestBehavior(HitTestMode.Default)
-        .zIndex(2)
+        // Above the transport: the cover is opaque, and while it was zIndex 2
+        // the play disc (3), bar (4), boost badge (5) and HUD (6) were painted
+        // ON TOP of it - controls floating on a blank panel, and the disc even
+        // accepted taps while the player was being rebuilt. Sitting on top also
+        // means taps during a rebuild land on the cover instead of seek/play.
+        .zIndex(8)
       }
 
       if (this.showDebug) {
@@ -1886,7 +1896,7 @@ export struct NativeVideoOverlay {
               .fontColor(this.theme.muted)
               .margin({ top: 1 })
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v153')
+              ' · k=' + this.u().toFixed(3) + ' · v155')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 6 })
@@ -1905,7 +1915,7 @@ export struct NativeVideoOverlay {
         .alignItems(HorizontalAlign.Start)
         .padding(12)
         .hitTestBehavior(HitTestMode.None)
-        .zIndex(7)
+        .zIndex(9)
       }
 
       if (this.gestureHint) {
@@ -1956,7 +1966,7 @@ export struct NativeVideoOverlay {
         .borderRadius(this.theme.radiusL)
         .alignItems(HorizontalAlign.Center)
         .hitTestBehavior(HitTestMode.Default)
-        .zIndex(3)
+        .zIndex(10)
       }
 
       if (this.boosting) {
@@ -1986,7 +1996,7 @@ export struct NativeVideoOverlay {
       // combination is what makes it independent of Stack alignment (which the
       // device build ignored) and immediate on a fullscreen transition (no
       // wait for the next onAreaChange).
-      if (!this.playing && !this.errorText) {
+      if (!this.playing && !this.errorText && !this.switching && !this.resizeCover) {
         Column() {
           Column() {
             // 40-unit glyphs, zero transform: the paused triangle is ~20x26 in
@@ -2054,6 +2064,11 @@ export struct NativeVideoOverlay {
             .fontColor(this.theme.muted)
             .fontSize(this.timeFontSize())
             .width(this.timeWidth())
+            // "00:00 / 00:00" at this font is wider than the old 0.098W box, so
+            // the text ran to the edge and could clip. Widen the box and pin it
+            // to one line so it can never wrap the pill's height.
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Clip })
             .textAlign(TextAlign.Center)
             // Long-press the timecode to toggle a diagnostics readout. It is the
             // only way to tell "the new build is not installed" apart from "the
