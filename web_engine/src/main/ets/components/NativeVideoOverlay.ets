@@ -200,11 +200,6 @@ export struct NativeVideoOverlay {
   // presents its first one, so a bare re-init flashes the old video. An opaque
   // cover owns that gap and is removed on the first 'playing' of the new file.
   @State private switching: boolean = false;
-  // Shown while a window-resize rebuild runs. The surface has no valid picture
-  // between release() and the new decoder's first frame; without this the
-  // overlay was revealed at 400ms while the rebuild was still going, i.e. the
-  // user saw a black rectangle after every mode switch.
-  @State private resizeCover: boolean = false;
 
   private controller: XComponentController = new XComponentController();
   private player: media.AVPlayer | null = null;
@@ -225,8 +220,6 @@ export struct NativeVideoOverlay {
   private resumePlay: boolean = false;
   private resizeTimer: number = -1;
   private probeTimer: number = -1;
-  private coverTimer: number = -1;
-  private coverDelayTimer: number = -1;
   private lastRebuildW: number = 0;
   private lastRebuildH: number = 0;
   private hideTimer: number = -1;
@@ -252,7 +245,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v163');
+    LogUtil.info(TAG, 'transport=avplayer v164');
   }
 
   aboutToDisappear(): void {
@@ -264,14 +257,6 @@ export struct NativeVideoOverlay {
     if (this.probeTimer >= 0) {
       clearTimeout(this.probeTimer);
       this.probeTimer = -1;
-    }
-    if (this.coverTimer >= 0) {
-      clearTimeout(this.coverTimer);
-      this.coverTimer = -1;
-    }
-    if (this.coverDelayTimer >= 0) {
-      clearTimeout(this.coverDelayTimer);
-      this.coverDelayTimer = -1;
     }
     if (this.resizeTimer >= 0) {
       clearTimeout(this.resizeTimer);
@@ -365,7 +350,6 @@ export struct NativeVideoOverlay {
     this.errorText = message;
     this.playing = false;
     this.switching = false;
-    this.resizeCover = false;
     this.clearHideTimer();
     this.controlsVisible = true;
     // An exhausted retry budget must not leave the decoder/fd/surface alive:
@@ -425,27 +409,6 @@ export struct NativeVideoOverlay {
   // hit `retryCount >= 2` -> fail(), and the player died with an error panel.
   // They are also deduped: one switch fires BOTH XComponent.onLoad and the 320ms
   // area debounce, which tore the decoder down twice (two black frames).
-  // The "adapting" veil only appears if the rebuild is actually slow. Both resize
-  // paths (surfaceId change from onLoad, and the area/aspect path) go through
-  // here: showing it immediately made entering fullscreen flash the panel every
-  // time, because that path always rebuilds the surface.
-  private armResizeCover(): void {
-    if (this.coverDelayTimer >= 0) {
-      clearTimeout(this.coverDelayTimer);
-    }
-    this.coverDelayTimer = setTimeout(() => {
-      this.coverDelayTimer = -1;
-      this.resizeCover = true;
-      if (this.coverTimer >= 0) {
-        clearTimeout(this.coverTimer);
-      }
-      this.coverTimer = setTimeout(() => {
-        this.coverTimer = -1;
-        this.resizeCover = false;
-      }, 1200);
-    }, 220);
-  }
-
   private retryResize(reason: string): void {
     if (this.released) {
       return;
@@ -454,8 +417,7 @@ export struct NativeVideoOverlay {
     // one switch, so a second call for the same box is a duplicate; a DIFFERENT
     // box must always rebuild. A time-only guard swallowed the rebuild after
     // leaving fullscreen (the two toggles are usually <500ms apart), the surface
-    // kept the fullscreen size and the cover sat there until its safety timeout -
-    // the "正在适配… stays for ages" report.
+    // kept the fullscreen size until the next state change.
     const sameBox: boolean = this.lastRebuildW > 0 && this.lastRebuildH > 0 &&
       Math.abs(this.lastAreaW - this.lastRebuildW) < 4 &&
       Math.abs(this.lastAreaH - this.lastRebuildH) < 4;
@@ -465,7 +427,6 @@ export struct NativeVideoOverlay {
     this.lastRebuildW = this.lastAreaW;
     this.lastRebuildH = this.lastAreaH;
     this.retryCount = 0;
-    this.armResizeCover();
     // A resize rebuild is a surface swap, not error recovery: 160ms is enough
     // for release() to settle and saves ~120ms on every toggle.
     this.retry(reason, 160);
@@ -594,15 +555,6 @@ export struct NativeVideoOverlay {
           this.playing = true;
           this.completed = false;
           this.switching = false;
-          this.resizeCover = false;
-          if (this.coverDelayTimer >= 0) {
-            clearTimeout(this.coverDelayTimer);
-            this.coverDelayTimer = -1;
-          }
-          if (this.coverTimer >= 0) {
-            clearTimeout(this.coverTimer);
-            this.coverTimer = -1;
-          }
           // A retry normally clears the budget only after the session has
           // proven stable. Resetting on every 'playing' lets a decoder that
           // enters playing then fails immediately retry forever.
@@ -612,9 +564,6 @@ export struct NativeVideoOverlay {
           this.scheduleHideControls();
         } else if (state === 'paused') {
           this.playing = false;
-          // A paused resize finishes in `paused`, not `playing`: clear the cover
-          // here too, otherwise it would sit over the video forever.
-          this.resizeCover = false;
           this.showControls();
         } else if (state === 'completed') {
           this.playing = false;
@@ -1177,7 +1126,7 @@ export struct NativeVideoOverlay {
     // so a fullscreen toggle or a window resize only SCALES it. ArkUI resizes the
     // XComponent in place and AVPlayer keeps painting into the same buffer, so a
     // rebuild is not needed - and rebuilding cost ~700ms (release + 280ms +
-    // prepare) plus the "正在适配…" cover on every single toggle. Only a change
+    // prepare) on every single toggle. Only a change
     // in ASPECT invalidates the surface.
     const aspectChanged: boolean = oldW > 1 && oldH > 1 &&
       Math.abs((w / h) - (oldW / oldH)) > 0.02;
@@ -1198,7 +1147,6 @@ export struct NativeVideoOverlay {
     }
     // Let the window drag settle; at the final size recreate the surface while
     // preserving currentTime/playing. No close, no restart from 0:00.
-    this.armResizeCover();
     this.resizeTimer = setTimeout(() => {
       this.resizeTimer = -1;
       if (!this.released && this.player !== null &&
@@ -1970,9 +1918,9 @@ export struct NativeVideoOverlay {
       // video's last frame until the new decoder presents one, so re-init
       // without a cover reads as "old clip flashes, then the new one". Opaque
       // theme.bg + a muted caption, removed on the new file's first 'playing'.
-      if (this.switching || this.resizeCover) {
+      if (this.switching) {
         Column() {
-          Text(this.switching ? '载入中…' : '正在适配…')
+          Text('载入中…')
             .fontColor(MEDIA_INK)
             .fontSize(12)
         }
@@ -2029,7 +1977,7 @@ export struct NativeVideoOverlay {
             this.metaRow('大小', this.sizeLabel())
 
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v163')
+              ' · k=' + this.u().toFixed(3) + ' · v164')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 9 })
@@ -2129,7 +2077,7 @@ export struct NativeVideoOverlay {
       // combination is what makes it independent of Stack alignment (which the
       // device build ignored) and immediate on a fullscreen transition (no
       // wait for the next onAreaChange).
-      if (!this.playing && !this.errorText && !this.switching && !this.resizeCover) {
+      if (!this.playing && !this.errorText && !this.switching) {
         Column() {
           Column() {
             // 40-unit glyphs, zero transform: the paused triangle is ~20x26 in

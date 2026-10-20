@@ -2448,3 +2448,18 @@ XComponent 的尺寸是**按视频宽高比 contain 之后的框**（ideoFrameW
 **修法**：根 Stack 背景改为 **MEDIA_VOID（纯黑）**，与遮罩一致。现在 	heme.bg 在本组件内出现次数为 **0**——画面区域的所有底色都是固定黑，与主题无关。
 
 **验证**：BUILD SUCCESSFUL in 23 s 307 ms；HAP **222,013,773 B**，SHA-256 EFAFDB6675491893AB2FFCA6B2D73316A977682CBC3AB785227CD8DDF9BDEF14；字节码命中 163、MEDIA_VOID，162 已不存在；	his.theme.bg 在源码中已归零。
+## 第 164 轮 (2026-10-20): 去掉"正在适配"遮罩
+
+**用户**：放大其实都挺好的，反倒是出了这个正在适配，导致观感下降，去掉这个。
+
+**改动**：删除 resize 遮罩这一整套——
+- @State resizeCover、coverTimer、coverDelayTimer、rmResizeCover() 全部移除；
+- etryResize() 与 scheduleSurfaceResize() 不再挂遮罩；
+- 遮罩条件回到**只服务换源**：\if (this.switching)\ → 文案固定 \载入中…\；
+- 圆盘的显示条件同步简化（不再判断 \esizeCover\）。
+
+换源遮罩保留的理由与 resize 不同：同页换视频时 surface 仍持有**上一段**的最后一帧，不盖会"闪旧片"；而 resize 只是同一个画面的尺寸变化，盖住反而制造了不存在的中断感。
+
+**代价（如实）**：resize 重建的 ~200–500ms 里，surface 显示的是上一帧或黑，而不是一块带文字的面板。按用户判断，这个观感优于面板。
+
+**验证**：\BUILD SUCCESSFUL in 21 s 871 ms\；HAP **222012381 B**，SHA-256 \$sha\；字节码命中 \164\、\载入中\，\esizeCover\ 与 \正在适配\ 均为 0。
