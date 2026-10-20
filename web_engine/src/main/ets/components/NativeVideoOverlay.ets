@@ -245,7 +245,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v165');
+    LogUtil.info(TAG, 'transport=avplayer v166');
   }
 
   aboutToDisappear(): void {
