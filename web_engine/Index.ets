@@ -5,6 +5,8 @@ export { WebWindow } from './src/main/ets/components/WebWindow';
 export { WebSubWindow } from './src/main/ets/components/WebSubWindow';
 export { WebEmbeddedWindow } from './src/main/ets/components/WebEmbeddedWindow';
 export { WebWindowNode } from './src/main/ets/components/WebWindowNode';
+export { NativeVideoOverlay } from './src/main/ets/components/NativeVideoOverlay';
+export { NativeVideoTheme } from './src/main/ets/components/NativeVideoOverlay';
 export { BackPressBridge } from './src/main/ets/utils/BackPressBridge';
 export { ILoginInfo } from './src/main/ets/interface/CommonInterface';
 export { ILogin } from './src/main/ets/interface/CommonInterface';
