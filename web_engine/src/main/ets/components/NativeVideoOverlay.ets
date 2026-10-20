@@ -249,7 +249,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v156');
+    LogUtil.info(TAG, 'transport=avplayer v157');
   }
 
   aboutToDisappear(): void {
@@ -1739,8 +1739,14 @@ export struct NativeVideoOverlay {
           .commands(this.scalePath(cmds, this.pathScaleFor(size, 30)))
           .fill(filled ? color : Color.Transparent)
           .stroke(filled ? Color.Transparent : color)
-          // A stroke is also in px: scale it so the drawn weight is `stroke` vp.
-          .strokeWidth(filled ? 0 : stroke * this.pathScaleFor(40 * this.u(), 40))
+          // UNITS, per sdk/.../component/path.d.ts and shape.d.ts:
+          //   Path.commands      -> "Default unit: px"
+          //   Shape.strokeWidth  -> "Default unit: vp"
+          // `stroke` is authored in GRID UNITS, so converting it to vp is
+          // stroke * size / 30. This builder was accidentally left on the
+          // BIG glyph formula (stroke * 2 = 2vp = 4px on an 18.9vp icon,
+          // i.e. 21% of the icon width - the "still too thick" report).
+          .strokeWidth(filled ? 0 : stroke * size / 30)
           .strokeLineCap(LineCapStyle.Round)
           .strokeLineJoin(LineJoinStyle.Round)
       }
@@ -1762,7 +1768,9 @@ export struct NativeVideoOverlay {
           .commands(this.scalePath(cmds, this.pathScaleFor(40 * this.u(), 40)))
           .fill(filled ? color : Color.Transparent)
           .stroke(filled ? Color.Transparent : color)
-          .strokeWidth(filled ? 0 : stroke * this.pathScaleFor(40 * this.u(), 40))
+          // Same unit rule; this grid is 40 and the box is 40 * u, so one
+          // grid unit is u vp.
+          .strokeWidth(filled ? 0 : stroke * this.u())
           .strokeLineCap(LineCapStyle.Round)
           .strokeLineJoin(LineJoinStyle.Round)
       }
@@ -1951,7 +1959,7 @@ export struct NativeVideoOverlay {
             this.metaRow('大小', this.sizeLabel())
 
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v156')
+              ' · k=' + this.u().toFixed(3) + ' · v157')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 9 })

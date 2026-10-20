@@ -2298,3 +2298,32 @@ HEVC Main10                      1920×1080
   依赖 WMS 在 maximize/recover 时自己处理 title 按钮；本设备日志未见异常。
 - 文档轮次重号（106/111/153）来自并行会话提交，本轮未重排。
 - 本轮未跑真机；编译为 ArkTS 唯一门。
+## 第 157 轮 (2026-10-20): 查文档定单位——描边被套错公式，实际粗了 3 倍
+
+**用户**：视频控件线条还是粗，请你查阅相关资料和文档修正。
+
+**文档原文（\sdk/default/openharmony/ets/component/\）**
+
+| API | 文档 | 单位 |
+|---|---|---|
+| \Path.commands(value)\ | \"Path for drawing a line. **Default unit: px**\" | **px** |
+| \Shape.strokeWidth(value)\ | \"Stroke width. Default value: 1. **Default unit: vp**\" | **vp** |
+
+坐标与描边**单位不同**：坐标按 px 传（所以乘 \p2px(1)\），描边按 vp 传（**不能**再乘 \p2px(1)\）。
+
+**真正的 bug（比单位错更严重）**：两个 builder 的描边都被写成了**大图标**的公式——
+\\\	s
+// 控制条图标：30 网格、size≈18.9vp，却在用大图标的换算
+.strokeWidth(stroke * this.pathScaleFor(40 * this.u(), 40))   // = 1 × 2 = 2 vp = 4 px
+\\\
+在 18.9vp 的图标上画 **4px** 线 = 图标宽度的 **21%** ⇒ 视觉上必然"粗"。
+
+**修法**（按文档单位换算）
+| builder | 网格 | 盒子 | 描边（vp） | 实绘 |
+|---|---|---|---|---|
+| \glyph\（控制条） | 30 | \size\=18.9 | \stroke * size / 30\ = **0.63 vp** | 1.26px，占图标 **3.3%** |
+| \glyphBig\（圆盘重播） | 40 | \40 * u\ | \stroke * u\ = **1.4 vp** | 2.8px，占 **3.5%** |
+
+坐标侧保持不变（仍是 px，乘 \pathScaleFor\）。
+
+**验证**：\BUILD SUCCESSFUL in 18 s 834 ms\；HAP **222012758 B**，SHA-256 \$sha\；字节码命中 \157\，\156\ 已不存在。
