@@ -1480,7 +1480,10 @@ export struct NativeVideoOverlay {
     this.probeTimer = setTimeout(() => {
       this.probeTimer = -1;
       if (!this.released) {
-        this.scheduleMediaProbe();
+        // A bulk rename in R152 rewrote this line into a self-call, so the timer
+        // cleared itself and re-armed forever and probeMedia() never ran - every
+        // container field in the panel stayed empty.
+        this.probeMedia();
       }
     }, 500);
   }
@@ -1727,7 +1730,7 @@ export struct NativeVideoOverlay {
   private metaSection(title: string) {
     Text(title)
       .fontSize(9)
-      .fontColor(this.theme.faint)
+      .fontColor('#8AFFFFFF')
       .letterSpacing(1.2)
       .margin({ top: 9, bottom: 1 })
   }
@@ -1737,11 +1740,11 @@ export struct NativeVideoOverlay {
     Row() {
       Text(label)
         .fontSize(9)
-        .fontColor(this.theme.faint)
+        .fontColor('#8AFFFFFF')
         .width(50)
       Text(value)
         .fontSize(10)
-        .fontColor(this.theme.text)
+        .fontColor('#F0FFFFFF')
         .layoutWeight(1)
     }
     .width('100%')
@@ -1950,12 +1953,12 @@ export struct NativeVideoOverlay {
               Text((this.metaCodec ? this.metaCodec : '视频') +
                 (this.profileLabel() ? ' ' + this.profileLabel() : ''))
                 .fontSize(12)
-                .fontColor(this.theme.text)
+                .fontColor('#FFFFFFFF')
                 .fontWeight(FontWeight.Medium)
               Blank()
               Text(this.metaW > 0 ? this.metaW + '×' + this.metaH : '')
                 .fontSize(11)
-                .fontColor(this.theme.muted)
+                .fontColor('#B3FFFFFF')
             }
             .width('100%')
 
@@ -1977,18 +1980,22 @@ export struct NativeVideoOverlay {
             this.metaRow('大小', this.sizeLabel())
 
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v165')
+              ' · k=' + this.u().toFixed(3) + ' · v166')
               .fontSize(9)
-              .fontColor(this.theme.faint)
+              .fontColor('#73FFFFFF')
               .margin({ top: 9 })
           }
           .alignItems(HorizontalAlign.Start)
           .constraintSize({ maxWidth: 280 })
           .padding({ left: 12, right: 14, top: 10, bottom: 10 })
-          .backgroundColor(this.theme.panel)
+          // Frosted, not solid: the card sits ON the picture, so it uses media
+          // chrome (translucent dark + system blur) instead of an opaque theme
+          // surface - an opaque panel read as a heavy slab over the video.
+          .backgroundColor('#59000000')
+          .backgroundBlurStyle(BlurStyle.Thick)
           .borderRadius(this.theme.radiusM)
-          .border({ width: 1, color: this.theme.border })
-          .shadow({ radius: 16, color: '#33000000', offsetX: 0, offsetY: 6 })
+          .border({ width: 1, color: '#26FFFFFF' })
+          .shadow({ radius: 18, color: '#40000000', offsetX: 0, offsetY: 8 })
         }
         .width('100%')
         .height('100%')
