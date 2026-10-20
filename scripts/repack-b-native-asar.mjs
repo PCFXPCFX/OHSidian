@@ -11,7 +11,11 @@ const tmp = path.join(repo, '.cache/b-asar-repack');
 // The renderer patch text now lives in scripts/patches/touch-mode.js.
 const patchSrc = fs.readFileSync(path.join(repo, 'scripts/patches/touch-mode.js'), 'utf8');
 
-const fnStart = patchSrc.indexOf('var __ohsidianNativeVideoSeq=0;');
+// Start at the FIRST native-video symbol, not at the sequence counter:
+// ohsidianResolveMediaPath() lives above __ohsidianNativeVideoSeq, and
+// slicing from the counter silently dropped every change to path
+// resolution (the standalone media-view route never reached the asar).
+const fnStart = patchSrc.indexOf('var __ohsidianMediaNotices=0;');
 // Include the B error/play/loadedmetadata listeners too. Ending at the first
 // `document.addEventListener("error"` silently dropped the 8s HEVC watcher
 // and its audio guard from every repack.
@@ -25,7 +29,7 @@ asar.extractAll(asarPath, tmp);
 const appPath = path.join(tmp, 'app.js');
 let app = fs.readFileSync(appPath, 'utf8');
 
-const start = app.indexOf('var __ohsidianNativeVideoSeq=0;');
+const start = app.indexOf('var __ohsidianMediaNotices=0;');
 const end = app.indexOf('/* Back-press consumer', start);
 if (start < 0 || end < 0 || end <= start) throw new Error('existing B block not found in app.js');
 app = app.slice(0, start) + bFunctions + '\n' + app.slice(end);

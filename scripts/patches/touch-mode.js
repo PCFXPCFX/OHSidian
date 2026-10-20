@@ -683,14 +683,26 @@ function ohsidianResolveMediaPath(el){
         }
       }
     }
-    /* Standalone media view: clicking a video file in the vault opens a media
-       leaf instead of an embed, so there is no ".internal-embed" to read the
-       vault-relative src from and the whole native route was skipped. Those
-       leaves carry "data-path" on the container (workspace-leaf-content /
-       view-content), which is the vault-relative path of the opened file. */
+    /* Standalone media view. Clicking a video file in the vault opens a FILE
+       VIEW, not an embed: there is no ".internal-embed", the <video> src is an
+       app:// blob rather than file://, and the container does not carry
+       "data-path" (that attribute lives on the file-explorer rows). A DOM
+       attribute lookup therefore returns nothing here.
+       The ACTIVE FILE is exactly that video, and that is an API fact:
+       workspace.getActiveFile(). The extension guard keeps a note that merely
+       embeds a video from resolving to the note itself. */
+    var appObj=window.app;
+    var af=(appObj&&appObj.workspace&&typeof appObj.workspace.getActiveFile==="function")
+      ? appObj.workspace.getActiveFile() : null;
+    var VIDEO_RE=/\.(mp4|m4v|mov|mkv|ts|webm|avi)$/i;
+    if(af&&af.path&&VIDEO_RE.test(af.path)&&v&&v.adapter&&
+       typeof v.adapter.getFullPath==="function"){
+      try{return v.adapter.getFullPath(af.path)}catch(eAf){}
+    }
+    /* Last resort for a file view whose container DOES expose data-path. */
     var holder=(el&&el.closest)?el.closest("[data-path]"):null;
     var holderPath=(holder&&holder.getAttribute)?holder.getAttribute("data-path"):"";
-    if(holderPath&&v&&typeof v.getAbstractFileByPath==="function"){
+    if(holderPath&&v&&typeof v.getAbstractFileByPath==="function"&&VIDEO_RE.test(holderPath)){
       var lf=null;
       try{lf=v.getAbstractFileByPath(holderPath)}catch(eMv){}
       if(lf&&v.adapter&&typeof v.adapter.getFullPath==="function"){

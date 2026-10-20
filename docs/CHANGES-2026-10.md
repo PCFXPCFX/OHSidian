@@ -2342,3 +2342,26 @@ HEVC Main10                      1920×1080
 - `BUILD SUCCESSFUL in 33 s 294 ms`；HAP **222,012,452 B**，SHA-256 `85D9729C84DB893FB444C7E416FCF4C014B9894B65BD77B50E81FA38F784F022`；
 - 内嵌 asar **8DBEBB33…EDA1A8B8**（本轮**变了**，因为改了渲染层补丁）；
 - 字节码命中 `v158`、`glyphSizeTiny`；asar 内命中 `data-path`。
+## 第 159 轮 (2026-10-20): 渲染层改动从未进包——repack 切片起点在函数之后
+
+**用户**：`没显示，还是原来的样子，请你以代码为准`。
+
+**以代码为准的排查**
+| 检查 | 结果 |
+|---|---|
+| `.cache\b-asar-repack\app.js` 搜 `VIDEO_RE`（本轮新符号） | **×0** ⇒ 改动不在包里 |
+| patch 与 app.js 在 `var __ohsidianMediaNotices=0;` 的偏移 | 都是 **32093**（同源，可安全切片） |
+| 两者在 `var __ohsidianNativeVideoSeq=0;` 的偏移 | patch **34471** / app **32953**，差 **1,518 字符** = 两轮新增量，全在切片外 |
+
+`scripts/repack-b-native-asar.mjs` 的切片起点是 `__ohsidianNativeVideoSeq`，而 **`ohsidianResolveMediaPath()` 在它之前**，因此 R158 的 `[data-path]` 路线**从未进入 asar**——"没显示"的真正原因。
+
+**修复**
+1. **打包脚本**：切片起点前移到 `var __ohsidianMediaNotices=0;`，并把原因写进注释；
+2. **路径解析改用 API**：`[data-path]` 只存在于文件树行上，媒体视图容器没有。改为 `workspace.getActiveFile()` + 视频扩展名守卫 → `vault.adapter.getFullPath()`；`data-path` 降为兜底且同样过扩展名守卫（防止"笔记里嵌视频"时把笔记本身当视频）。
+
+**验证**
+- repack 后 `.cache\b-asar-repack\app.js`：`VIDEO_RE ×3`、`Standalone media view ×1`；
+- `BUILD SUCCESSFUL in 28 s 901 ms`；HAP **222,012,450 B**，SHA-256 `835C7C2253F154469B757CC105FD82FD936B6C66DCEAEB22686B05263815ECAF`；
+- **包内** asar **25,950,843 B** `CD337EF43188C17E89275D394A66AE49AF0483895202DC65F383737313C04C3F`，内含 `VIDEO_RE ×3`、`Standalone media view ×1`。
+
+**流程沉淀**：改渲染层后必须在 `.cache\b-asar-repack\app.js` 搜一个**本次独有**的字符串确认进包；搜不到说明切片范围没覆盖，构建成功也是假的。
