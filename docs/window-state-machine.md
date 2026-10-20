@@ -563,3 +563,48 @@ maximize（`reason:1`），不是代码保证的；WMS 不做时窗口就停在�
 2. 整屏校正的延时补偿只允许**单发、只针对 1300002、只重试一次**，不得演化
    成定时梯子（第 87/88 轮的教训）；
 3. 重试必须自查形态（切回 PC 模式后放弃）与窗口存活（销毁时清除定时器）。
+
+### Round 157：装饰/标题条是"形态"属性；caption API 每次状态只调一次
+
+**真机证据**（同一份 07:39:31–07:40:03 HiLog，窗口 1493）
+
+- 触摸→窗口模式→触摸的一次往返中，`pushSafeAreaInsets()` 被调用 10 次
+  （每次几何/inset/status 事件一次）。旧代码在 PC 模式下**每次**都重新下发
+  标题条相关 API：`SetWindowTitleMoveEnabled: enable:1` 12 次、
+  `OnSetWindowTitleButtonVisible` 17 次、Ace 侧 `HideWindowTitleButton` 12 次
+  （47.237–47.248、49.675–49.689、50.619–50.634 三串风暴）。
+- 切回触摸的过渡期窗口还是浮窗 `1644x1233`，旧代码用**几何**判断"要 caption"，
+  于是连着 4 次调用本设备不支持的系统标题条 API：
+  `show system caption failed: {"code":801}` ×4、
+  `SetWindowTitleMoveEnabled: The device is not supported` ×4
+  （58.828–58.866），并且仍把 `decor='system'` 写进 `ohsidian-mode.json`。
+  引擎据此隐藏自绘 `.titlebar`，而系统标题条又弹不出来 → 过渡期（约 100ms，
+  若整屏校正失败则持续）**窗口没有任何标题条/拖拽面**。
+- `setWindowLimits` 在触摸形态下被重复请求同一组值（36.951 与 59.646 都是
+  450×282），WMS 两次都回 "could not update new size"；唯一生效的是窗口模式
+  那次 383×311@1.9125。
+- `SetLayoutFullScreenByApiVersion status 1` 每次进触摸下发两次
+  （32.063 + 32.132 冷启动；58.737 系统 + 58.843 我们）。
+
+**修复（第 157 轮）**
+
+- `pushSafeAreaInsets()`：`decor` 由**形态**决定——触摸形态恒 `none`，且不调用
+  任何系统标题条 API；只有窗口模式才做"是否整屏（captionless）"的几何判断。
+- 新增 `ensureSystemCaption()`：caption（decor + 标题按钮 + 拖拽）每个 caption
+  状态只应用到一次（`captionApplied` 闩锁）；调用失败返回 false，调用方把
+  `decor` 回退为 `none`，让引擎保留自绘标题条作为拖拽面。离开 caption 状态
+  （回触摸）时复位闩锁与 `decorVisibleLast`。
+- `applyLayoutFullscreenForMode()`：值闩锁 `layoutFullscreenApplied`（只在
+  `.then` 成功后才记录），同值重复调用直接返回；窗口舞台重建时复位。
+- `AppWindowAdapter.setWindowLimits()`：触摸形态下与上次完全相同的 limits
+  直接跳过（窗口模式仍全量转发，重建窗口需要重新下发）。
+
+**不变量（今后改动必须保持）**
+
+1. decor/caption 是**形态属性**：触摸形态恒无系统标题条，不得因"窗口暂时
+   不是整屏"而调用 caption API；窗口模式才看几何。
+2. 系统标题条相关 API（decor/标题按钮/拖拽）每次 caption 状态最多调一次；
+   pushSafeAreaInsets 只负责写 insets/decor 字段。
+3. caption 调用失败时 `decor` 必须回退 `none`（宁可用引擎自绘标题条，也不能
+   出现"系统标题条没有、自绘标题条被隐藏"的无标题条窗口）。
+4. `setWindowLayoutFullScreen` 同值不重复下发，且只有成功后才闩锁。

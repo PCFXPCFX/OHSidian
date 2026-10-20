@@ -2199,3 +2199,102 @@ HEVC Main10                      1920×1080
 ```
 
 **验证**：`BUILD SUCCESSFUL`；HAP **222001577 B**，SHA-256 `77C96710A51D00C31621D9B5D7D075DA62189609254A45EF4334B2F52986C064`；字节码命中 `v156`、`关键帧`、`画面`，`v155` 已不存在。
+
+## 第 157 轮(2026-10-20):装饰/标题条是形态属性 + caption API 去重（继续挖 HiLog）
+
+> 编号说明:并行会话已占用到 156,本轮窗口修复取 157。
+
+**输入**:同一份 07:39:31–07:40:03 HiLog（进程 49177、窗口 1493）的窗口相关
+事件。第 153 轮只修了 `1300002` 不铺满；本文是本轮继续挖掘出的 4 个问题。
+
+**日志证据**
+
+| 问题 | 证据 |
+|---|---|
+| 触摸形态按几何判 decor | 58.769 `UpdateDecorEnable: decorVisible:0`（系统已收 caption）→ 58.828/58.839/58.842/58.866 `show system caption failed: 801` ×4 + `SetWindowTitleMoveEnabled: The device is not supported` ×4 → 58.910 rect 才整屏 → 58.939 `decor=none`。期间 `decor='system'` 被写进 mode 文件，引擎隐藏自绘 `.titlebar` → 无标题条/无拖拽面 |
+| PC 模式 caption 重复下发 | `SetWindowTitleMoveEnabled: enable:1` 12 次、`OnSetWindowTitleButtonVisible` 17 次、Ace `HideWindowTitleButton` 12 次；三串风暴 47.237–47.248、49.675–49.689、50.619–50.634。根因:`pushSafeAreaInsets()` 每次事件都重发，只有 `setWindowDecorVisible` 有闩锁 |
+| 触摸下 limits 重复 | `setWindowLimits(450,282)` 在 36.951 与 59.646 各一次，WMS 两次都回 "fullscreen or compatible mode could not update new size"；唯一生效的是窗口模式 49.689 的 383×311@1.9125 |
+| layout-fullscreen 重复 | `SetLayoutFullScreenByApiVersion status 1` 进触摸两次:32.063 + 32.132（冷启动 boot sync + loadContent 重申）；58.737（系统随模式切换）+ 58.843（我们） |
+
+**根因(以代码为准)**
+
+1. `pushSafeAreaInsets()` 的 `captionless` 只按 `windowRect >= display` 判断
+   （几何），触摸形态在整屏校正落地前仍是浮窗 → 误判"需要系统 caption"。
+2. caption 的 `setWindowTitleButtonVisible` / `setWindowTitleMoveEnabled`
+   没有闩锁，每次 `pushSafeAreaInsets()`（本日志 10 次）都重发；
+   `decor='system'` 在调用抛异常后仍被写入，掩盖"设备不支持系统 caption"。
+3. `applyLayoutFullscreenForMode()` 无值去重，启动期两个调用点各发一次。
+4. `setWindowLimits` 在触摸形态下对同一组值重复请求（引擎在隐藏/回前台时
+   重发），WMS 每次都拒绝。
+
+**修复**
+
+| 侧 | 变更 | 目的 |
+|----|------|------|
+| ArkTS `WebAbility.pushSafeAreaInsets` | `decor` 改由形态决定:触摸形态恒 `none` 且不调用 caption API;窗口模式才做整屏几何判断 | 消除触摸过渡期的 4×801 与"无标题条/无拖拽面"窗口 |
+| ArkTS `WebAbility.ensureSystemCaption`（新增） | decor + 标题按钮 + 拖拽三个 API 每个 caption 状态只调一次（`captionApplied` 闩锁）;失败返回 false 并回退 `decor='none'`;离开 caption 状态复位闩锁与 `decorVisibleLast` | 消除 PC 模式 12×/17× 重复下发；失败时保留引擎自绘标题条 |
+| ArkTS `WebAbility.applyLayoutFullscreenForMode` | `layoutFullscreenApplied` 值闩锁（仅成功回调里记录），窗口舞台重建时复位 | 同值不重复下发（冷启动 2 次 → 1 次） |
+| ArkTS `AppWindowAdapter.setWindowLimits` | 触摸形态下与上次完全相同的 limits 直接跳过（窗口模式仍全量转发） | 去掉触摸下无意义的重复 limits 与 WMS 拒绝日志 |
+| Docs | `window-state-machine.md` 新增 Round 157 与 4 条不变量 | 规格化"decor 是形态属性、caption 每状态一次" |
+
+**六维审计**
+
+| 维度 | 结论 |
+|---|---|
+| 必要性 | 每条都有日志时间戳与代码调用点对应：801×4、12×move-enabled、limits 重复、layout 重复 |
+| 正确性 | 触摸形态本来就没有系统 caption（状态机 §1/§2），恒 `none` 与既有不变量一致；PC 模式几何判断保留（round 92 的 available-area maximize 仍带 restore 按钮）；caption 失败回退 `none` 保证总有可拖拽的标题条；值闩锁仅在成功回调后置位，失败不抑制重试 |
+| 安全性 | 不新增权限/外部输入；只调本窗口 API；日志只含尺寸/错误码；非 tablet/phone 仍早退；窗口模式行为不变 |
+| 代码质量 | caption 逻辑收敛到单一 `ensureSystemCaption()`；闩锁字段命名与既有 `decorVisibleLast`/`layoutWantCache` 风格一致；旧注释保留历史（round 92 结论）并新增 157 说明 |
+| 架构 | 状态机明确"decor 是形态属性不是几何属性"、"caption API 每状态一次"；与 round 153 的"整屏校正只单发重试"同属"事件风暴治理" |
+| 耗电性 | 消除每事件 2–3 个 WMS 往返（本日志 12×2 + 17 次回调）；无新增定时器/轮询 |
+
+**自查审计**
+
+- R157-1 触摸形态恒 `none` 会不会让自由窗口（若将来触摸下出现）没标题条?
+  触摸形态在状态机里不存在合法浮窗；过渡期浮窗由 round 153 的单发重试 +
+  状态事件兜底拉回整屏，且失败时引擎保留自绘标题条。
+- R157-2 caption 闩锁会不会导致 PC 模式恢复后不再下发?进入 PC 模式时
+  `captionApplied=false`（离开 caption 状态时复位），`ensureSystemCaption()`
+  会重新下发一次；窗口舞台重建也会复位。
+- R157-3 caption 失败回退 `none` 会否导致 PC 模式下没有标题条?本设备 PC 模式
+  下 caption API 成功（日志 47.2xx 有 `OnSetWindowTitleButtonVisible` 成功），
+  只有"即将整屏的过渡期"失败；失败时 `none` 让引擎自绘标题条接管，是更安全
+  的降级。
+- R157-4 `layoutFullscreenApplied` 闩锁会不会漏掉系统重置?系统在模式切换时
+  自己会设 layout-fullscreen（日志 58.737），我们的值与目标不一致时闩锁不阻止
+  调用；窗口舞台重建复位。若系统把值改了而目标未变，理论上会漏一次——目前
+  日志未观察到，列入已知风险。
+- R157-5 limits 去重会不会漏掉 PC 模式所需?窗口模式全量转发，不做去重；
+  重建窗口也走窗口模式路径。
+- R157-6 去重键含 min/max 四边，密度变化时引擎算出的 px 不同（450x282@2.25
+  vs 383x311@1.9125），键不同 → 仍会下发。
+- R157-7 为何不顺手去掉 `GetTitleButtonVisible: device not support` 的 E 日志?
+  该 E 来自 WMS 内部读取标题按钮可见性，由我们调用 setWindowTitleButtonVisible
+  触发；caption 每状态一次后自然从 8 次降到 1–2 次，无需另行处理。
+- R157-8 编译验证:`hvigorw assembleHap` / `BUILD SUCCESSFUL`（见验证），
+  未跑真机。
+
+**验证要点**(真机,触摸模式 + PC 模式)
+
+1. 冷启动/切回触摸:hilog **不得**再出现 `show system caption failed` 与
+   `SetWindowTitleMoveEnabled: The device is not supported`;触摸期间
+   `ohsidian-mode.json` 的 `decor` 恒为 `none`。
+2. PC 模式冷启动/切换:每次进入 caption 状态只应出现 **1 组**
+   `OnSetWindowTitleButtonVisible` + `SetWindowTitleMoveEnabled: enable:1`
+   （旧代码 12 组）。
+3. 触摸形态后台/前台往返:`setWindowLimits` 相同值第二次应出现
+   `setWindowLimits skipped: identical limits in touch form factor`。
+4. 每次进触摸 `SetLayoutFullScreenByApiVersion status 1` 至多 1 次（我们发起）。
+5. PC 模式标题条可拖拽、按钮可点；触摸窗口无标题条且内容铺满（不回归
+   第 107/111/153 轮）。
+
+**未改项/已知风险**
+
+- 密度切换滞后（进 PC 186ms、回触摸 122ms）是系统行为，本轮不补偿；
+  现有 300ms 对账推只兜 viewport。
+- `layoutFullscreenApplied` 与系统侧改动存在理论竞态（R157-4），
+  目前日志未观察到；如出现"该全屏却非全屏"，优先查该闩锁。
+- caption 状态在"窗口模式但整屏"（captionless）时复位闩锁不下发，
+  依赖 WMS 在 maximize/recover 时自己处理 title 按钮；本设备日志未见异常。
+- 文档轮次重号（106/111/153）来自并行会话提交，本轮未重排。
+- 本轮未跑真机；编译为 ArkTS 唯一门。

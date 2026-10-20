@@ -296,6 +296,16 @@ export class WebAbility extends WebBaseAbility {
   // caption shown, false = hidden (maximized/fullscreen). Transition-guard
   // for the per-geometry-event decor calls.
   private decorVisibleLast: boolean | undefined = undefined;
+  // Round 154: true once the window-mode caption (decor + title buttons +
+  // title drag) has been applied for the current caption state. The old code
+  // re-issued setWindowTitleButtonVisible/setWindowTitleMoveEnabled on every
+  // pushSafeAreaInsets() call (12x "SetWindowTitleMoveEnabled: enable:1" for
+  // one PC entry in the 07:39 device log).
+  private captionApplied: boolean = false;
+  // Round 154: last value successfully applied by
+  // setWindowLayoutFullScreen(); a repeated call for the same value is a pure
+  // WMS round-trip (device log shows the same "true" twice per touch entry).
+  private layoutFullscreenApplied: boolean | undefined = undefined;
   // Available-area cache (round 92): Display.getAvailableArea() is
   // ASYNCHRONOUS, but the coversDisplayArea checks run on synchronous
   // geometry-event paths. Refreshed fire-and-forget from the status-change
@@ -590,47 +600,83 @@ export class WebAbility extends WebBaseAbility {
     // caption, not dead background). So fullscreen-like windows no longer
     // get the decor force-hidden; only truly edge-to-edge windows (touch
     // mode, where there is no caption anyway) run without it.
+    // Round 154: decor is a FORM-FACTOR property, not a geometry one. Touch
+    // mode is edge-to-edge by definition; while a pending rect correction
+    // leaves the window floating for a moment, the old geometric check
+    // decided "caption wanted" and called the caption APIs on a device that
+    // cannot show a system caption at all (device log 07:39:58.828-58.866:
+    // show system caption failed 801 x4, SetWindowTitleMoveEnabled not
+    // supported x4). Worse, decor was still written as 'system', so the
+    // renderer hid its own .titlebar and the window had NO title bar and no
+    // drag surface until the rect landed. The caption APIs now run only in
+    // window mode, once per caption state (see ensureSystemCaption).
     let decor: string = 'none';
-    try {
-      // Caption presence is a FULL-DISPLAY question, different from the
-      // insets question above: an available-area-maximized window (this
-      // device's maximize) still shows the caption with its restore button
-      // (device log hasDecor:1), and drawableRect.top correctly carves the
-      // caption out of the viewport - that strip is caption, not dead
-      // background. Only a window covering the WHOLE display is truly
-      // fullscreen and runs without a caption (touch mode).
-      let captionless: boolean = false;
-      if (winObj !== undefined) {
-        const rect = winObj.getWindowProperties().windowRect;
-        const displayClass = display.getDefaultDisplaySync();
-        captionless = rect.width >= displayClass.width &&
-          rect.height >= displayClass.height;
-      }
-      if (winObj !== undefined && !captionless) {
-        try {
-          if (this.decorVisibleLast !== true) {
-            winObj.setWindowDecorVisible(true);
-            this.decorVisibleLast = true;
-          }
-          winObj.setWindowTitleButtonVisible(true, true, true);
-          // Re-enable WMS title-bar dragging: the startup path called
-          // setWindowTitleMoveEnabled(!hideTitleBar) with hideTitleBar=true
-          // (frameless BrowserWindow), which DISABLES the drag capability.
-          // Showing the decor buttons alone does not restore it - dragging
-          // stayed dead ("title bar cannot move the window"). The engine
-          // has no -webkit-app-region implementation either (verified in
-          // libelectron.so: no DraggableRegions interface), so the WMS
-          // caption is the only drag surface and it must always be movable.
-          winObj.setWindowTitleMoveEnabled(true);
-        } catch (captionException) {
-          LogUtil.warn(TAG, 'show system caption failed: ' + JSON.stringify(captionException));
+    if (this.pcModeEnabled) {
+      try {
+        // Caption presence is a FULL-DISPLAY question (round 92): an
+        // available-area-maximized free window still shows the caption with
+        // its restore button; only a whole-display window is captionless.
+        let captionless: boolean = false;
+        if (winObj !== undefined) {
+          const rect = winObj.getWindowProperties().windowRect;
+          const displayClass = display.getDefaultDisplaySync();
+          captionless = rect.width >= displayClass.width &&
+            rect.height >= displayClass.height;
         }
-        decor = 'system';
+        if (winObj !== undefined && !captionless) {
+          if (this.ensureSystemCaption(winObj)) {
+            decor = 'system';
+          }
+        } else {
+          this.captionApplied = false;
+        }
+      } catch (exception) {
+        decor = 'none';
+        this.captionApplied = false;
       }
-    } catch (exception) {
-      decor = 'none';
+    } else if (this.captionApplied) {
+      // Touch form factor: no caption at all. Reset the latch so the next
+      // window-mode entry re-applies it once (the WMS shows the decor itself
+      // on the mode change, but the latch must not claim "already applied").
+      this.captionApplied = false;
+      this.decorVisibleLast = undefined;
     }
     this.writeInsetsToFile(topCss, bottomCss, decor, this.keyboardCss);
+  }
+
+  // Round 154: apply the system caption (decor + title buttons + title drag)
+  // ONCE per caption state. These are WMS round-trips that also push
+  // title-button visibility to ArkUI; pushSafeAreaInsets() runs on every
+  // geometry/inset/status event (ten times in the 27 s device log), so
+  // re-issuing them per event is pure churn. Returns false when the device
+  // rejects the caption (this tablet answers 801), so the caller can keep
+  // decor='none' and let the renderer keep its own .titlebar as drag surface.
+  private ensureSystemCaption(winObj: window.Window): boolean {
+    if (this.captionApplied) {
+      return true;
+    }
+    try {
+      if (this.decorVisibleLast !== true) {
+        winObj.setWindowDecorVisible(true);
+        this.decorVisibleLast = true;
+      }
+      winObj.setWindowTitleButtonVisible(true, true, true);
+      // Re-enable WMS title-bar dragging: the startup path called
+      // setWindowTitleMoveEnabled(!hideTitleBar) with hideTitleBar=true
+      // (frameless BrowserWindow), which DISABLES the drag capability.
+      // Showing the decor buttons alone does not restore it - dragging
+      // stayed dead ("title bar cannot move the window"). The engine
+      // has no -webkit-app-region implementation either (verified in
+      // libelectron.so: no DraggableRegions interface), so the WMS
+      // caption is the only drag surface and it must always be movable.
+      winObj.setWindowTitleMoveEnabled(true);
+      this.captionApplied = true;
+      return true;
+    } catch (captionException) {
+      LogUtil.warn(TAG, 'show system caption failed: ' + JSON.stringify(captionException));
+      this.captionApplied = false;
+      return false;
+    }
   }
 
   // Read-modify-write for ohsidian-mode.json. GLOBAL fields (systemMode,
@@ -2216,6 +2262,9 @@ export class WebAbility extends WebBaseAbility {
       clearTimeout(this.fullscreenRetryTimer);
       this.fullscreenRetryTimer = -1;
     }
+    // Round 154: a rebuilt stage has no caption/layout state applied yet.
+    this.captionApplied = false;
+    this.layoutFullscreenApplied = undefined;
     // Round 102: every window-stage setup start counts as a FIRST sync again
     // (onWindowStageDestroy -> onWindowStageCreate can happen on the same
     // ability instance: display/casting switches, window-stage rebuild). The
@@ -3162,9 +3211,17 @@ export class WebAbility extends WebBaseAbility {
       return;
     }
     const want: boolean = !this.pcModeEnabled;
+    // Round 154: dedupe. A cold start requests layout-fullscreen=true twice
+    // (boot sync + the loadContent re-assert) - device log 07:39:32.063 and
+    // .132 both land as SetLayoutFullScreenByApiVersion status 1. The value
+    // is latched only after a successful apply.
+    if (this.layoutFullscreenApplied === want) {
+      return;
+    }
     try {
       this.mainWindow.setWindowLayoutFullScreen(want)
         .then(() => {
+          this.layoutFullscreenApplied = want;
           LogUtil.info(TAG, 'layout fullscreen ' + want + ' applied for pcMode=' + this.pcModeEnabled);
         })
         .catch((err: BusinessError) => {

@@ -74,6 +74,11 @@ export class AppWindowAdapter extends BaseAdapter {
   // Engine window ids are monotonically allocated per process, so entries never
   // need recycling.
   private closingWindows: Set<string> = new Set<string>();
+  // Round 154: last limits requested by the engine (min-max tuple). Used to
+  // drop identical repeats in the touch form factor, where WMS ignores the
+  // limits anyway (device log 07:39:36.951 and 07:39:59.646 both requested
+  // 450x282 and both produced "could not update new size").
+  private lastLimitsKey: string = '';
 
   constructor(
     @inject(AbilityManager) abilityManager: AbilityManager,
@@ -818,11 +823,29 @@ export class AppWindowAdapter extends BaseAdapter {
         maxHeight: maxHeight === 0 ? maxHeight : maxHeight + xComTop + xComBottom,
       };
 
+      // Round 154: drop identical repeats in the touch form factor. The
+      // limits cannot resize a FULL_SCREEN window (round 106 P2-5 kept the
+      // call for the state it carries), but an identical repeat carries no
+      // new state - the device log shows the same 450x282 requested twice
+      // (07:39:36.951 on backgrounding, 07:39:59.646 on the next
+      // backgrounding) with WMS answering "could not update new size" both
+      // times. Values still change with density (383x311 @1.9125 in window
+      // mode in the same log), so a mode/density transition still applies.
+      // Window-mode calls are always forwarded: a re-created window has
+      // default limits and must receive the engine's values again.
+      const limitsKey: string = windowLimits.minWidth + 'x' + windowLimits.minHeight +
+        '-' + windowLimits.maxWidth + 'x' + windowLimits.maxHeight;
+      if (this.isTouchFormFactorStrict() && limitsKey === this.lastLimitsKey) {
+        LogUtil.info(TAG, 'setWindowLimits skipped: identical limits in touch form factor (' +
+          limitsKey + ')');
+        return;
+      }
+      this.lastLimitsKey = limitsKey;
+
       windowClass.setWindowLimits(windowLimits)
         .catch((err: BusinessError) => {
           LogUtil.error(TAG, 'Failed to change the window limits. Cause: ' + JSON.stringify(err));
-        });
-    } catch (exception) {
+        });    } catch (exception) {
       LogUtil.error(TAG, 'change the window limits exception. Cause:' + JSON.stringify(exception));
     }
   }
