@@ -376,10 +376,21 @@ export class AppWindowAdapter extends BaseAdapter {
     }
     let color = new ArrayBuffer(0);
 
+    // Touch mode runs single-window, so a new vault window created STARTUP_HIDE
+    // leaves the app with NO visible window for the 1-2 s the page takes to
+    // load; the system fills that gap with its "app leaves, icon flies home"
+    // exit animation (the flash reported when switching vaults). Showing the
+    // start window immediately keeps a window on screen the whole time - the
+    // splash colour covers the load instead of the launcher animation.
+    const touchFullscreen: boolean = deviceInfo.deviceType === 'tablet' && !this.isTabletPcMode();
+    const startupVisibility: contextConstant.StartupVisibility =
+      (param.show || touchFullscreen) ? contextConstant.StartupVisibility.STARTUP_SHOW :
+        contextConstant.StartupVisibility.STARTUP_HIDE;
+
     const launch = (icon: image.PixelMap | undefined): void => {
       let options: StartOptions = {
         processMode: contextConstant.ProcessMode.ATTACH_TO_STATUS_BAR_ITEM,
-        startupVisibility: param.show ? contextConstant.StartupVisibility.STARTUP_SHOW : contextConstant.StartupVisibility.STARTUP_HIDE,
+        startupVisibility: startupVisibility,
         windowLeft: outerLeft,
         windowTop: outerTop,
         windowWidth: widthDip,
@@ -400,7 +411,7 @@ export class AppWindowAdapter extends BaseAdapter {
       // WebAbility tracks (window_pcmode_switch_status): 'false' on a
       // tablet means touch mode → launch fullscreen. PC mode / 2in1 keep
       // the desktop-window behavior.
-      if (deviceInfo.deviceType === 'tablet' && !this.isTabletPcMode()) {
+      if (touchFullscreen) {
         options.windowMode = AbilityConstant.WindowMode.WINDOW_MODE_FULLSCREEN;
         options.windowLeft = 0;
         options.windowTop = 0;

@@ -802,6 +802,11 @@ export class WebAbility extends WebBaseAbility {
           'insetsBottom': bottomCss,
           'decor': decor,
           'keyboard': keyboardCss,
+          // The renderer's requested native overlay must be matched to the
+          // same ArkUI page. cfg.windows is keyed by OHOS window id, which is
+          // NOT Index.ets's xcomponentId; publish the ArkUI identity here so
+          // the request can carry both and never migrate between windows.
+          'xcomponentId': this.xcomponentId,
         };
         windows['' + winId] = entry;
         cfg['windows'] = windows;
@@ -2603,6 +2608,7 @@ export class WebAbility extends WebBaseAbility {
 
     const para: Record<string, Object | string[] | IUpdateStyle> = {
       'xcomponentId': this.xcomponentId,
+      'originWindowId': this.originWindowId,
       'startUri': this.startUri,
       'electronRelaunchArgs': this.electronRelaunchArgs,
       'updateStyle': {

@@ -327,3 +327,64 @@ setTimeout(__ohTrashPurgeOnce,60000);
    60s and long-running background sessions that never restart. */
 try{require("electron").app.on("will-quit",function(){try{__ohTrashPurgeOnce()}catch(e){}})}catch(e){}
 }catch(e){}})();/*OHSIDIAN-IPC-GUARD-END*/
+;(function(){try{
+/* Touch mode is single-window by design, and the engine's vault-open listener
+   always creates a NEW window (one OHOS mission per ability). Closing the old
+   vault window AFTER that new window is on screen makes the system play its
+   "app leaves, the icon flies home" exit animation over the switch - the flash
+   the user reports when switching vaults. Close the old windows HERE instead:
+   ipcMain listeners run in registration order and this patch is prepended to
+   main.js, so this fires BEFORE the engine creates the new window - while the
+   vault chooser (same app, still on screen) is the visible window. The app
+   therefore never loses its last visible window, so no exit animation is
+   drawn; the chooser then closes itself onto the freshly created window.
+   Desktop/PC mode is NOT touched (multi-window behaviour stays). */
+if(globalThis.__ohsidianVaultReap)return;globalThis.__ohsidianVaultReap=true;
+var __vrEl=require("electron"),__vrFs=require("fs"),__vrPath=require("path");
+var __vrTouch=function(){
+  try{
+    var ud=__vrEl.app.getPath("userData");
+    var cfg=JSON.parse(__vrFs.readFileSync(__vrPath.join(ud,"ohsidian-mode.json"),"utf8"));
+    return !!(cfg&&cfg.systemMode==="touch");
+  }catch(e){return false}
+};
+var __vrSenderWindow=function(ev){
+  try{
+    var BW=__vrEl.BrowserWindow;
+    if(BW&&BW.fromWebContents&&ev&&ev.sender){
+      var w=BW.fromWebContents(ev.sender);
+      if(w)return w;
+    }
+  }catch(e){}
+  try{
+    var all=__vrEl.BrowserWindow.getAllWindows();
+    for(var i=0;i<all.length;i++){
+      if(all[i].webContents&&ev&&ev.sender&&all[i].webContents.id===ev.sender.id)return all[i];
+    }
+  }catch(e){}
+  return null;
+};
+__vrEl.ipcMain.on("vault-open",function(ev){
+  try{
+    if(!__vrTouch())return;
+    var self=__vrSenderWindow(ev);
+    var all=__vrEl.BrowserWindow.getAllWindows();
+    var killed=0;
+    for(var i=0;i<all.length;i++){
+      var w=all[i];
+      try{
+        if(self&&w.id===self.id)continue;
+        var u=(w.webContents&&w.webContents.getURL)?String(w.webContents.getURL()):"";
+        if(/starter\.html|help|sandbox|devtools/i.test(u))continue;
+        if(w.isDestroyed&&w.isDestroyed())continue;
+        /* destroy(): immediate - close() defers the real destroy by 3 s in the
+           engine ("close" handler setTimeout), which is what previously left
+           the old window on screen behind the switch. */
+        if(w.destroy)w.destroy();else w.close();
+        killed++;
+      }catch(e){}
+    }
+    try{console.log("[OHSidian] vault-open: closed "+killed+" old vault window(s) behind the chooser")}catch(e){}
+  }catch(e){}
+});
+}catch(e){}})();/*OHSIDIAN-MAIN-PATCH-END*/

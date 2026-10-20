@@ -18,6 +18,12 @@
         "value": "1949235012553433536"
       }
     ],
+    "requestPermissions": [
+      {
+        // Loopback IPC between the renderer and the native video overlay.
+        "name": "ohos.permission.INTERNET"
+      }
+    ],
     "abilities": [
       {
         "name": "EntryAbility",
