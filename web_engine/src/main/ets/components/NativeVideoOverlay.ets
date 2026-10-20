@@ -58,6 +58,8 @@ interface TrackProbe {
   xfer: number;
   // >1 stts entry means variable frame rate.
   sttsEntries: number;
+  // stss box: number of sync samples (keyframes) -> GOP = samples/keyframes.
+  keyframes: number;
   // btrt box: bufferSizeDB, maxBitrate, avgBitrate (video track bitrate).
   // Many encoders leave avgBitrate at 0, so the max is kept as a fallback.
   vbr: number;
@@ -188,6 +190,8 @@ export struct NativeVideoOverlay {
   @State private metaVfr: boolean = false;
   @State private metaVideoBps: number = 0;
   @State private metaVideoMax: number = 0;
+  @State private metaKeyframes: number = 0;
+  @State private metaSamples: number = 0;
   @State private metaAudio: string = '';
   @State private controlsVisible: boolean = false;
   @State private hovering: boolean = false;
@@ -245,7 +249,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v155');
+    LogUtil.info(TAG, 'transport=avplayer v156');
   }
 
   aboutToDisappear(): void {
@@ -287,6 +291,8 @@ export struct NativeVideoOverlay {
     this.metaVfr = false;
     this.metaVideoBps = 0;
     this.metaVideoMax = 0;
+    this.metaKeyframes = 0;
+    this.metaSamples = 0;
     this.scheduleMediaProbe();
     if (!this.started || this.released) {
       return;
@@ -1429,6 +1435,11 @@ export struct NativeVideoOverlay {
           out.ch = this.be16(b, e + 24);
           out.rate = this.be32(b, e + 32) >>> 16;
         }
+      } else if (type === 'stss') {
+        const n: number = this.be32(b, body + 4);
+        if (n > 0 && n < 100000000) {
+          out.keyframes = n;
+        }
       } else if (type === 'stts') {
         const n: number = this.be32(b, body + 4);
         out.sttsEntries = n;
@@ -1514,7 +1525,7 @@ export struct NativeVideoOverlay {
           const tp: TrackProbe = {
             kind: '', entry: '', ts: 0, dur: 0, samples: 0, delta: 0,
             w: 0, h: 0, ch: 0, rate: 0, depth: 0, chroma: -1, profile: 0, level: 0,
-            prim: 0, xfer: 0, sttsEntries: 0, vbr: 0, vbrMax: 0
+            prim: 0, xfer: 0, sttsEntries: 0, vbr: 0, vbrMax: 0, keyframes: 0
           };
           this.probeTrack(b, p + 8, be, tp);
           if (tp.kind === 'vide') {
@@ -1535,6 +1546,8 @@ export struct NativeVideoOverlay {
             this.metaVfr = tp.sttsEntries > 1;
             this.metaVideoBps = tp.vbr;
             this.metaVideoMax = tp.vbrMax;
+            this.metaKeyframes = tp.keyframes;
+            this.metaSamples = tp.samples;
             if (tp.delta > 0) {
               this.metaFps = tp.ts / tp.delta;
             }
@@ -1615,6 +1628,14 @@ export struct NativeVideoOverlay {
     return '';
   }
 
+  private gopLabel(): string {
+    if (!(this.metaKeyframes > 0) || !(this.metaSamples > 0)) {
+      return '';
+    }
+    const gop: number = this.metaSamples / this.metaKeyframes;
+    return this.metaKeyframes + ' 帧 / GOP ' + (Math.round(gop * 10) / 10);
+  }
+
   private sizeLabel(): string {
     if (!(this.fileLength > 0)) {
       return '大小 n/a';
@@ -1627,13 +1648,13 @@ export struct NativeVideoOverlay {
     const sec: number = this.durationMs / 1000;
     if (this.metaVideoBps > 0) {
       const v: number = this.metaVideoBps / 1000000;
-      return '视频 ' + v.toFixed(v >= 10 ? 0 : 2) + ' Mbps';
+      return v.toFixed(v >= 10 ? 0 : 2) + ' Mbps';
     }
     // Common case: the encoder writes avgBitrate=0. The peak is still real, so
     // label it as a peak instead of pretending it is an average.
     if (this.metaVideoMax > 0) {
       const m: number = this.metaVideoMax / 1000000;
-      return '视频峰值 ' + m.toFixed(m >= 10 ? 0 : 2) + ' Mbps';
+      return '峰值 ' + m.toFixed(m >= 10 ? 0 : 2) + ' Mbps';
     }
     if (!(sec > 0) || !(this.fileLength > 0)) {
       return '码率 n/a';
@@ -1682,6 +1703,32 @@ export struct NativeVideoOverlay {
   // px per grid unit for a glyph meant to be `size` vp across on a 30-unit grid.
   private pathScaleFor(size: number, grid: number): number {
     return vp2px(1) * size / grid;
+  }
+
+  @Builder
+  private metaSection(title: string) {
+    Text(title)
+      .fontSize(9)
+      .fontColor(this.theme.faint)
+      .letterSpacing(1.2)
+      .margin({ top: 9, bottom: 1 })
+  }
+
+  @Builder
+  private metaRow(label: string, value: string) {
+    Row() {
+      Text(label)
+        .fontSize(9)
+        .fontColor(this.theme.faint)
+        .width(50)
+      Text(value)
+        .fontSize(10)
+        .fontColor(this.theme.text)
+        .layoutWeight(1)
+    }
+    .width('100%')
+    .margin({ top: 2 })
+    .alignItems(VerticalAlign.Top)
   }
 
   @Builder
@@ -1866,48 +1913,56 @@ export struct NativeVideoOverlay {
       }
 
       if (this.showDebug) {
-        // EASTER EGG: long-press the timecode. Everything here is parsed out of
-        // the real MP4 container (probeMedia), so the panel is useful on a device
-        // with no hdc. It is a CARD, not a strip: sized to its content with a
-        // max width. A Divider used to sit inside, and a Divider always expands
-        // to the parent's full width - that is what turned the card into a bar.
+        // EASTER EGG: long-press the timecode. Everything here is parsed from
+        // the real MP4 container (probeMedia). Laid out as a diagnostics table -
+        // section label + label/value rows - instead of five loose lines: the
+        // numbers line up, the eye can scan, and it still fits in a narrow card
+        // (maxWidth 280, never a full-width strip).
         Column() {
           Column() {
-            Text((this.metaCodec ? this.metaCodec : '视频') +
-              (this.profileLabel() ? ' ' + this.profileLabel() : '') +
-              (this.metaW > 0 ? ' · ' + this.metaW + '×' + this.metaH : ''))
-              .fontSize(12)
-              .fontColor(this.theme.text)
-              .fontWeight(FontWeight.Medium)
-            Text((this.depthLabel() ? this.depthLabel() + ' · ' : '') +
-              (this.hdrLabel() ? this.hdrLabel() + ' · ' : '') +
-              (this.metaFps > 0 ? this.metaFps.toFixed(2) + ' fps' : '帧率 n/a') +
-              (this.metaVfr ? ' · VFR' : ''))
-              .fontSize(10)
-              .fontColor(this.theme.muted)
-              .margin({ top: 2 })
-            Text(this.metaAudio ? this.metaAudio : '音轨 n/a')
-              .fontSize(10)
-              .fontColor(this.theme.muted)
-              .margin({ top: 1 })
-            Text(this.formatTime(this.durationMs) + ' · ' + this.sizeLabel() + ' · ' +
-              this.bitrateLabel())
-              .fontSize(10)
-              .fontColor(this.theme.muted)
-              .margin({ top: 1 })
+            Row() {
+              Text((this.metaCodec ? this.metaCodec : '视频') +
+                (this.profileLabel() ? ' ' + this.profileLabel() : ''))
+                .fontSize(12)
+                .fontColor(this.theme.text)
+                .fontWeight(FontWeight.Medium)
+              Blank()
+              Text(this.metaW > 0 ? this.metaW + '×' + this.metaH : '')
+                .fontSize(11)
+                .fontColor(this.theme.muted)
+            }
+            .width('100%')
+
+            this.metaSection('画面')
+            this.metaRow('帧率', this.metaFps > 0 ?
+              (this.metaFps.toFixed(2) + ' fps' + (this.metaVfr ? ' · VFR' : '')) : 'n/a')
+            this.metaRow('色彩', (this.depthLabel() ? this.depthLabel() : 'n/a') +
+              (this.hdrLabel() ? ' · ' + this.hdrLabel() : ''))
+            this.metaRow('码率', this.bitrateLabel())
+            if (this.gopLabel()) {
+              this.metaRow('关键帧', this.gopLabel())
+            }
+
+            this.metaSection('音频')
+            this.metaRow('音轨', this.metaAudio ? this.metaAudio : '无')
+
+            this.metaSection('文件')
+            this.metaRow('时长', this.formatTime(this.durationMs))
+            this.metaRow('大小', this.sizeLabel())
+
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v155')
+              ' · k=' + this.u().toFixed(3) + ' · v156')
               .fontSize(9)
               .fontColor(this.theme.faint)
-              .margin({ top: 6 })
+              .margin({ top: 9 })
           }
           .alignItems(HorizontalAlign.Start)
-          .constraintSize({ maxWidth: 260 })
-          .padding({ left: 12, right: 14, top: 9, bottom: 9 })
+          .constraintSize({ maxWidth: 280 })
+          .padding({ left: 12, right: 14, top: 10, bottom: 10 })
           .backgroundColor(this.theme.panel)
           .borderRadius(this.theme.radiusM)
           .border({ width: 1, color: this.theme.border })
-          .shadow({ radius: 12, color: '#33000000', offsetX: 0, offsetY: 4 })
+          .shadow({ radius: 16, color: '#33000000', offsetX: 0, offsetY: 6 })
         }
         .width('100%')
         .height('100%')
