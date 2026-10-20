@@ -226,6 +226,8 @@ export struct NativeVideoOverlay {
   private resizeTimer: number = -1;
   private probeTimer: number = -1;
   private coverTimer: number = -1;
+  private lastRebuildW: number = 0;
+  private lastRebuildH: number = 0;
   private hideTimer: number = -1;
   private hintTimer: number = -1;
   private tapTimer: number = -1;
@@ -249,7 +251,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v158');
+    LogUtil.info(TAG, 'transport=avplayer v159');
   }
 
   aboutToDisappear(): void {
@@ -422,9 +424,20 @@ export struct NativeVideoOverlay {
     if (this.released) {
       return;
     }
-    if (this.lastRetryAt > 0 && Date.now() - this.lastRetryAt < 500) {
+    // Dedupe the SAME box only. XComponent.onLoad and the area debounce describe
+    // one switch, so a second call for the same box is a duplicate; a DIFFERENT
+    // box must always rebuild. A time-only guard swallowed the rebuild after
+    // leaving fullscreen (the two toggles are usually <500ms apart), the surface
+    // kept the fullscreen size and the cover sat there until its safety timeout -
+    // the "正在适配… stays for ages" report.
+    const sameBox: boolean = this.lastRebuildW > 0 && this.lastRebuildH > 0 &&
+      Math.abs(this.lastAreaW - this.lastRebuildW) < 4 &&
+      Math.abs(this.lastAreaH - this.lastRebuildH) < 4;
+    if (sameBox && this.lastRetryAt > 0 && Date.now() - this.lastRetryAt < 500) {
       return;
     }
+    this.lastRebuildW = this.lastAreaW;
+    this.lastRebuildH = this.lastAreaH;
     this.retryCount = 0;
     this.resizeCover = true;
     this.retry(reason);
@@ -1120,8 +1133,14 @@ export struct NativeVideoOverlay {
     if (!(w > 0) || !(h > 0)) {
       return;
     }
-    const changed: boolean = this.lastAreaW > 0 && this.lastAreaH > 0 &&
-      (Math.abs(w - this.lastAreaW) > 2 || Math.abs(h - this.lastAreaH) > 2);
+    const oldW: number = this.lastAreaW;
+    const oldH: number = this.lastAreaH;
+    const changed: boolean = oldW > 0 && oldH > 0 &&
+      (Math.abs(w - oldW) > 2 || Math.abs(h - oldH) > 2);
+    // A fullscreen toggle / mode switch is a large discrete jump and should not
+    // wait for the "window drag settled" delay; a slow drag still wants it.
+    const big: boolean = oldW > 1 && oldH > 1 &&
+      (Math.abs(w - oldW) / oldW > 0.08 || Math.abs(h - oldH) / oldH > 0.08);
     this.lastAreaW = w;
     this.lastAreaH = h;
     if (!changed || this.player === null) {
@@ -1145,7 +1164,7 @@ export struct NativeVideoOverlay {
         // budget and dedupes against the onLoad trigger of the same switch.
         this.retryResize('surface area');
       }
-    }, 320);
+    }, big ? 120 : 320);
   }
 
   // Density is decided by the POINTER HARDWARE, not by the renderer: ArkUI's
@@ -1966,7 +1985,7 @@ export struct NativeVideoOverlay {
             this.metaRow('大小', this.sizeLabel())
 
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v158')
+              ' · k=' + this.u().toFixed(3) + ' · v159')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 9 })
@@ -2279,7 +2298,7 @@ export struct NativeVideoOverlay {
           this.coverTimer = setTimeout(() => {
             this.coverTimer = -1;
             this.resizeCover = false;
-          }, 2500);
+          }, 1200);
         }
       }
       // Surface size follows the aspect, so a window/fullscreen change still
