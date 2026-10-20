@@ -2327,3 +2327,18 @@ HEVC Main10                      1920×1080
 坐标侧保持不变（仍是 px，乘 \pathScaleFor\）。
 
 **验证**：\BUILD SUCCESSFUL in 18 s 834 ms\；HAP **222012758 B**，SHA-256 \$sha\；字节码命中 \157\，\156\ 已不存在。
+## 第 158 轮 (2026-10-20): 全屏/关闭图标单独降档 + 仓库里单独打开的视频走原生
+
+**① 全屏/关闭图标偏大**
+`ICON_MAXIMIZE / ICON_MINIMIZE / ICON_CLOSE` 的墨迹跨度是 **2..28（26/30 = 87%）**，而播放/音量只有 24–26 单位；同样盒子下它们的**视觉重量更大**。
+新增 `glyphSizeTiny()` = `0.0172W` 夹 [10,15]（@700 → **12.0vp**，原 14.0），只用于这两个键；**格宽仍是 36vp**，命中区不变。
+
+**② 仓库里单击视频文件不进入原生播放器**
+`ohsidianResolveMediaPath()` 只有两条路：`.internal-embed` 的 `src`、或 `file://` 开头的 `src`。而**单击文件树里的视频**打开的是 Obsidian 的**媒体视图**，不是内嵌块——没有 `.internal-embed`，`src` 也不是 `file://`，于是解析返回 null，整个原生路线被跳过。
+新增第三条路：从最近的 `[data-path]` 容器（`.workspace-leaf-content` / `.view-content`）取**仓库相对路径**，再经 `vault.getAbstractFileByPath` + `adapter.getFullPath` 转绝对路径。
+
+**验证**
+- `node --check scripts/patches/touch-mode.js` OK；`node scripts/repack-b-native-asar.mjs` → **25,949,275 B**（原 25,948,112，+1,163 = 新增补丁文本）；
+- `BUILD SUCCESSFUL in 33 s 294 ms`；HAP **222,012,452 B**，SHA-256 `85D9729C84DB893FB444C7E416FCF4C014B9894B65BD77B50E81FA38F784F022`；
+- 内嵌 asar **8DBEBB33…EDA1A8B8**（本轮**变了**，因为改了渲染层补丁）；
+- 字节码命中 `v158`、`glyphSizeTiny`；asar 内命中 `data-path`。

@@ -683,6 +683,20 @@ function ohsidianResolveMediaPath(el){
         }
       }
     }
+    /* Standalone media view: clicking a video file in the vault opens a media
+       leaf instead of an embed, so there is no ".internal-embed" to read the
+       vault-relative src from and the whole native route was skipped. Those
+       leaves carry "data-path" on the container (workspace-leaf-content /
+       view-content), which is the vault-relative path of the opened file. */
+    var holder=(el&&el.closest)?el.closest("[data-path]"):null;
+    var holderPath=(holder&&holder.getAttribute)?holder.getAttribute("data-path"):"";
+    if(holderPath&&v&&typeof v.getAbstractFileByPath==="function"){
+      var lf=null;
+      try{lf=v.getAbstractFileByPath(holderPath)}catch(eMv){}
+      if(lf&&v.adapter&&typeof v.adapter.getFullPath==="function"){
+        try{return v.adapter.getFullPath(lf.path)}catch(eMv2){}
+      }
+    }
     var src=(el&&el.currentSrc)||(el&&el.src)||"";
     if(src.indexOf("file://")===0){
       var raw=src.substring("file://".length);

@@ -249,7 +249,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v157');
+    LogUtil.info(TAG, 'transport=avplayer v158');
   }
 
   aboutToDisappear(): void {
@@ -1250,6 +1250,13 @@ export struct NativeVideoOverlay {
     return this.ratioOf(0.020, 12, 18) * this.u();
   }
 
+  // Maximise/minimise and close carry ink that spans nearly the whole 30-unit
+  // grid (2..28), while play/volume sit around 24-26 units. At the same box
+  // size they therefore read visibly heavier, so they get one notch smaller.
+  private glyphSizeTiny(): number {
+    return this.ratioOf(0.0172, 10, 15) * this.u();
+  }
+
   private btnSizeRight(): number {
     return this.ratioOf(0.0515, 30, 44) * this.u();
   }
@@ -1959,7 +1966,7 @@ export struct NativeVideoOverlay {
             this.metaRow('大小', this.sizeLabel())
 
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v157')
+              ' · k=' + this.u().toFixed(3) + ' · v158')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 9 })
@@ -2188,9 +2195,9 @@ export struct NativeVideoOverlay {
           .accessibilityText(this.muted ? '取消静音' : '静音')
           Column() {
             if (this.fullscreen) {
-              this.glyph(ICON_MINIMIZE, this.glyphSizeRight(), this.theme.text, 1)
+              this.glyph(ICON_MINIMIZE, this.glyphSizeTiny(), this.theme.text, 1)
             } else {
-              this.glyph(ICON_MAXIMIZE, this.glyphSizeRight(), this.theme.text, 1)
+              this.glyph(ICON_MAXIMIZE, this.glyphSizeTiny(), this.theme.text, 1)
             }
           }
           .width(this.btnSizeRight())
@@ -2200,7 +2207,7 @@ export struct NativeVideoOverlay {
           .onClick(() => this.toggleFullscreen())
           .accessibilityText(this.fullscreen ? '退出全屏' : '全屏')
           Column() {
-            this.glyph(ICON_CLOSE, this.glyphSizeRight(), this.theme.muted, 1)
+            this.glyph(ICON_CLOSE, this.glyphSizeTiny(), this.theme.muted, 1)
           }
           .width(this.btnSizeRight())
           .height(this.barHeight())
