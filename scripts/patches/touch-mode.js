@@ -1584,6 +1584,11 @@ function ohsidianStartNativeTracking(el,srcPath,identity,seq){
             st.writeFails++;
           }
         }
+      }else if(!st.opened){
+        /* Hold heartbeats until ArkTS acknowledges the open. Writing 'rect' now
+           races the un-acked 'open' on the file channel (one shared JSON file),
+           so the open is overwritten and the overlay never appears - the
+           "close reason=noack" failure. */
       }else if(!st.lastRect||!ohsidianNativeRectEqual(st.lastRect,g)){
         // IPC can carry every display frame; the file fallback stays at 40ms
         // so a degraded path does not hammer the disk.
@@ -1596,7 +1601,7 @@ function ohsidianStartNativeTracking(el,srcPath,identity,seq){
             st.writeFails++;
           }
         }
-      }else if(now-st.lastThemeAt>=1200){
+      }else if(st.opened&&now-st.lastThemeAt>=1200){
         // Geometry is stable, but the user may have switched theme. A rect
         // request is also the only carrier of the theme payload; send a
         // low-rate heartbeat so CSS variables reach the native controls.

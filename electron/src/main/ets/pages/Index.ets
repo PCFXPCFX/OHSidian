@@ -239,6 +239,10 @@ struct Index {
     try {
       if (!req || typeof req.seq !== 'number' || !(req.seq > 0) ||
         req.seq <= this.lastNativeSeq || req.seq > Date.now() + 5000) {
+        // Silent rejections used to be indistinguishable from "the renderer
+        // never sent anything" - say which one it is.
+        console.info('NativeVideoIpc', 'rejected seq=' + (req ? req.seq : 'null') +
+          ' last=' + this.lastNativeSeq + ' action=' + (req ? req.action : '?'));
         return;
       }
       // The request file is shared by every Electron window. Accept only the
@@ -256,6 +260,8 @@ struct Index {
       }
       if (reqXid && this.xcomponentId) {
         if (reqXid !== this.xcomponentId) {
+          console.info('NativeVideoIpc', 'rejected identity req=' + reqXid +
+            ' mine=' + this.xcomponentId);
           return;
         }
       } else if (req.windowId && this.originWindowId > 0) {
@@ -328,6 +334,8 @@ struct Index {
         return;
       }
       if (!req.path || !req.rect || !(req.rect.width > 0) || !(req.rect.height > 0)) {
+        console.info('NativeVideoIpc', 'rejected open: path=' + (req.path ? 'ok' : 'empty') +
+          ' rect=' + JSON.stringify(req.rect));
         return;
       }
       this.nativeRequest = req;

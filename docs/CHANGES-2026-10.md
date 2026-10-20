@@ -2584,3 +2584,26 @@ ets/modules.abc → v168 ×2（v167 已不存在）
 \\\
 
 **验证**：\BUILD SUCCESSFUL in 28 s 757 ms\；HAP **222,002,544 B**，SHA-256 \91DE72AC47DDA0318E276DD33A16E38FE6C5E3334AEC596431966242CD9C784D\。
+## 第 169 轮 (2026-10-20): 无法播放的根因——rect 心跳把未 ack 的 open 覆盖掉了
+
+**现象（12:49 日志）**
+1. 整段**没有一条 \NativeVideoOverlay\ 日志**（正常有 \	ransport=avplayer\）⇒ 覆盖层从未被创建；
+2. \NativeVideoIpc close accepted reason=noack\ 出现三次 ⇒ 渲染层发出 \open\ 后 **1.2s（15×80ms）** 没等到 ack，自行关闭；
+3. \h.vdec\ 起两次又立刻释放（720p / 1080p 10bit）⇒ 那是**缩略图取帧**，不是播放。
+
+**机理（读代码得到）**
+\ohsidianStartNativeTracking()\ 一开始就启动 rAF 循环，每帧（≈16ms）发一次 \ect\；而 \open\ 要等 ack 最多 1.2s。**在这 1.2 秒里，60fps 的 \ect\ 不断覆盖同一条请求通道**——文件通道是**一个共享 JSON**，Index 每 200ms 轮询读到的都是最新的 \ect\，\open\ 被直接跳过后又因 \seq <= lastNativeSeq\ 被判为过期。于是：Index 从未接受 open → 不写 ack → 渲染层 \
+oack\ 关闭。
+
+**修复**
+| 层 | 改动 |
+|---|---|
+| 渲染层 | **ack 之前不发 \ect\ 心跳**（\else if(!st.opened){ /* hold */ }\），1.2s 的主题心跳同样加 \st.opened\ 条件 |
+| Index | 三处静默拒绝改为**带原因日志**：\ejected seq=… last=… action=…\、\ejected identity req=… mine=…\、\ejected open: path=… rect=…\ |
+
+**验证**
+- \
+ode --check scripts/patches/touch-mode.js\ OK；repack → asar **25,951,167 B**；
+- 包内 asar 命中 \!st.opened\、\st.opened&&now-st.lastThemeAt\、"Hold heartbeats until ArkTS acknowledges"；
+- 包内字节码命中 \ejected seq\、\ejected identity\、\ejected open\、\169\（\168\ 已不存在）；
+- \BUILD SUCCESSFUL in 27 s\；HAP **221,997,434 B**，SHA-256 \A9B887FD364B667AE61867624F28275C22000CEC342949C11A276CF9ED934B16\。
