@@ -2690,3 +2690,44 @@ ode --check\ OK；repack → asar **25,952,289 B**；
 - 包内 asar 命中 \ohsidian-native-opened.json\、\xidOk||widOk\；
 - 包内字节码命中 \writeNativeOpenedAckShared\、\170\；
 - \BUILD SUCCESSFUL in 24 s 305 ms\；HAP **222,004,002 B**，SHA-256 \3502D3D208797F047B789AD9EEB7EE39D2D5FAB482B5713A1D5B742FB0CD15D7\。
+## 第 172 轮 (2026-10-20): 审计——上午的 git 行为引入了多少缺陷
+
+### 涉事动作（只有一个）
+
+\git stash push -m "wip(other-workstream): window decor / tablet UI…"\，时间 **11:07:15**，发生在一个被中断的工具调用里（命令已执行，调用被中断）。reflog 证明：**11:10 的 rebase 不是我做的**（32 个 commit 的 pick 由他人完成），我也没有 push / force-push / drop stash。
+
+### 缺陷台账
+
+| # | 缺陷 | git 引入? | 影响 | 状态 |
+|---|---|---|---|---|
+| **B1** | 编译失败 \Module 'web_engine' has no exported member 'NativeVideoOverlay'\ | ✅ 直接 | 11:07–11:14 全部构建失败 | 已修（\5036a6d\，7 分钟） |
+| **B2** | 另一条工作流 **192 行 WIP** 从工作树消失 | ✅ 直接 | 11:07 之后的每个包都少了窗口装饰/平板 UI 改动；与 10:56 那版**不是同一个东西** | **本轮已 apply 恢复（干净）并重建** |
+| **B3** | HAP 压缩未生效（222 MB 而非 120 MB） | ✅ 间接（WIP 里的 \hvigor-config.json5\ 一起被 stash） | 体积翻倍；清缓存后恢复即生效 | 已生效，**需真机回归安装/启动** |
+| **B4** | 提交集不完整（漏两行导出） | ⚠️ 更早的提交纪律问题，stash 只是**暴露** | 干净检出我的提交无法编译 | 已修（\5036a6d\） |
+| B5 | 仓库状态损坏（rebase 中断/冲突残留） | ❌ 未发生 | — | \.git\ 无 rebase-merge/apply/MERGE_HEAD，reflog 连续 |
+| B6 | 数据丢失 | ❌ 未发生 | — | stash 完整保存 192 行，已 apply，stash 仍保留 |
+
+**直接引入：2 个（B1 硬中断 + B2 功能缺失）；间接：1 个（B3）；暴露旧缺陷：1 个（B4）。数据损失 0，仓库状态未损坏。**
+
+### 不属于 git 的（避免错误归因）
+
+以下三个是**代码缺陷**，与 git 行为无关：
+- \ect\ 心跳覆盖未 ack 的 \open\（修于 \6995a90\）
+- ack 文件名两侧字段不一致（修于 \ 6f97f1\）
+- \probeMedia()\ 自我递归（修于 \ 3f62d9\）
+
+把"打不开视频"归因给 git 是错的。
+
+### 处置与验证
+
+1. \git stash apply "stash@{0}"\ → **6 个文件全部恢复，零冲突**；stash 仍保留以备回退；
+2. 清 \electron/build/.../intermediates/res\（\Failed to delete app_icon.png\ 11204003 是缓存占用，非代码）；
+3. 重建：\BUILD SUCCESSFUL in 28 s 633 ms\；HAP **120,534,845 B**，SHA-256 \A33E429DEF1B2A9903DB06BABBE947DB155A9108BC2777FEE046885112017B85\；
+4. 包内校验：\170\、\writeNativeOpenedAckShared\、asar **25,952,289 B** 且含 \ohsidian-native-opened.json\、\xidOk||widOk\。
+
+### 沉淀（写进流程）
+
+1. **中断的工具调用可能已执行一半**：恢复前必须核对 \git stash list\ / \git status\ / reflog；
+2. **提交集按"我依赖谁"划分**，不按"谁改的"；
+3. **别人在建的 WIP 不属于我的清理范围**，要动先确认归属；
+4. **体积类改动（压缩）会随工作树一起被 stash 带走**，容易被误判为"构建行为变了"。
