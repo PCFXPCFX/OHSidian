@@ -2463,3 +2463,32 @@ XComponent 的尺寸是**按视频宽高比 contain 之后的框**（ideoFrameW
 **代价（如实）**：resize 重建的 ~200–500ms 里，surface 显示的是上一帧或黑，而不是一块带文字的面板。按用户判断，这个观感优于面板。
 
 **验证**：\BUILD SUCCESSFUL in 21 s 871 ms\；HAP **222012381 B**，SHA-256 \$sha\；字节码命中 \164\、\载入中\，\esizeCover\ 与 \正在适配\ 均为 0。
+## 第 165 轮 (2026-10-20): 窗口拖动时视频"不见了又回来"——删掉按窗口尺寸隐藏的机制
+
+**用户**：窗口模式下（视频全屏）调整窗口大小，视频会不见再重来；而且黑→白→黑，很难看。
+
+**代码里的原因**
+\windowSizeChange\ 每触发一次就调 \hideNativeForResize()\ → 覆盖层 \.visibility(Hidden)\。一次拖动连发几十个事件，于是：
+1. 视频**消失**（Overlay 被 Hidden）；
+2. 等"几何变化 + ≥120ms"或 900ms 兜底才**回来**；
+3. 隐藏的那几帧露出的是**网页底色**——浅色主题下是白色 ⇒ **黑(视频)→白(页面)→黑(视频)**。
+
+这套隐藏机制的原始目的只有一个：**模式切换**时不要用旧几何画新布局。但 R161 已经把模式切换改成"直接关闭播放器"，所以它成了**纯负资产**。
+
+**删除清单**（Index.ets）
+| 删除 | 规模 |
+|---|---|
+| \win.on('windowSizeChange', …hideNativeForResize)\ 监听 | 1 行 |
+| \hideNativeForResize()\ | 31 行 |
+| \evealNative()\ | 26 行 |
+| \@State nativeHidden\、\
+ativeHideAt\、\hiddenW/H/Left/Top\、\
+ativeShowTimer\ | 8 行 |
+| \.visibility(nativeHidden ? Hidden : Visible)\ | 1 行 |
+| 各处复位/兜底块 | 2 块 |
+
+现在窗口尺寸变化只做一件事：**rect 心跳更新几何，覆盖层跟着走**。全屏时覆盖层是 \100%\＋纯黑底，所以缩放过程中**没有白帧**，也不再有"消失—回来"。
+
+**验证**：\BUILD SUCCESSFUL in 23 s 714 ms\；HAP **222,008,965 B**，SHA-256 \A7BAFE31ADBD01C98D3E1945DF611D62BA92C3119C7C162BB3D948B2D65A8A79\；Index 源码里 \
+ativeHidden / hideNativeForResize / revealNative / nativeShowTimer / Visibility.Hidden\ **全部为 0**；字节码命中 \165\，\164\、\hideNative\、\
+ativeHidden\ 均不存在。

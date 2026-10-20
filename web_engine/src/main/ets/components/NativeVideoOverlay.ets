@@ -245,7 +245,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v164');
+    LogUtil.info(TAG, 'transport=avplayer v165');
   }
 
   aboutToDisappear(): void {
@@ -1977,7 +1977,7 @@ export struct NativeVideoOverlay {
             this.metaRow('大小', this.sizeLabel())
 
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v164')
+              ' · k=' + this.u().toFixed(3) + ' · v165')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 9 })

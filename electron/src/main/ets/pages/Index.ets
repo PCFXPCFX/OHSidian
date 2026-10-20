@@ -139,17 +139,6 @@ struct Index {
   // The player keeps running but the surface is hidden until a fresh rect from
   // the renderer proves the new layout; otherwise the old frame stays painted
   // at the old coordinates for a few frames.
-  @State private nativeHidden: boolean = false;
-  private nativeHideAt: number = 0;
-  // Geometry captured when we hid. The reveal is gated on the incoming rect
-  // actually differing from this, not just on elapsed time: the renderer can
-  // send a rect with a fresh timestamp but the PRE-switch geometry, and a
-  // time-only gate then revealed the surface in the old place for a frame.
-  private hiddenW: number = 0;
-  private hiddenH: number = 0;
-  private hiddenLeft: number = 0;
-  private hiddenTop: number = 0;
-  private nativeShowTimer: number = -1;
   private nativeWin: window.Window | null = null;
   private nativeBarsHidden: boolean = false;
   private nativePc: number = -1;
@@ -294,7 +283,6 @@ struct Index {
         // exact guard instead of "the video closed by itself".
         this.nativeRequest = null;
         this.nativeFullscreen = false;
-        this.nativeHidden = false;
         this.nativePc = -1;
         this.applySystemBars(false);
         console.info('NativeVideoIpc', 'close accepted reason=' + (req.reason ? req.reason : 'none'));
@@ -308,7 +296,8 @@ struct Index {
         this.nativePointer = req.pointer === true;
         // Mode changes are detected from the request itself: a touch<->window
         // switch may keep the same window size briefly, so windowSizeChange is
-        // not enough. order: detect mode -> hide -> wait for the settled rect.
+        // not enough. A flip CLOSES the player (see closeForModeSwitch): keeping
+        // a surface alive across a density+viewport change never converged.
         const pcMode: number = typeof req.mode === 'number' ? req.mode : -1;
         if (pcMode === 0 || pcMode === 1) {
           const flipped: boolean = this.nativePc !== -1 && this.nativePc !== pcMode;
@@ -326,7 +315,6 @@ struct Index {
         }
         // A mode switch hides the surface (keep decoding); the first rect
         // produced after the relayout settles is what reveals it again.
-        this.revealNative(req);
         if (this.nativeRequest !== null && !this.nativeFullscreen) {
           this.moveNativeRect(req);
         } else if (this.nativeRequest !== null) {
@@ -350,11 +338,6 @@ struct Index {
       // for: clear a hide left over from a mode switch instead of letting the
       // safety net be the only thing that brings the surface back (that was the
       // "opening a video sometimes starts black" report).
-      this.nativeHidden = false;
-      if (this.nativeShowTimer >= 0) {
-        clearTimeout(this.nativeShowTimer);
-        this.nativeShowTimer = -1;
-      }
       if (typeof req.mode === 'number' && (req.mode === 0 || req.mode === 1)) {
         this.nativePc = req.mode;
       }
@@ -990,7 +973,6 @@ struct Index {
     try {
       const win: window.Window = await window.getLastWindow(getContext(this));
       this.nativeWin = win;
-      win.on('windowSizeChange', () => this.hideNativeForResize());
     } catch (e) {
       console.warn('NativeVideoIpc', 'window watch failed: ' + JSON.stringify(e));
     }
@@ -1003,73 +985,9 @@ struct Index {
     }
     this.nativeRequest = null;
     this.nativeFullscreen = false;
-    this.nativeHidden = false;
-    if (this.nativeShowTimer >= 0) {
-      clearTimeout(this.nativeShowTimer);
-      this.nativeShowTimer = -1;
-    }
     this.applySystemBars(false);
     this.notifyNativeClosed();
     console.info('NativeVideoIpc', 'closed for mode switch (touch<->window)');
-  }
-
-  private hideNativeForResize(): void {
-    if (this.nativeRequest === null) {
-      return;
-    }
-    if (this.nativeHidden) {
-      // Already hidden by this burst. DO NOT advance nativeHideAt: it is the
-      // reference point for "a rect produced AFTER the relayout". One drag fires
-      // dozens of windowSizeChange events, and moving the reference forward each
-      // time made both reveal conditions (`ts >= hideAt+400`, `now >= hideAt+1200`)
-      // unreachable - only the safety net below ever restored the surface, which
-      // is the multi-hundred-ms black gap on every mode switch.
-      return;
-    }
-    this.nativeHidden = true;
-    this.nativeHideAt = Date.now();
-    this.hiddenW = this.nativeW;
-    this.hiddenH = this.nativeH;
-    this.hiddenLeft = this.nativeLeft;
-    this.hiddenTop = this.nativeTop;
-    if (this.nativeShowTimer >= 0) {
-      clearTimeout(this.nativeShowTimer);
-    }
-    // Safety net: never leave the surface hidden if no fresh rect arrives.
-    // 900ms > the measured ~400-500ms settle, and short enough that a stuck hide
-    // cannot read as "the video died".
-    this.nativeShowTimer = setTimeout(() => {
-      this.nativeShowTimer = -1;
-      this.nativeHidden = false;
-      console.info('NativeVideoIpc', 'native revealed by safety net');
-    }, 900);
-  }
-
-  private revealNative(req: NativeVideoRequest): void {
-    if (!this.nativeHidden || req.rect === null) {
-      return;
-    }
-    const k: number = this.cssToVp();
-    const w: number = req.rect.width * k;
-    const h: number = req.rect.height * k;
-    const left: number = req.rect.left * k;
-    const top: number = req.rect.top * k;
-    // Proof that the page really re-laid out: the box differs from the one we
-    // captured when hiding. `timedOut` stays as the safety net.
-    const moved: boolean = Math.abs(w - this.hiddenW) > 2 || Math.abs(h - this.hiddenH) > 2 ||
-      Math.abs(left - this.hiddenLeft) > 2 || Math.abs(top - this.hiddenTop) > 2;
-    const settled: boolean = req.ts >= this.nativeHideAt + 120;
-    const timedOut: boolean = Date.now() >= this.nativeHideAt + 900;
-    if (!timedOut && !(moved && settled)) {
-      return;
-    }
-    // Gate passed: the page has re-laid out (or we timed out waiting).
-    this.nativeHidden = false;
-    if (this.nativeShowTimer >= 0) {
-      clearTimeout(this.nativeShowTimer);
-      this.nativeShowTimer = -1;
-    }
-    console.info('NativeVideoIpc', 'native revealed moved=' + moved + ' timedOut=' + timedOut);
   }
 
   private async applySystemBars(hide: boolean): Promise<void> {
@@ -1129,14 +1047,12 @@ struct Index {
             onClose: () => {
               this.nativeFullscreen = false;
               this.nativeRequest = null;
-              this.nativeHidden = false;
               this.applySystemBars(false);
               this.notifyNativeClosed();
             }
           })
             .width(this.nativeFullscreen ? '100%' : this.nativeWidth())
             .height(this.nativeFullscreen ? '100%' : this.nativeHeight())
-            .visibility(this.nativeHidden ? Visibility.Hidden : Visibility.Visible)
             // Horizontal: centre the overlay inside the CLIP frame, not at the
             // raw rect origin. The clip frame is the video rect intersected with
             // the content region; a scrollbar gutter on one side makes the
