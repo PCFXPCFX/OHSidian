@@ -2607,3 +2607,56 @@ ode --check scripts/patches/touch-mode.js\ OK；repack → asar **25,951,167 B**
 - 包内 asar 命中 \!st.opened\、\st.opened&&now-st.lastThemeAt\、"Hold heartbeats until ArkTS acknowledges"；
 - 包内字节码命中 \ejected seq\、\ejected identity\、\ejected open\、\169\（\168\ 已不存在）；
 - \BUILD SUCCESSFUL in 27 s\；HAP **221,997,434 B**，SHA-256 \A9B887FD364B667AE61867624F28275C22000CEC342949C11A276CF9ED934B16\。
+## 第 170 轮 (2026-10-20): 复盘——今早的改动为什么会把"能播"变成"打不开"
+
+### ① 根本原因：我的提交集不完整（流程错误）
+
+我的 native-video 代码在 \electron/src/main/ets/pages/Index.ets:30\ 有：
+
+\\\	s
+import { WebWindow, BackPressBridge, NativeVideoOverlay, NativeVideoTheme } from 'web_engine';
+\\\
+
+而这**两行导出**写在 \web_engine/Index.ets\（模块桶文件）里。我一直把这个文件归为"另一条工作流的文件"、**排除在自己的提交之外**——于是**单看我的提交，仓库根本编译不过**。
+
+证据是 11:14 的 \5036a6d\，提交说明原文：
+> the two export lines only ever existed in the uncommitted workstream WIP … CompileArkTS failed with "Module 'web_engine' has no exported member 'NativeVideoOverlay'/'NativeVideoTheme'"
+
+### ② 触发原因：我那次被中断的清理动作把它们 stash 掉了
+
+那次 \git stash push\ 的**工具调用被中断，但命令已经执行**。证据：
+
+\\\
+git stash list
+stash@{0}: On main: wip(other-workstream): window decor / tablet UI, kept across release rebase
+
+git stash show --stat "stash@{0}"
+ web_engine/Index.ets | 2 +
+git stash show -p "stash@{0}" | grep NativeVideoOverlay
++export { NativeVideoOverlay } from './src/main/ets/components/NativeVideoOverlay';
++export { NativeVideoTheme } from './src/main/ets/components/NativeVideoOverlay';
+\\\
+
+⇒ 工作树在那一刻**不再导出**这两个符号，树不可编译；之后产出的任何包都不是我验证过的那个。
+
+### ③ 为什么表现成"打不开视频"而不是"编译失败"
+
+因为运行期还有一条**独立的**老缺陷：渲染层的 rAF 循环在 \open\ 未 ack 时就发 \ect\，把 \open\ 覆盖掉（本轮 \6995a90\ 已修）。两者叠加后：
+- 包状态不一致（导出被 stash、asar 又被 \268b6c6\ 重新 pin 了内核来源）；
+- \open\ 又抢不过 \ect\ ⇒ Index 从未接受 ⇒ 不写 ack ⇒ 渲染层 \
+oack\。
+日志现象（无任何 \NativeVideoOverlay\ 行 + \close reason=noack\）与此完全吻合。
+
+### ④ 现在的状态与处置
+
+| 项 | 状态 |
+|---|---|
+| \web_engine/Index.ets\ 的两行导出 | **已提交**（\5036a6d\），工作区无差异 ⇒ 树可编译 |
+| \stash@{0}\ | 仍保存另一条工作流的 **6 个文件 WIP（+192 行）**，含**重复的两行导出** |
+| 处置建议 | \git stash pop\ 会在 \web_engine/Index.ets\ 冲突：**保留 HEAD 版本**（导出已在主干），其余 5 个文件正常合并 |
+
+### ⑤ 流程沉淀
+
+1. **提交集必须包含"我依赖的文件"**，不能按"谁改的"划分——这次就是按归属划分导致的；
+2. **任何 \git stash\ 之前先确认不会把别人的在建状态带走**；被中断的工具调用也可能已执行一半，事后必须核对 \git stash list\ / \git status\；
+3. **交付前跑一次 \git stash list\ + 干净克隆编译**，才能证明"我的提交本身可构建"。
