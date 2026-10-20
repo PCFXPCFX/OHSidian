@@ -251,7 +251,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v159');
+    LogUtil.info(TAG, 'transport=avplayer v160');
   }
 
   aboutToDisappear(): void {
@@ -1141,9 +1141,20 @@ export struct NativeVideoOverlay {
     // wait for the "window drag settled" delay; a slow drag still wants it.
     const big: boolean = oldW > 1 && oldH > 1 &&
       (Math.abs(w - oldW) / oldW > 0.08 || Math.abs(h - oldH) / oldH > 0.08);
+    // THE SURFACE IS CONTAIN-FITTED: its own size is always the video's aspect,
+    // so a fullscreen toggle or a window resize only SCALES it. ArkUI resizes the
+    // XComponent in place and AVPlayer keeps painting into the same buffer, so a
+    // rebuild is not needed - and rebuilding cost ~700ms (release + 280ms +
+    // prepare) plus the "正在适配…" cover on every single toggle. Only a change
+    // in ASPECT invalidates the surface.
+    const aspectChanged: boolean = oldW > 1 && oldH > 1 &&
+      Math.abs((w / h) - (oldW / oldH)) > 0.02;
     this.lastAreaW = w;
     this.lastAreaH = h;
     if (!changed || this.player === null) {
+      return;
+    }
+    if (!aspectChanged) {
       return;
     }
     if (this.playerState !== 'prepared' && this.playerState !== 'playing' &&
@@ -1155,6 +1166,14 @@ export struct NativeVideoOverlay {
     }
     // Let the window drag settle; at the final size recreate the surface while
     // preserving currentTime/playing. No close, no restart from 0:00.
+    this.resizeCover = true;
+    if (this.coverTimer >= 0) {
+      clearTimeout(this.coverTimer);
+    }
+    this.coverTimer = setTimeout(() => {
+      this.coverTimer = -1;
+      this.resizeCover = false;
+    }, 1200);
     this.resizeTimer = setTimeout(() => {
       this.resizeTimer = -1;
       if (!this.released && this.player !== null &&
@@ -1985,7 +2004,7 @@ export struct NativeVideoOverlay {
             this.metaRow('大小', this.sizeLabel())
 
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v159')
+              ' · k=' + this.u().toFixed(3) + ' · v160')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 9 })
@@ -2280,25 +2299,6 @@ export struct NativeVideoOverlay {
         this.syncUnit();
         if (!moved) {
           return;
-        }
-        // The surface still holds a frame rendered for the OLD box, so between
-        // this event and the rebuilt surface the picture is stretched. Cover
-        // that interval instead of showing a distorted frame.
-        const rebuilding: boolean = this.player !== null &&
-          (this.playerState === 'prepared' || this.playerState === 'playing' ||
-            this.playerState === 'paused');
-        if (rebuilding) {
-          this.resizeCover = true;
-          // The cover must never outlive a failed rebuild: prepare can stall
-          // without ever reaching playing/paused, and a stuck opaque cover reads
-          // as "the video disappeared".
-          if (this.coverTimer >= 0) {
-            clearTimeout(this.coverTimer);
-          }
-          this.coverTimer = setTimeout(() => {
-            this.coverTimer = -1;
-            this.resizeCover = false;
-          }, 1200);
         }
       }
       // Surface size follows the aspect, so a window/fullscreen change still

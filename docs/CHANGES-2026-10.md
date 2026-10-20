@@ -2406,3 +2406,20 @@ ativePc\ **先更新再关闭**，保证下一次 \open/rect\ 不会重复触发
 **验收条目改写**：\docs/B-NATIVE-OVERLAY.md\ #28 由"切换后刷新矩形"改为"切换即关闭，再点重开"。
 
 **验证**：\BUILD SUCCESSFUL in 23 s 270 ms\；HAP **222715290 B**，SHA-256 \$sha\；字节码命中 \closeForModeSwitch\、\closed for mode switch\。
+## 第 162 轮 (2026-10-20): 全屏往返不再重建播放器——只有"比例变了"才需要
+
+**用户**：从全屏回去还是要等很久的适配窗口，不好。
+
+**为什么之前必然等**
+XComponent 的尺寸是**按视频宽高比 contain 之后的框**（ideoFrameW/H），所以全屏↔内联**只是等比缩放，比例不变**。但 scheduleSurfaceResize 只判断"面积变了"，就执行 elease + 280ms + initPlayer——**每次全屏往返固定约 0.7s**，再叠上遮罩，就是"等很久的适配窗口"。
+
+**改法**
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 重建条件 | 面积变化 >2vp | **宽高比变化 >0.02**（面积变化交给 ArkUI 原地缩放 surface） |
+| 遮罩 | 面积一变就挂 | **只在真的要重建时才挂**，并随重建结束/1.2s 兜底清除 |
+| 全屏往返 | ~700ms 遮罩 | **不重建、不遮罩**，surface 原地缩放 |
+
+**风险与兜底（如实）**：这条优化假设"ArkUI 会随组件尺寸原地缩放 surface、AVPlayer 继续往同一 buffer 画"。若某设备不满足，画面会在切换后被拉伸；届时 XComponent.onLoad（surface 被重建）仍会触发 etryResize 自愈。**若实测出现拉伸，把 spectChanged 的判据恢复为面积判据即可**（一处改动）。
+
+**验证**：\BUILD SUCCESSFUL in 20 s 610 ms\；HAP **222014777 B**，SHA-256 \$sha\；字节码命中 \160\、\spectChanged\，\159\ 已不存在。
