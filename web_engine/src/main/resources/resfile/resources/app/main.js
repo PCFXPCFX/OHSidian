@@ -277,6 +277,106 @@ try {
 	log.end = function () {};
 }
 
+/* PDF font compatibility guard (backport of upstream issue #19 / PR #20).
+   The engine rejects a FontFace constructed with a CSS local() source, but
+   pdf.js emits exactly that for PDFs that use non-embedded standard fonts
+   (pdf.worker: src:`local(${name})`; pdf.js: FontLoader.loadSystemFont ->
+   new FontFace(loadedName, src, style), constructor not wrapped in try/catch).
+   The throw leaves the font dependency unresolved, so the page render task
+   stalls: the canvas keeps the partially drawn content while the page-number
+   box stays in its loading style. Replacing local() constructions with an
+   immediately rejected stub makes pdf.js's existing catch request a worker
+   FontFallback (glyph paths), which renders the page. The source is injected
+   into every renderer and re-injected after each navigation (each navigation
+   gets a fresh JS context); the script itself is idempotent. */
+const FONT_FACE_GUARD_SOURCE = `(() => {
+	if (window.__harmonyFontFaceGuard) return;
+	window.__harmonyFontFaceGuard = true;
+	var NativeFontFace = window.FontFace;
+	if (!NativeFontFace) return;
+	var isLocalSource = function (source) {
+		return typeof source === 'string' && source.indexOf('local(') !== -1;
+	};
+	var GuardFontFace = function (family, source, descriptors) {
+		if (!isLocalSource(source)) {
+			return new NativeFontFace(family, source, descriptors);
+		}
+		var rejection = new Promise(function (_resolve, reject) {
+			reject(new Error('Local font source is unsupported; falling back to glyph paths.'));
+		});
+		// pdf.js awaits the rejection through its own catch; keep one handler
+		// attached so the rejected promise never surfaces as unhandled.
+		rejection.catch(function () {});
+		var face = Object.create(GuardFontFace.prototype);
+		face.family = family;
+		face.status = 'error';
+		face.loaded = rejection;
+		return face;
+	};
+	GuardFontFace.prototype = Object.create(NativeFontFace.prototype);
+	GuardFontFace.prototype.constructor = NativeFontFace;
+	GuardFontFace.prototype.load = function () {
+		return this.loaded;
+	};
+	GuardFontFace.prototype.then = function (onFulfilled, onRejected) {
+		return this.loaded.then(onFulfilled, onRejected);
+	};
+	GuardFontFace.prototype.catch = function (onRejected) {
+		return this.loaded.catch(onRejected);
+	};
+	GuardFontFace.prototype.finally = function (onFinally) {
+		return this.loaded.finally(onFinally);
+	};
+	GuardFontFace.prototype.addEventListener = function () {};
+	GuardFontFace.prototype.removeEventListener = function () {};
+	Object.defineProperty(GuardFontFace.prototype, Symbol.toStringTag, {
+		configurable: true,
+		value: 'FontFace'
+	});
+	Object.setPrototypeOf(GuardFontFace, NativeFontFace);
+	window.FontFace = GuardFontFace;
+})();`;
+
+function injectFontFaceGuard(webContents) {
+	if (!webContents || typeof webContents.executeJavaScript !== 'function') return;
+	try {
+		let pending = webContents.executeJavaScript(FONT_FACE_GUARD_SOURCE);
+		if (pending && typeof pending.catch === 'function') {
+			pending.catch(function (e) {
+				log('FontFace guard injection failed', e && e.message ? e.message : String(e));
+			});
+		}
+	} catch (e) {
+		log('FontFace guard injection failed', e && e.message ? e.message : String(e));
+	}
+}
+
+function installFontFaceGuard() {
+	if (!app || typeof app.on !== 'function') {
+		log('FontFace guard not installed: app.on unavailable');
+		return;
+	}
+	app.on('web-contents-created', function (event, webContents) {
+		if (!webContents) return;
+		// Every navigation creates a fresh JS context, and dom-ready runs well
+		// before a PDF view can lazily load pdf.js, so inject on both.
+		try {
+			webContents.on('did-start-navigation', function () {
+				injectFontFaceGuard(webContents);
+			});
+		} catch (e) {
+		}
+		try {
+			webContents.on('dom-ready', function () {
+				injectFontFaceGuard(webContents);
+			});
+		} catch (e) {
+		}
+		injectFontFaceGuard(webContents);
+	});
+	log('FontFace guard listener installed');
+}
+
 let idFile = path.join(dataPath, 'id');
 let id;
 try {
@@ -353,6 +453,10 @@ process.on('uncaughtException', function (error) {
 			dialog.showErrorBox('A JavaScript error occurred in the main process', message);
 		});
 });
+
+// Install the FontFace guard before any renderer exists (the Obsidian app
+// creates its windows from app.whenReady, which runs after this file).
+installFontFaceGuard();
 
 // Actual startup routine
 // Load the Obsidian app bundled with this HAP. Side-loading obsidian-*.asar
