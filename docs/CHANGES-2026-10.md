@@ -2660,3 +2660,33 @@ oack\。
 1. **提交集必须包含"我依赖的文件"**，不能按"谁改的"划分——这次就是按归属划分导致的；
 2. **任何 \git stash\ 之前先确认不会把别人的在建状态带走**；被中断的工具调用也可能已执行一半，事后必须核对 \git stash list\ / \git status\；
 3. **交付前跑一次 \git stash list\ + 干净克隆编译**，才能证明"我的提交本身可构建"。
+## 第 171 轮 (2026-10-20): ack 文件名两侧算法不一致 → 播 1.2 秒就被自己关掉
+
+**日志事实（13:01）**
+| 行 | 含义 |
+|---|---|
+| \13:01:13.942 NativeVideoOverlay --> transport=avplayer v169\ | 覆盖层**确实建起来了** |
+| \initialized → prepared → playing\（13.973→14.062） | **而且已经播了** |
+| \ejected seq=X last=X action=open\（反复） | 文件里是**同一条**请求，§R169 的 hold 生效，渲染层已停写 |
+| \13:01:15.337 close accepted reason=noack\ | 1.2 秒后渲染层**没等到 ack**，把正在播的视频关了 |
+
+**根因：ack 文件名两侧用的字段不同**
+\\\
+ArkTS  : ohsidian-native-opened-<this.xcomponentId || win-<originWindowId>>.json
+渲染层 : ohsidian-native-opened-<identity.xcomponentId || win-<windowId>>.json
+\\\
+请求能被接受，说明当时走的是 **windowId 匹配**（\xcomponentId\ 为空）；但 ack 文件名两侧各按**不同字段**拼，于是渲染层永远找不到那个文件 ⇒ \
+oack\ ⇒ 关闭重开，循环。
+
+**修复**
+| 侧 | 改动 |
+|---|---|
+| Index | 新增 \writeNativeOpenedAckShared()\：**同时**写 \ilesDir/ohsidian-native-opened.json\（JSON 内带 \seq/windowId/xcomponentId\ 两个身份） |
+| 渲染层 | \ohsidianNativeAckMatches()\ 先查按身份的旧文件，**查不到就查共享文件**；匹配条件放宽为 \xidOk || widOk\（哪一侧有值就比哪一侧） |
+
+**验证**
+- \
+ode --check\ OK；repack → asar **25,952,289 B**；
+- 包内 asar 命中 \ohsidian-native-opened.json\、\xidOk||widOk\；
+- 包内字节码命中 \writeNativeOpenedAckShared\、\170\；
+- \BUILD SUCCESSFUL in 24 s 305 ms\；HAP **222,004,002 B**，SHA-256 \3502D3D208797F047B789AD9EEB7EE39D2D5FAB482B5713A1D5B742FB0CD15D7\。

@@ -1461,16 +1461,36 @@ function ohsidianNativeAckPath(identity){
 }
 function ohsidianNativeAckMatches(seq,identity){
   try{
-    var file=ohsidianNativeAckPath(identity);
-    if(!file)return false;
-    var fs=require("fs");
-    if(!fs.existsSync(file))return false;
-    var j=JSON.parse(fs.readFileSync(file,"utf8"));
-    if(!j||typeof j.seq!=="number"||j.seq<seq)return false;
     var xid=(identity&&identity.xcomponentId!==undefined)?identity.xcomponentId:ohsidianNativeXComponentId();
     if(!xid&&identity&&identity.windowId)xid="win-"+identity.windowId;
-    if(j.xcomponentId&&xid&&j.xcomponentId!==xid)return false;
-    return true;
+    var fs=require("fs");
+    var j=null;
+    /* Primary: the per-identity file. */
+    var file=ohsidianNativeAckPath(identity);
+    if(file&&fs.existsSync(file)){
+      try{j=JSON.parse(fs.readFileSync(file,"utf8"))}catch(eAck){j=null}
+    }
+    /* Fallback: the SHARED ack. The two sides can disagree on the filename
+       (ArkTS keys on xcomponentId, we fall back to win-<windowId> when we have
+       none), and that mismatch kept a playing surface alive for only 1.2s -
+       "close reason=noack" on a loop. The shared file carries both identities,
+       so accept it when either field matches what we know. */
+    if(!j){
+      try{
+        var nodePath=require("path");
+        var remote=require("@electron/remote");
+        var shared=nodePath.join(remote.app.getPath("userData"),"ohsidian-native-opened.json");
+        if(fs.existsSync(shared))j=JSON.parse(fs.readFileSync(shared,"utf8"));
+      }catch(eShared){j=null}
+    }
+    if(!j||typeof j.seq!=="number"||j.seq<seq)return false;
+    var xidOk=!j.xcomponentId||!xid||j.xcomponentId===xid;
+    var wid=(identity&&identity.windowId)?(""+identity.windowId):"";
+    var widOk=!j.windowId||!wid||(""+j.windowId)===wid;
+    /* Accept when the identity we have actually matches; when neither side
+       carries a matching field, the request itself was already identity-checked
+       on the ArkTS side, so seq freshness is the remaining gate. */
+    return xidOk||widOk;
   }catch(e){return false}
 }
 function ohsidianConfirmNativeOpen(seq){

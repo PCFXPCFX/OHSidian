@@ -348,6 +348,7 @@ struct Index {
       }
       this.applyNativeRect(req);
       this.writeNativeOpenedAck(req);
+      this.writeNativeOpenedAckShared(req);
       if (req.thumbFile && req.thumbFile.length > 0) {
         if (this.nativeThumbBusy) {
           // A thumb request from the click path is still running; retry after
@@ -705,6 +706,42 @@ struct Index {
       this.nativeRegionTop = this.nativeTop;
       this.nativeRegionW = this.nativeW;
       this.nativeRegionH = this.nativeH;
+    }
+  }
+
+  // Second, identity-agnostic ack. The per-identity filename can disagree
+  // between ArkTS (keys on xcomponentId) and the renderer (falls back to
+  // win-<windowId> when it has none), which produced an endless
+  // "close reason=noack" loop while the surface was actually playing.
+  // This copy carries BOTH identities inside the JSON, so the renderer can
+  // match on whichever field it has.
+  private writeNativeOpenedAckShared(req: NativeVideoRequest): void {
+    const target: string = getContext(this).getApplicationContext().filesDir +
+      '/ohsidian-native-opened.json';
+    const tmp: string = target + '.tmp-' + Date.now() + '-' + Math.random().toString(36).substring(2);
+    try {
+      const f: fileIo.File = fileIo.openSync(tmp,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      try {
+        fileIo.writeSync(f.fd, JSON.stringify({
+          seq: req.seq,
+          ts: Date.now(),
+          windowId: this.originWindowId,
+          xcomponentId: this.xcomponentId
+        }));
+      } finally {
+        fileIo.closeSync(f);
+      }
+      try {
+        fileIo.renameSync(tmp, target);
+      } catch (eRename) {
+        if (fileIo.accessSync(target)) {
+          fileIo.unlinkSync(target);
+        }
+        fileIo.renameSync(tmp, target);
+      }
+    } catch (eFile) {
+      console.warn('NativeVideoIpc', 'shared ack write failed: ' + JSON.stringify(eFile));
     }
   }
 
