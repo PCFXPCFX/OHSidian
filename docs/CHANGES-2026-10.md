@@ -2564,3 +2564,23 @@ ativePointer\（Index，3 处）、\metaOk\（Overlay，3 处）——**已删�
 \docs/B-NATIVE-OVERLAY.md\ 新增《九、状态机（R160–R167 收敛后的最终形态）》：把"模式切换=关闭、窗口缩放=跟随不隐藏、全屏=仅比例变化才重建、resize 无遮罩、换源才有遮罩、底面纯黑、彩蛋磨砂"七条行为与原因写成表，与新代码一致。
 
 **验证**：\BUILD SUCCESSFUL in 27 s 289 ms\；HAP ** B**，SHA-256 \$((Get-FileHash 'electron\build\default\outputs\default\electron-default-signed.hap' -Algorithm SHA256).Hash)\；字节码命中 \167\。
+## 第 168 轮 (2026-10-20): 版本提升 1.3.0 → 1.4.0
+
+原生 HEVC 播放器属**功能级新增**（不是修补），按语义化版本提次版本号。
+
+| 字段 | 改前 | 改后 |
+|---|---|---|
+| \AppScope/app.json5\ → \ersionName\ | \1.3.0\ | **\1.4.0\** |
+| \AppScope/app.json5\ → \ersionCode\ | \1030001\ | **\1040000\** |
+| 包内读数（彩蛋） | \167\ | **\168\** |
+
+编码规则沿用仓库既有格式：\主 ×1000000 + 次 ×10000 + 修订 ×100 + build\，所以 \1030001\ = 1.3.0/b1，\1040000\ = 1.4.0/b0。
+
+**包内验证**
+\\\
+pack.info  → "version":{"code":1040000,"name":"1.4.0"}
+module.json → app 段同步
+ets/modules.abc → v168 ×2（v167 已不存在）
+\\\
+
+**验证**：\BUILD SUCCESSFUL in 28 s 757 ms\；HAP **222,002,544 B**，SHA-256 \91DE72AC47DDA0318E276DD33A16E38FE6C5E3334AEC596431966242CD9C784D\。
