@@ -21,6 +21,16 @@ import LogUtil from '../utils/LogUtil';
 
 const TAG: string = 'NativeVideoOverlay';
 
+// Media chrome, deliberately NOT theme tokens. The paused disc sits ON the
+// picture and must match the DOM poster's disc (rgba(0,0,0,.42) + white
+// triangle). Tokenising it to --background-secondary made it white-on-white in
+// a light theme, and the letterbox around the picture must stay black rather
+// than turn into a white band.
+const MEDIA_SCRIM: string = '#6B000000';
+const MEDIA_INK: string = '#EBFFFFFF';
+const MEDIA_HAIRLINE: string = '#33FFFFFF';
+const MEDIA_VOID: string = '#000000';
+
 // One MP4 track's technical fields, filled by the container probe below.
 interface SpeedSetting {
   rate: number;
@@ -235,7 +245,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v152');
+    LogUtil.info(TAG, 'transport=avplayer v153');
   }
 
   aboutToDisappear(): void {
@@ -1833,14 +1843,14 @@ export struct NativeVideoOverlay {
       if (this.switching || this.resizeCover) {
         Column() {
           Text(this.switching ? '载入中…' : '正在适配…')
-            .fontColor(this.theme.muted)
+            .fontColor(MEDIA_INK)
             .fontSize(12)
         }
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
-        .backgroundColor(this.theme.bg)
+        .backgroundColor(MEDIA_VOID)
         .hitTestBehavior(HitTestMode.Default)
         .zIndex(2)
       }
@@ -1876,7 +1886,7 @@ export struct NativeVideoOverlay {
               .fontColor(this.theme.muted)
               .margin({ top: 1 })
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v152')
+              ' · k=' + this.u().toFixed(3) + ' · v153')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 6 })
@@ -1982,9 +1992,9 @@ export struct NativeVideoOverlay {
             // 40-unit glyphs, zero transform: the paused triangle is ~20x26 in
             // the 64vp disc, matching the poster's 19.8x23.2 border triangle.
             if (this.completed) {
-              this.glyphBig(ICON_REPLAY_BIG, this.theme.onAccent, 1)
+              this.glyphBig(ICON_REPLAY_BIG, MEDIA_INK, 1)
             } else {
-              this.glyphBig(ICON_PLAY_BIG, this.theme.onAccent, 0, true)
+              this.glyphBig(ICON_PLAY_BIG, MEDIA_INK, 0, true)
             }
           }
           .width(this.discSize())
@@ -1992,7 +2002,8 @@ export struct NativeVideoOverlay {
           .justifyContent(FlexAlign.Center)
           .alignItems(HorizontalAlign.Center)
           .borderRadius(this.discSize() / 2)
-          .backgroundColor(this.theme.bar)
+          .backgroundColor(MEDIA_SCRIM)
+          .border({ width: 1, color: MEDIA_HAIRLINE })
                 .onClick(() => this.togglePlay())
           .accessibilityText(this.completed ? '重播' : '播放')
         }

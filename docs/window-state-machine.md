@@ -46,6 +46,11 @@
 **第 106 轮细化**：唯一的同值合并发生在 `repushViewportBounds()` 内部的
 启动突发（同 bound 且 <150ms），且对账推以 `force=true` 调用，因此上表
 "对账推无条件"仍然成立。
+**第 153 轮补充**：第二个（也是最后一个）允许的延时动作是**触摸整屏校正
+的单发重试**——`forceFullscreenWindow()` 的 resize 被 WMS 以 1300002
+（窗口状态异常，PC↔触摸 layout 过渡尚未落定）拒绝时，约 350ms 后重试一次，
+且只重试一次（不堆叠、不成梯子）；切回窗口形态时该重试自行放弃。这与
+"补推梯子"的区别同样是：单发、只针对一次失败、不参与长期赛跑。
 
 ## 4. 窗口大小/位置记忆化（TODO 1/2）
 
@@ -512,3 +517,49 @@ latch 在 native 调用成功之后才推进（调用抛异常不得吞掉同突
 3. 形态判定复用 `isTouchFormFactorStrict()`：严格读（只有成功读到 `'false'`
    才算触摸），读失败保持旧行为——取消用户/引擎动作时，失败方向必须是
    "不改变"而不是"误取消"。
+
+### Round 153：触摸整屏校正被 1300002 拒绝后的单发重试（"第一次不铺满"）
+
+**真机现象**：触摸模式下"第一次"窗口不铺满——具体是 PC 模式切回触摸
+（或从 PC 记忆矩形冷启动）时，窗口停在上次的浮窗尺寸（如
+`578,219 1644x1233`），要等系统自己把窗口 maximize 才铺满。
+
+**日志证据**（07:39:58 切换回触摸）：
+
+```
+58.815  update window_pcmode_switch_status, new status:false
+58.838  pc mode handled: enabled=false, changed=true
+58.843  layout fullscreen true applied for pcMode=false
+58.844  force fullscreen (rect) failed: {"code":1300002}     ← 同步校正被拒
+58.910  UpdateRect: [578 219 1644 1233] -> [0 0 2800 1840] reason:1
+```
+
+`1300002` = 窗口状态异常：`setWindowLayoutFullScreen(true)` 之后 layout/模式
+过渡尚未落定，同步 `resize` 被 WMS 拒绝。之后的铺满来自 **WMS 自己**的
+maximize（`reason:1`），不是代码保证的；WMS 不做时窗口就停在浮窗尺寸。
+冷启动路径同理：boot sync 与 `loadContent` 重申都在窗口 show 之前，若都被
+1300002 拒绝，没有任何延时补偿。
+
+**根因（以代码为准）**：`forceFullscreenWindow()` 的失败分支只 `warn`，
+没有任何重试；而触摸整屏校正的三个调用点（启动首同步、`loadContent` 重申、
+模式切回）全部是**同步一次**；`windowStatusChange` 处理器只推 viewport/insets，
+不再检查"触摸形态但窗口仍是浮窗"。
+
+**修复（第 153 轮）**
+
+- `forceFullscreenWindow()` 的 `catch`：错误码 `1300002` 时调用
+  `scheduleFullscreenRetry()`——**单发** 350ms 后重试；重试前若已切回窗口
+  形态则放弃；成功后清零重试预算。**只重试一次**，不堆叠、不成梯子。
+- `windowStatusChange` 处理器：`!pcModeEnabled` 且状态为
+  `FLOATING`/`MAXIMIZE` 时再调一次 `forceFullscreenWindow()`（幂等，已整屏
+  立即返回），覆盖"延时重试也失败但窗口落定为浮窗"的情况。
+- 定时器生命周期：窗口舞台重建时清零预算并清除挂起的定时器；
+  `onWindowStageDestroy` 一并清除（不得对已销毁窗口执行 resize）。
+- 规格：§3 的"唯一允许的延时动作"更新为"对账推 + 触摸整屏校正的单发重试"。
+
+**不变量（今后改动必须保持）**
+
+1. 触摸形态下窗口落定为非全屏（FLOATING/MAXIMIZE）时必须重新校正；
+2. 整屏校正的延时补偿只允许**单发、只针对 1300002、只重试一次**，不得演化
+   成定时梯子（第 87/88 轮的教训）；
+3. 重试必须自查形态（切回 PC 模式后放弃）与窗口存活（销毁时清除定时器）。

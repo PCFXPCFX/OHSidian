@@ -1985,9 +1985,9 @@ if (this.nativeHidden) {
 
 **验证**：`BUILD SUCCESSFUL in 22 s 440 ms`；HAP **221,992,794 B**，SHA-256 `5A6FCE5B4D15735C9A78D351EE438E5583C8EDC8C0CA37A6163EC2D1539C7ADB`；字节码命中 `v151`、`frameW`、`retryResize`，`v150` 已不存在；`obsidian.asar` 未变。
 
-## 第 152 轮(2026-10-20):触摸模式"第一次"窗口不铺满（整屏校正被 1300002 拒绝且无重试）
+## 第 153 轮(2026-10-20):触摸模式"第一次"窗口不铺满（整屏校正被 1300002 拒绝且无重试）
 
-> 编号说明:并行会话已提交/占用到第 151 轮,本轮窗口修复取 152,不改动
+> 编号说明:并行会话已提交/占用到第 151 轮,本轮窗口修复取 153,不改动
 > 106-151 的既有小节(其中 106/111 与本报的窗口轮次重号,见文末"已知风险")。
 
 **用户报告**:触摸模式下"第一次"窗口不铺满——PC 模式切回触摸、或从 PC
@@ -2039,24 +2039,24 @@ if (this.nativeHidden) {
 
 **自查审计**
 
-- R152-1 重试会不会死循环?不会:`fullscreenRetryCount` 上限 1,且重试成功
+- R153-1 重试会不会死循环?不会:`fullscreenRetryCount` 上限 1,且重试成功
   后清零、窗口舞台重建时清零;第二次失败只 `warn` 不再排定时器。
-- R152-2 切回 PC 模式后重试会不会把浮窗拉全屏?不会:定时器回调先看
+- R153-2 切回 PC 模式后重试会不会把浮窗拉全屏?不会:定时器回调先看
   `pcModeEnabled`,窗口形态直接放弃(并保留"不改变窗口"的安全方向)。
-- R152-3 状态事件校正会不会与 `resize` 互相触发成环?`forceFullscreenWindow`
+- R153-3 状态事件校正会不会与 `resize` 互相触发成环?`forceFullscreenWindow`
   先比较 `windowRect` 是否已达 display 尺寸,已整屏立即返回;我们 resize
   成功后 WMS 报 `FULL_SCREEN`,不满足 `FLOATING/MAXIMIZE` 条件;只有仍是浮窗
   才再次校正。
-- R152-4 `MINIMIZE`(系统回桌面)会不会被误校正?条件只含 `FLOATING`/
+- R153-4 `MINIMIZE`(系统回桌面)会不会被误校正?条件只含 `FLOATING`/
   `MAXIMIZE`,不含 `MINIMIZE`;触摸形态的最小化本身已被第 111 轮取消。
-- R152-5 冷启动路径会不会多一次无意义 resize?不会:冷启动窗口通常已整屏,
+- R153-5 冷启动路径会不会多一次无意义 resize?不会:冷启动窗口通常已整屏,
   尺寸比较直接 return;只有确实浮窗(如 PC 记忆矩形)才 resize。
-- R152-6 定时器泄漏?窗口舞台重建与 `onWindowStageDestroy` 都清除,且回调
+- R153-6 定时器泄漏?窗口舞台重建与 `onWindowStageDestroy` 都清除,且回调
   只使用 `this.mainWindow` 并做判空。
-- R152-7 为什么不用 `maximize()` 代替 `resize`?Round 111 已确认该设备
+- R153-7 为什么不用 `maximize()` 代替 `resize`?Round 111 已确认该设备
   `maximize` 返回"device not supported"且 Promise 仍 resolve;显式矩形才是
   可靠手段(第 11/102 轮结论)。
-- R152-8 编译验证:`hvigorw assembleHap` **BUILD SUCCESSFUL**(见下),
+- R153-8 编译验证:`hvigorw assembleHap` **BUILD SUCCESSFUL**(见下),
   未跑真机。
 
 **验证要点**(真机,触摸模式)
@@ -2108,3 +2108,29 @@ if (this.nativeHidden) {
 | F | 错误重试预算 2 次，用尽后只能手动重试 | 偶发解码错误后需交互 | 可加指数退避 |
 
 **验证**：`BUILD SUCCESSFUL in 20 s 56 ms`；HAP **222,000,066 B**，SHA-256 `4EFA2EFC6D512FF51207B7F4919472B5FDCE06726A346FFBD7FC6BA1DD3636DA`；字节码命中 `v152`、`coverTimer`、`scheduleMediaProbe`，`v151` 已不存在；`obsidian.asar` 未变。
+## 第 153 轮 (2026-10-20): 浅色主题下"白底白图标"——媒体遮罩不该跟主题走
+
+**用户**：`在白色底的情况下，暂停时中间的控件和底色都是白色`。
+
+**根因**：R146"全部令牌化"时我把**媒体遮罩**也当成了 App 界面色：
+- 圆盘底 `theme.bar` = `--background-secondary` @92% → 浅色主题下**近白**；
+- 圆盘图标 `theme.onAccent` = `--text-on-accent` → 浅色主题下**白色**；
+⇒ 白底白图标，圆盘与图标一起消失。
+
+而 DOM 海报的圆盘一直是 `rgba(0,0,0,.42)` + `rgba(255,255,255,.92)`，原生圆盘因此**既看不见也与海报不一致**。
+
+**修法**：区分"媒体层"与"界面层"。新增四个常量，媒体层不再使用主题令牌：
+| 常量 | 值 | 用途 |
+|---|---|---|
+| `MEDIA_SCRIM` | `#6B000000` | 圆盘底（= 海报 `rgba(0,0,0,.42)`） |
+| `MEDIA_INK` | `#EBFFFFFF` | 圆盘图标（= 海报三角 `rgba(255,255,255,.92)`） |
+| `MEDIA_HAIRLINE` | `#33FFFFFF` | 圆盘 1px 描边 |
+| `MEDIA_VOID` | `#000000` | 画面底色（letterbox）与载入/适配遮罩 |
+
+顺带修两处显示问题：
+1. **letterbox 变白**：覆盖层根节点原来是 `theme.bg`，浅色主题下宽银幕视频两边会显示白色条带；改为 `MEDIA_VOID` 黑。载入/适配遮罩同理，文字改 `MEDIA_INK`。
+2. **药丸丢失边界**：R138 撤诊断描边时把药丸的 1px 边框一起删了，浅色主题 + 亮画面上白药丸直接融进画面；改为 `theme.border` 发丝边框。
+
+**原则沉淀**：**画面上的东西（遮罩、letterbox、画面上的字）用固定的媒体色；界面上的东西（药丸、面板、文字）用主题令牌。** 两者混用就会出现"浅色主题下看不见"或"深色主题下发灰"。
+
+**验证**：`BUILD SUCCESSFUL in 22 s 932 ms`；HAP **221,999,888 B**，SHA-256 `DA10C88C3FFA46A42F473B1EF9E935CB876CE4C212474211DDEBD9CB997B6524`；字节码命中 `v153`、`MEDIA_SCRIM`、`MEDIA_INK`，`v152` 已不存在。

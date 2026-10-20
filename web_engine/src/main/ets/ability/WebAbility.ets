@@ -121,6 +121,17 @@ export class WebAbility extends WebBaseAbility {
   // inside a single startup burst (150 ms) is coalesced; the reconciliation
   // below is forced and never coalesced. -1 = idle.
   private viewportRecheckTimer: number = -1;
+  // Round 153: single-shot retry for the touch fullscreen rect correction.
+  // WMS answers 1300002 ("window state abnormal") when the resize lands while
+  // the PC<->touch layout transition is still settling, so the synchronous
+  // correction is not reliable: device log 07:39:58.844 shows the resize
+  // rejected right after setWindowLayoutFullScreen(true) and the window only
+  // filled because WMS maximised it on its own (reason:1). If WMS does not do
+  // that, the window stays floating at the remembered PC size. One delayed
+  // retry (never a ladder) plus the windowStatusChange re-assert covers it.
+  private fullscreenRetryTimer: number = -1;
+  private fullscreenRetryCount: number = 0;
+  private static FULLSCREEN_RETRY_MS: number = 350;
   // Round 106: burst coalescing for the push (IDENTICAL bound within
   // REPUSH_DEDUPE_MS only; see the static comment).
   private lastPushedBoundKey: string = '';
@@ -1101,6 +1112,8 @@ export class WebAbility extends WebBaseAbility {
         .then(() => {
           LogUtil.info(TAG, 'forced fullscreen rect: ' + displayClass.width + 'x' +
             displayClass.height + ' @ (0,0)');
+          // Correction landed: a later mode switch starts a fresh budget.
+          this.fullscreenRetryCount = 0;
           // H5: publish the insets for the NEW rect even when the WMS
           // swallows the trailing windowSizeChange - the mode-switch caller
           // pushed insets for the PRE-resize rect.
@@ -1108,10 +1121,34 @@ export class WebAbility extends WebBaseAbility {
         })
         .catch((err: BusinessError) => {
           LogUtil.warn(TAG, 'force fullscreen (rect) failed: ' + JSON.stringify(err));
+          // Round 153: the mode switch is still settling - retry once, later.
+          if (err.code === 1300002) {
+            this.scheduleFullscreenRetry();
+          }
         });
     } catch (exception) {
       LogUtil.warn(TAG, 'force fullscreen (rect) threw: ' + JSON.stringify(exception));
     }
+  }
+
+  // Round 153: one delayed retry after WMS rejected the touch rect correction
+  // with 1300002 (mode/layout transition still settling). Single-shot by
+  // design: the state machine only allows one delayed action per switch, and
+  // a ladder would race the WMS settle again (docs/window-state-machine.md §3).
+  private scheduleFullscreenRetry(): void {
+    if (this.fullscreenRetryTimer !== -1 || this.fullscreenRetryCount >= 1) {
+      return;
+    }
+    this.fullscreenRetryCount++;
+    this.fullscreenRetryTimer = setTimeout(() => {
+      this.fullscreenRetryTimer = -1;
+      if (this.pcModeEnabled) {
+        // The user is back in window mode - the display rect would be wrong.
+        return;
+      }
+      LogUtil.info(TAG, 'retrying forced fullscreen rect after 1300002');
+      this.forceFullscreenWindow();
+    }, WebAbility.FULLSCREEN_RETRY_MS);
   }
 
   onConfigurationUpdate(config: Configuration) {
@@ -2172,6 +2209,13 @@ export class WebAbility extends WebBaseAbility {
     // swallowed.
     this.lastPushedBoundKey = '';
     this.lastPushedAtMs = 0;
+    // Round 153: a rebuilt window stage starts with a fresh fullscreen-retry
+    // budget, and no retry may survive into it.
+    this.fullscreenRetryCount = 0;
+    if (this.fullscreenRetryTimer !== -1) {
+      clearTimeout(this.fullscreenRetryTimer);
+      this.fullscreenRetryTimer = -1;
+    }
     // Round 102: every window-stage setup start counts as a FIRST sync again
     // (onWindowStageDestroy -> onWindowStageCreate can happen on the same
     // ability instance: display/casting switches, window-stage rebuild). The
@@ -2394,6 +2438,17 @@ export class WebAbility extends WebBaseAbility {
             // The status event can equally arrive BEFORE the animation
             // settles - reconcile once it has (round 87, A2).
             this.scheduleViewportReconcile();
+          }
+          // Round 153: in the touch form factor the window must BE the
+          // display. A status event that reports a floating/maximized window
+          // means the rect correction did not land (or a PC-mode layout was
+          // restored): re-assert it. forceFullscreenWindow is idempotent and
+          // returns immediately when the window is already display-sized, so
+          // the FULL_SCREEN event of our own resize does not loop.
+          if (!this.pcModeEnabled &&
+            (status === window.WindowStatusType.FLOATING ||
+              status === window.WindowStatusType.MAXIMIZE)) {
+            this.forceFullscreenWindow();
           }
         })
       } catch (exception) {
@@ -2668,6 +2723,11 @@ export class WebAbility extends WebBaseAbility {
     if (this.viewportRecheckTimer !== -1) {
       clearTimeout(this.viewportRecheckTimer);
       this.viewportRecheckTimer = -1;
+    }
+    // Round 153: same for the single-shot fullscreen retry.
+    if (this.fullscreenRetryTimer !== -1) {
+      clearTimeout(this.fullscreenRetryTimer);
+      this.fullscreenRetryTimer = -1;
     }
     // Round 89: stop the bar watcher; if this window hid the system bars,
     // hand them back before the window dies.
