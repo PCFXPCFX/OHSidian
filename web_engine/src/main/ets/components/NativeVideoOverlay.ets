@@ -226,6 +226,7 @@ export struct NativeVideoOverlay {
   private resizeTimer: number = -1;
   private probeTimer: number = -1;
   private coverTimer: number = -1;
+  private coverDelayTimer: number = -1;
   private lastRebuildW: number = 0;
   private lastRebuildH: number = 0;
   private hideTimer: number = -1;
@@ -251,7 +252,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v160');
+    LogUtil.info(TAG, 'transport=avplayer v162');
   }
 
   aboutToDisappear(): void {
@@ -267,6 +268,10 @@ export struct NativeVideoOverlay {
     if (this.coverTimer >= 0) {
       clearTimeout(this.coverTimer);
       this.coverTimer = -1;
+    }
+    if (this.coverDelayTimer >= 0) {
+      clearTimeout(this.coverDelayTimer);
+      this.coverDelayTimer = -1;
     }
     if (this.resizeTimer >= 0) {
       clearTimeout(this.resizeTimer);
@@ -389,7 +394,7 @@ export struct NativeVideoOverlay {
     }
   }
 
-  private retry(reason: string): void {
+  private retry(reason: string, delayMs: number = 280): void {
     if (this.released || this.retryScheduled) {
       return;
     }
@@ -412,7 +417,7 @@ export struct NativeVideoOverlay {
           this.initPlayer();
         }
       }
-    }, 280);
+    }, delayMs);
   }
 
   // Resize rebuilds are not decode errors and must not consume the error budget:
@@ -420,6 +425,27 @@ export struct NativeVideoOverlay {
   // hit `retryCount >= 2` -> fail(), and the player died with an error panel.
   // They are also deduped: one switch fires BOTH XComponent.onLoad and the 320ms
   // area debounce, which tore the decoder down twice (two black frames).
+  // The "adapting" veil only appears if the rebuild is actually slow. Both resize
+  // paths (surfaceId change from onLoad, and the area/aspect path) go through
+  // here: showing it immediately made entering fullscreen flash the panel every
+  // time, because that path always rebuilds the surface.
+  private armResizeCover(): void {
+    if (this.coverDelayTimer >= 0) {
+      clearTimeout(this.coverDelayTimer);
+    }
+    this.coverDelayTimer = setTimeout(() => {
+      this.coverDelayTimer = -1;
+      this.resizeCover = true;
+      if (this.coverTimer >= 0) {
+        clearTimeout(this.coverTimer);
+      }
+      this.coverTimer = setTimeout(() => {
+        this.coverTimer = -1;
+        this.resizeCover = false;
+      }, 1200);
+    }, 220);
+  }
+
   private retryResize(reason: string): void {
     if (this.released) {
       return;
@@ -439,8 +465,10 @@ export struct NativeVideoOverlay {
     this.lastRebuildW = this.lastAreaW;
     this.lastRebuildH = this.lastAreaH;
     this.retryCount = 0;
-    this.resizeCover = true;
-    this.retry(reason);
+    this.armResizeCover();
+    // A resize rebuild is a surface swap, not error recovery: 160ms is enough
+    // for release() to settle and saves ~120ms on every toggle.
+    this.retry(reason, 160);
   }
 
   private retryManual(): void {
@@ -567,6 +595,10 @@ export struct NativeVideoOverlay {
           this.completed = false;
           this.switching = false;
           this.resizeCover = false;
+          if (this.coverDelayTimer >= 0) {
+            clearTimeout(this.coverDelayTimer);
+            this.coverDelayTimer = -1;
+          }
           if (this.coverTimer >= 0) {
             clearTimeout(this.coverTimer);
             this.coverTimer = -1;
@@ -1166,14 +1198,7 @@ export struct NativeVideoOverlay {
     }
     // Let the window drag settle; at the final size recreate the surface while
     // preserving currentTime/playing. No close, no restart from 0:00.
-    this.resizeCover = true;
-    if (this.coverTimer >= 0) {
-      clearTimeout(this.coverTimer);
-    }
-    this.coverTimer = setTimeout(() => {
-      this.coverTimer = -1;
-      this.resizeCover = false;
-    }, 1200);
+    this.armResizeCover();
     this.resizeTimer = setTimeout(() => {
       this.resizeTimer = -1;
       if (!this.released && this.player !== null &&
@@ -2004,7 +2029,7 @@ export struct NativeVideoOverlay {
             this.metaRow('大小', this.sizeLabel())
 
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v160')
+              ' · k=' + this.u().toFixed(3) + ' · v162')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 9 })

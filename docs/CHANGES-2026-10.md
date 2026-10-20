@@ -2423,3 +2423,19 @@ XComponent 的尺寸是**按视频宽高比 contain 之后的框**（ideoFrameW
 **风险与兜底（如实）**：这条优化假设"ArkUI 会随组件尺寸原地缩放 surface、AVPlayer 继续往同一 buffer 画"。若某设备不满足，画面会在切换后被拉伸；届时 XComponent.onLoad（surface 被重建）仍会触发 etryResize 自愈。**若实测出现拉伸，把 spectChanged 的判据恢复为面积判据即可**（一处改动）。
 
 **验证**：\BUILD SUCCESSFUL in 20 s 610 ms\；HAP **222014777 B**，SHA-256 \$sha\；字节码命中 \160\、\spectChanged\，\159\ 已不存在。
+## 第 163 轮 (2026-10-20): 进全屏仍闪"适配窗口"——遮罩改为迟到 220ms
+
+**用户**：从全屏到文档缩小已经好了，但放大到全屏还是有适配窗口。
+
+**为什么只有放大方向还有**
+缩小方向走面积/比例判定，比例不变 ⇒ 不重建 ⇒ 干净。而**放大到全屏会让 XComponent 的 surface 被重建**，onLoad 报告新 surfaceId ⇒ etryResize() ⇒ elease + 280ms + initPlayer；而 etryResize() 里**立刻**把 esizeCover 置真，所以面板必然闪出来。
+
+**两处修复**
+| # | 改动 | 效果 |
+|---|---|---|
+| 1 | etryResize() 不再立即挂遮罩，改调 rmResizeCover()：**220ms 后才显示**，重建若在此之前完成则**完全不出现** | 快的重建不闪面板 |
+| 2 | resize 重建延迟 280ms → 160ms（etry(reason, delayMs) 带参数，错误重试仍是 280ms） | 每次往返省约 120ms |
+
+遮罩同时保留 1.2s 兜底；重建落地（playing/paused）会**取消迟到的显示**，避免"重建完了遮罩才出来"。
+
+**验证**：\BUILD SUCCESSFUL in 23 s 297 ms\；HAP **222013745 B**，SHA-256 \$sha\；字节码命中 \162\、\rmResizeCover\。
