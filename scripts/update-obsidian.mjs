@@ -9,6 +9,12 @@
  * Usage:
  *   node scripts/update-obsidian.mjs            # update to latest stable
  *   node scripts/update-obsidian.mjs 1.13.7     # update to a specific version
+ *   node scripts/update-obsidian.mjs 1.13.7 --repatch   # force a rebuild
+ *   node scripts/update-obsidian.mjs --repatch          # rebuild the pinned kernel
+ *
+ * A pinned kernel version (web_engine/.../app/package.json) is resolved via
+ * scripts/obsidian-artifacts.json; the downloaded asar must report exactly
+ * that version or the run aborts.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -47,6 +53,20 @@ function readCertPem() {
   // wrapper main.js updater; kept in a standalone file since the dead updater
   // was removed from main.js.
   return fs.readFileSync(CERT_PEM_PATH, 'utf8').trim();
+}
+
+/* Official artifact for a pinned kernel version. desktop-releases.json only
+   exposes the current stable entry, so an older pinned kernel is resolved
+   from scripts/obsidian-artifacts.json (hash + RSA signature recorded there).
+   Without this, --repatch downloads "latest" and installs it under the pinned
+   version name - every version-specific anchor then silently misses. */
+function readPinnedArtifact(version) {
+  try {
+    const table = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'scripts/obsidian-artifacts.json'), 'utf8'));
+    return table[version] && typeof table[version] === 'object' ? table[version] : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 async function fetchReleaseJson() {
@@ -164,7 +184,10 @@ async function main() {
   log(`current Obsidian version: ${currentVersion}`);
 
   const release = await fetchReleaseJson();
-  const targetVersion = versionArg || release.latestVersion;
+  // --repatch without a version rebuilds the CURRENTLY PINNED kernel (what
+  // hvigor/ensure-obsidian-asar and local rebuilds want); the plain path
+  // without --repatch upgrades to latest stable as documented.
+  const targetVersion = versionArg || (repatch ? currentVersion : release.latestVersion);
   log(`target Obsidian version: ${targetVersion}${repatch ? ' (repatch)' : ''}`);
 
   if (!repatch) {
@@ -175,18 +198,44 @@ async function main() {
     }
   }
 
-  const entry = release.beta && versionArg === release.beta.latestVersion ? release.beta : release;
+  // Resolve the artifact for EXACTLY the target version. The live release
+  // JSON has one stable entry (current latest); a pinned older kernel must
+  // come from the pinned table, otherwise --repatch silently downloads and
+  // installs "latest" under the pinned version name.
+  let entry;
+  if (release.beta && versionArg === release.beta.latestVersion) {
+    entry = release.beta;
+  } else if (targetVersion === release.latestVersion) {
+    entry = release;
+  } else {
+    entry = readPinnedArtifact(targetVersion);
+    if (!entry) {
+      fail(`no pinned artifact for Obsidian ${targetVersion} (current stable is ${release.latestVersion}); ` +
+        'add it to scripts/obsidian-artifacts.json when changing the kernel pin');
+    }
+    log(`using pinned artifact for ${targetVersion} (current stable is ${release.latestVersion})`);
+  }
   const { downloadUrl, hash, signature } = entry;
   if (!downloadUrl || !hash || !signature) fail('release entry incomplete');
 
   fs.mkdirSync(TEMP_DIR, { recursive: true });
 
   const gzPath = path.join(TEMP_DIR, `obsidian-${targetVersion}.asar.gz`);
-  let compressed;
+  let compressed = null;
   if (fs.existsSync(gzPath) && fs.statSync(gzPath).size > 1024 * 1024) {
-    log('using previously downloaded ' + gzPath);
-    compressed = fs.readFileSync(gzPath);
-  } else {
+    const cached = fs.readFileSync(gzPath);
+    const cachedHash = crypto.createHash('SHA256').update(cached).digest('base64');
+    if (cachedHash === hash) {
+      log('using previously downloaded ' + gzPath);
+      compressed = cached;
+    } else {
+      // A cache written by an older/buggy run must never be patched as if it
+      // were the pinned kernel: discard it and download again.
+      log(`cached download does not match the pinned hash - discarding ${gzPath}`);
+      try { fs.unlinkSync(gzPath); } catch (e) { /* re-downloaded below */ }
+    }
+  }
+  if (!compressed) {
     log('downloading ' + downloadUrl);
     try {
       compressed = await httpGetBinary(downloadUrl);
@@ -218,6 +267,18 @@ async function main() {
   const extractedDir = path.join(TEMP_DIR, 'extracted');
   fs.rmSync(extractedDir, { recursive: true, force: true });
   asar.extractAll(downloadedAsar, extractedDir);
+  // Refuse to patch an artifact that is not the requested kernel: a newer or
+  // older app.js misses every textual anchor, and the mismatch would only
+  // surface in verify-asar after the asar is already installed.
+  let extractedVersion = '';
+  try {
+    extractedVersion = JSON.parse(fs.readFileSync(path.join(extractedDir, 'package.json'), 'utf8')).version || '';
+  } catch (e) { /* reported below */ }
+  if (String(extractedVersion) !== String(targetVersion)) {
+    fail(`downloaded artifact is Obsidian ${extractedVersion || '(unknown)'} but the target is ${targetVersion}; ` +
+      'refusing to install a mismatched kernel (check scripts/obsidian-artifacts.json and the pinned version)');
+  }
+  log(`kernel version confirmed: ${extractedVersion}`);
   const appJs = path.join(extractedDir, 'app.js');
   if (!fs.existsSync(appJs)) fail('app.js not found in asar');
   let appSrc = fs.readFileSync(appJs, 'utf8');

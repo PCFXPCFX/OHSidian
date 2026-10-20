@@ -36,7 +36,7 @@ commit "feat(kernel): upgrade Obsidian 1.12.7 -> 1.13.7 with verified patch tool
   web_engine/src/main/resources/resfile/resources/app/obsidian.asar \
   web_engine/src/main/resources/resfile/resources/app/package.json \
   README.md README_EN.md \
-  scripts/update-obsidian.mjs scripts/patches \
+  scripts/update-obsidian.mjs scripts/patches scripts/obsidian-artifacts.json \
   scripts/cert-obsidian.pem scripts/extract-cert.cjs \
   scripts/balance-check.cjs scripts/package.json \
   .gitignore

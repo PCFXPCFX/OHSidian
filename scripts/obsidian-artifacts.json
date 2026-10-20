@@ -1,0 +1,9 @@
+{
+  "_comment": "Official Obsidian artifacts pinned per kernel version. The upstream desktop-releases.json only carries the current stable entry, so a pinned (older) kernel is resolved from here instead of silently downloading latest. Keep this in sync with web_engine/src/main/resources/resfile/resources/app/package.json; values are copied from obsidian-releases/desktop-releases.json at that version's release commit.",
+  "1.13.7": {
+    "downloadUrl": "https://github.com/obsidianmd/obsidian-releases/releases/download/v1.13.7/obsidian-1.13.7.asar.gz",
+    "hash": "aSU+OaoLmA48+W6eiopL7Wtkge9wIc12L2eHJmLY0lo=",
+    "signature": "1uwLwiTpbGz4HNV+14BVxFkyWu+Xr/XqnKASPJ9fgu4RapVRYJJ056yFzpiQC7O8/hz5UZmZiE8fXxRJxrw+KenuVktFBWV4xlrd77y+G+MKUH8R6SK5vhBkeGjd9S56ofqSVjN/1YZx/+9NCVWjUGBHgr+Z9LI0ObQWeOw+AqgVDz5ajivFo+BoV9d1dauaPyVsfUMqZ7LBrem9ZGCUIrD0eEVEHxe/V80lMqLlBLXS03/1YngFkh6Djs5Tfr5BApOERkydLI8GuT1mG7oG4ClVm396QC29yR9p9UymLmiNXKxbgu8PMCdWE5ArHhLtkoTCAIeMNR81snDFCGm6Hg==",
+    "source": "obsidian-releases@a39c6958a49d6a2e868bb1e67cb6121d4852203c desktop-releases.json (2026-10-01T20:16:35Z)"
+  }
+}

@@ -103,7 +103,11 @@ jobs:
           # S-N10: the cert hash is part of the key - a rotated/changed
           # pinned cert must not reuse a cached download verified by the
           # OLD cert.
-          key: obsidian-asar-${{ steps.obsidian.outputs.version }}-${{ hashFiles('scripts/cert-obsidian.pem') }}
+          # The pinned-artifact table is part of the key too: it changes when
+          # the kernel pin changes, so a stale gz (e.g. one written by an old
+          # run that downloaded "latest" under the pinned name) is never
+          # reused. The updater also hash-checks the cache before using it.
+          key: obsidian-asar-${{ steps.obsidian.outputs.version }}-${{ hashFiles('scripts/obsidian-artifacts.json', 'scripts/cert-obsidian.pem') }}
 
       # S-N11: fail loudly if the pinned cert was ever swapped in a PR.
       # Rotation is a deliberate, documented act: update CERT_SHA256 below
