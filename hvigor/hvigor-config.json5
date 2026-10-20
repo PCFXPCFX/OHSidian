@@ -1,5 +1,15 @@
 {
   "modelVersion": "5.0.0",
+  // HAP 体积:让 app_packing_tool 用 DEFLATE 打包 libs/**.so(默认全部 STORED,即完全不压缩)。
+  // hvigor 看到这个属性后会把打包用的 module.json 里 compressNativeLibs 置 true,
+  // 并追加 `--compress-level 1|5|9`;取值 fast=1 / standard=5 / ultimate=9,级别越高越慢越小。
+  // 注意:实测只压缩 libs/**.so,asar/icudtl/pak/PNG 等其余条目仍是 STORED,
+  // 因为打包工具没有“压缩非 so 条目”的开关。实测 222 MB -> 120.5 MB,构建 19 s -> 34 s。
+  // 副作用:.so 改为安装时解压(extractNativeLibs 默认 true),需真机回归安装/启动。
+  // 详见 docs/RELEASE.md 第五节。
+  "properties": {
+    "ohos.pack.compressLevel": "standard"
+  },
   "dependencies": {
   },
   "execution": {

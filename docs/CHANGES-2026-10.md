@@ -2731,3 +2731,34 @@ ode --check\ OK；repack → asar **25,952,289 B**；
 2. **提交集按"我依赖谁"划分**，不按"谁改的"；
 3. **别人在建的 WIP 不属于我的清理范围**，要动先确认归属；
 4. **体积类改动（压缩）会随工作树一起被 stash 带走**，容易被误判为"构建行为变了"。
+## 第 173 轮 (2026-10-20): 提交长期滞留的窗口/字体/构建改动（外部工作流，审计后入库）
+
+这批改动从 11:07 起一直在工作树里未提交（被一次 \git stash\ 带走过，R172 恢复）。本轮统一审计并入库。
+
+### 一、改动清单与作用
+
+| 文件 | 类型 | 改动 |
+|---|---|---|
+| \electron/src/main/module.json5\ | OHOS 模块清单 | 申请 \ohos.permission.INTERNET\，用途：渲染层与原生视频覆盖层的 **loopback IPC** |
+| \scripts/patches/main-process.js\ | Electron 主进程补丁源 | \ault-open\ 时**在引擎创建新窗口之前**销毁旧 vault 窗口，避免系统播放"应用退场、图标飞回"动画（切库闪一下）；仅 touch 模式生效，排除 starter/help/sandbox/devtools |
+| \web_engine/.../ability/WebAbility.ets\ | OHOS UIAbility | 在推给渲染层的配置里发布 \xcomponentId\ 与 \originWindowId\（身份不再靠猜测；与 R171 的 ack 身份问题同源） |
+| \web_engine/.../adapter/AppWindowAdapter.ets\ | Electron \pp\ API 适配 | 平板且非 PC 模式时 \STARTUP_SHOW\，避免切库 1–2s 内没有可见窗口 |
+| \web_engine/.../resources/app/main.js\ | asar 内的主进程运行时（**产物**） | \FONT_FACE_GUARD\：拦截非本地字体源，减少 CORS/字体报错 |
+| \hvigor/hvigor-config.json5\ | 构建配置 | \ohos.pack.compressLevel: standard\，HAP **222 MB → 120.5 MB**（构建 19s→34s） |
+| \docs/RELEASE.md\ | 文档 | 新增第五节"HAP 体积" |
+
+### 二、审计结论
+
+| 项 | 结论 |
+|---|---|
+| HAP 压缩 | ✅ **实测生效**：222,004,002 B → **120,534,845 B**（本轮两次构建分别测到）；代价是 \.so\ 改为安装时解压，**需真机回归安装/启动** |
+| INTERNET 权限 | ⚠️ 真实权限申请，用途明确（loopback IPC）。若 IPC 已弃用应回收；当前保留 |
+| vault 窗口提前销毁 | ✅ 逻辑成立（先建后关会触发退场动画，故改为先关后建）；已排除 starter/help/sandbox/devtools；**风险**：touch 模式下其余 vault 窗口会被无条件销毁——符合"单窗口"设计，PC 模式不受影响 |
+| 身份发布 | ✅ 与 R171 的共享 ack 互补（一头让身份一致，一头让匹配不依赖身份） |
+| **FontFace 守卫** | ❌ **只有产物、没有补丁源**：\scripts/patches/\ 仅 \main-process.js\/\	ouch-mode.js\，下次重新生成 asar 会**丢失**该守卫。**列为待办**：抽成 \scripts/patches/font-guard.js\ 并纳入 repack 流程 |
+
+### 三、验证
+
+\BUILD SUCCESSFUL in 28 s 633 ms\；HAP **120,534,845 B**，SHA-256 \A33E429DEF1B2A9903DB06BABBE947DB155A9108BC2777FEE046885112017B85\；包内 \170\、\writeNativeOpenedAckShared\、asar **25,952,289 B** 均在位。
+
+\.appanalyzer/\（DevEco 工具产物）已加入 \.gitignore\，不入库。
