@@ -2439,3 +2439,12 @@ XComponent 的尺寸是**按视频宽高比 contain 之后的框**（ideoFrameW
 遮罩同时保留 1.2s 兜底；重建落地（playing/paused）会**取消迟到的显示**，避免"重建完了遮罩才出来"。
 
 **验证**：\BUILD SUCCESSFUL in 23 s 297 ms\；HAP **222013745 B**，SHA-256 \$sha\；字节码命中 \162\、\rmResizeCover\。
+## 第 164 轮 (2026-10-20): 留白（letterbox）统一纯黑
+
+**用户**：全屏后留白是白色的，不是黑色；昨晚黑色主题下是黑的。统一全黑，不要让人意识到留白存在。
+
+**根因**：R153 引入 MEDIA_VOID 时**只替换了遮罩那一处**，根节点仍是 	heme.bg（--background-secondary）。浅色主题下它就是**白色**，于是 contain 之后两侧的 letterbox 被刷成白色；深色主题下恰好是深色，所以"昨晚是黑的"。
+
+**修法**：根 Stack 背景改为 **MEDIA_VOID（纯黑）**，与遮罩一致。现在 	heme.bg 在本组件内出现次数为 **0**——画面区域的所有底色都是固定黑，与主题无关。
+
+**验证**：BUILD SUCCESSFUL in 23 s 307 ms；HAP **222,013,773 B**，SHA-256 EFAFDB6675491893AB2FFCA6B2D73316A977682CBC3AB785227CD8DDF9BDEF14；字节码命中 163、MEDIA_VOID，162 已不存在；	his.theme.bg 在源码中已归零。

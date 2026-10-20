@@ -252,7 +252,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v162');
+    LogUtil.info(TAG, 'transport=avplayer v163');
   }
 
   aboutToDisappear(): void {
@@ -2029,7 +2029,7 @@ export struct NativeVideoOverlay {
             this.metaRow('大小', this.sizeLabel())
 
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v162')
+              ' · k=' + this.u().toFixed(3) + ' · v163')
               .fontSize(9)
               .fontColor(this.theme.faint)
               .margin({ top: 9 })
@@ -2331,7 +2331,11 @@ export struct NativeVideoOverlay {
       this.scheduleSurfaceResize(this.videoFrameW() > 0 ? this.videoFrameW() : w,
         this.videoFrameH() > 0 ? this.videoFrameH() : h);
     })
-    .backgroundColor(this.theme.bg)
+    // The frame behind the contain-fitted surface IS the letterbox. It must be
+    // pure black in every theme: a light theme painted white bars around a 16:9
+    // picture, which made the bars the loudest thing on screen. R153 converted
+    // only the cover, so fullscreen still showed white bars.
+    .backgroundColor(MEDIA_VOID)
     .focusable(false)
     .focusOnTouch(false)
     // Default: the media layer inside consumes the touch. Transparent here
