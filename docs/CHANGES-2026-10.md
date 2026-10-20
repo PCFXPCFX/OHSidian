@@ -2385,3 +2385,24 @@ HEVC Main10                      1920×1080
 修后典型耗时：120ms 防抖 + 280ms 重建延迟 + prepare/play ≈ **0.5–0.7s**（修前可能 2.5s）。
 
 **验证**：\BUILD SUCCESSFUL in 30 s 810 ms\；HAP **222015553 B**，SHA-256 \$sha\；字节码命中 \159\、\sameBox\，\158\ 已不存在。
+## 第 161 轮 (2026-10-20): 模式切换改为"直接关闭播放器"
+
+**用户决定**：不要调整了，遇到触摸模式转窗口模式（或反过来）就自动关闭视频。
+
+**为什么这是对的**：一次模式切换同时改变**窗口密度**和 **CSS 视口**，而原生 surface 是"vp 坐标 + 固定像素缓冲"的组合；保活它必然要处理隐藏/揭示时序、surface 重建、旧几何三种竞态。前面的 R148/R150/R152/R160 都是在给这三条竞态打补丁。关闭是**确定性**的：页面恢复自己的海报与入口，用户再点一次即以**新模式**的几何重新打开。
+
+**实现**（\Index.ets\）
+- rect 分支里检测 \mode\ 翻转：\
+ativePc\ 已初始化且与本次不同 ⇒ \closeForModeSwitch()\；
+- \closeForModeSwitch()\：清 \
+ativeRequest\、\
+ativeFullscreen=false\、\
+ativeHidden=false\、清兜底定时器、恢复系统栏、\
+otifyNativeClosed()\（渲染层据此恢复 HTML \<video>\ 与海报），并打日志 \closed for mode switch (touch<->window)\；
+- \
+ativePc\ **先更新再关闭**，保证下一次 \open/rect\ 不会重复触发关闭；
+- 关闭后仍保留 \hideNativeForResize\/\evealNative\，用于**纯窗口拖拽**（未变模式的场景）。
+
+**验收条目改写**：\docs/B-NATIVE-OVERLAY.md\ #28 由"切换后刷新矩形"改为"切换即关闭，再点重开"。
+
+**验证**：\BUILD SUCCESSFUL in 23 s 270 ms\；HAP **222715290 B**，SHA-256 \$sha\；字节码命中 \closeForModeSwitch\、\closed for mode switch\。

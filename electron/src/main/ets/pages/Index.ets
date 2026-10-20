@@ -311,10 +311,18 @@ struct Index {
         // not enough. order: detect mode -> hide -> wait for the settled rect.
         const pcMode: number = typeof req.mode === 'number' ? req.mode : -1;
         if (pcMode === 0 || pcMode === 1) {
-          if (this.nativePc !== -1 && this.nativePc !== pcMode) {
-            this.hideNativeForResize();
-          }
+          const flipped: boolean = this.nativePc !== -1 && this.nativePc !== pcMode;
           this.nativePc = pcMode;
+          if (flipped && this.nativeRequest !== null) {
+            // Touch <-> window switches the window density AND the CSS viewport
+            // at once. Keeping an AVPlayer surface alive across that produced a
+            // chain of races (hide/reveal timing, surface rebuild, stale
+            // geometry) that never converged. Closing is deterministic: the page
+            // restores its own poster, and one tap re-opens with the geometry of
+            // the mode the user is now in.
+            this.closeForModeSwitch();
+            return;
+          }
         }
         // A mode switch hides the surface (keep decoding); the first rect
         // produced after the relayout settles is what reveals it again.
@@ -986,6 +994,23 @@ struct Index {
     } catch (e) {
       console.warn('NativeVideoIpc', 'window watch failed: ' + JSON.stringify(e));
     }
+  }
+
+  // Mode switches close the player on purpose - see the call site.
+  private closeForModeSwitch(): void {
+    if (this.nativeRequest === null) {
+      return;
+    }
+    this.nativeRequest = null;
+    this.nativeFullscreen = false;
+    this.nativeHidden = false;
+    if (this.nativeShowTimer >= 0) {
+      clearTimeout(this.nativeShowTimer);
+      this.nativeShowTimer = -1;
+    }
+    this.applySystemBars(false);
+    this.notifyNativeClosed();
+    console.info('NativeVideoIpc', 'closed for mode switch (touch<->window)');
   }
 
   private hideNativeForResize(): void {
