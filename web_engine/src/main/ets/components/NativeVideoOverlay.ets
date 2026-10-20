@@ -177,7 +177,6 @@ export struct NativeVideoOverlay {
   @State private showDebug: boolean = false;
   // Easter-egg media panel (long-press the timecode). Every value is read from
   // the real MP4 container by probeMedia(), not guessed.
-  @State private metaOk: boolean = false;
   @State private metaW: number = 0;
   @State private metaH: number = 0;
   @State private metaFps: number = 0;
@@ -245,7 +244,7 @@ export struct NativeVideoOverlay {
     this.released = false;
     this.scheduleMediaProbe();
     this.loadSpeed();
-    LogUtil.info(TAG, 'transport=avplayer v166');
+    LogUtil.info(TAG, 'transport=avplayer v167');
   }
 
   aboutToDisappear(): void {
@@ -270,7 +269,6 @@ export struct NativeVideoOverlay {
   // again in that case, so the old AVPlayer would keep the old source. Rebuild
   // explicitly on a source change.
   private async onSourceChanged(): Promise<void> {
-    this.metaOk = false;
     this.metaW = 0;
     this.metaH = 0;
     this.metaFps = 0;
@@ -1585,7 +1583,6 @@ export struct NativeVideoOverlay {
       if (!hasAudio) {
         this.metaAudio = '无音轨';
       }
-      this.metaOk = true;
     } catch (e) {
       LogUtil.warn(TAG, 'probe failed: ' + JSON.stringify(e));
     } finally {
@@ -1980,7 +1977,7 @@ export struct NativeVideoOverlay {
             this.metaRow('大小', this.sizeLabel())
 
             Text(Math.round(this.lastAreaW) + '×' + Math.round(this.lastAreaH) +
-              ' · k=' + this.u().toFixed(3) + ' · v166')
+              ' · k=' + this.u().toFixed(3) + ' · v167')
               .fontSize(9)
               .fontColor('#73FFFFFF')
               .margin({ top: 9 })

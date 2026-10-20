@@ -2535,3 +2535,32 @@ R152 为把探针推迟到首帧之后，做了一次全局替换 \	his.probeMed
 **改进建议（按性价比）**：① 数值右对齐（等宽数字）便于纵向比对；② 分组标题可加 1px 分隔线（固定宽度，不能用 \Divider\，会撑满）；③ 长按 3s 可复制全部信息为文本，便于反馈问题。
 
 **验证**：\BUILD SUCCESSFUL in 26 s 943 ms\；HAP **222009005 B**，SHA-256 \$sha\；字节码命中 \166\，\165\ 已不存在。
+## 第 167 轮 (2026-10-20): 对 R160–R166 的修改做审计
+
+### 审计方法
+1. **残留检查**：被删除的机制是否还有引用（编译能过不代表干净）；
+2. **在位检查**：新机制的关键符号是否都在；
+3. **只写不读扫描**：字段是否只有赋值没有读取。
+
+### 结果
+
+| 检查 | 结果 |
+|---|---|
+| \
+ativeHidden / hideNativeForResize / revealNative / nativeShowTimer / Visibility.Hidden\ | **全部 0** ✅ |
+| \esizeCover / coverTimer / armResizeCover / 正在适配\ | **全部 0** ✅ |
+| \	his.theme.bg\（画面底色必须为纯黑） | **0** ✅ |
+| \closeForModeSwitch\（Index） | 3（定义 + 调用 + 注释）✅ |
+| \scheduleMediaProbe\ / \probeMedia\ | 3 / 5 ✅ |
+| \spectChanged\ / \etryResize\ / \MEDIA_VOID\ / \MEDIA_SCRIM\ / \ackgroundBlurStyle\ | 均在位 ✅ |
+| **只写不读** | \
+ativePointer\（Index，3 处）、\metaOk\（Overlay，3 处）——**已删除** |
+
+### 顺手清理
+- \@State nativePointer\：它服务的 \@Prop pointerMode\ 在 R149 已删除，之后只有赋值没有读取；
+- \@State metaOk\：解析成功标记，写到 false/true 两次，从未被读。
+
+### 文档同步
+\docs/B-NATIVE-OVERLAY.md\ 新增《九、状态机（R160–R167 收敛后的最终形态）》：把"模式切换=关闭、窗口缩放=跟随不隐藏、全屏=仅比例变化才重建、resize 无遮罩、换源才有遮罩、底面纯黑、彩蛋磨砂"七条行为与原因写成表，与新代码一致。
+
+**验证**：\BUILD SUCCESSFUL in 27 s 289 ms\；HAP ** B**，SHA-256 \$((Get-FileHash 'electron\build\default\outputs\default\electron-default-signed.hap' -Algorithm SHA256).Hash)\；字节码命中 \167\。

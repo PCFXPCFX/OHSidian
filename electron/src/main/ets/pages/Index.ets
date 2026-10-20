@@ -134,7 +134,6 @@ struct Index {
   // Density of the transport. Kept as its own state so a `rect` heartbeat that
   // carries a changed `pointer` (mouse appeared / left) re-renders the overlay;
   // mutating the stored request object would not.
-  @State private nativePointer: boolean = false;
   // Mode switches (touch <-> window) move the window before the page relayouts.
   // The player keeps running but the surface is hidden until a fresh rect from
   // the renderer proves the new layout; otherwise the old frame stays painted
@@ -293,7 +292,6 @@ struct Index {
         // Bounds update directly; if the XComponent area changes (fullscreen or
         // window resize), the overlay debounces 320ms and rebuilds the surface
         // while preserving currentTime/play state.
-        this.nativePointer = req.pointer === true;
         // Mode changes are detected from the request itself: a touch<->window
         // switch may keep the same window size briefly, so windowSizeChange is
         // not enough. A flip CLOSES the player (see closeForModeSwitch): keeping
@@ -333,7 +331,6 @@ struct Index {
         return;
       }
       this.nativeRequest = req;
-      this.nativePointer = req.pointer === true;
       // A fresh `open` carries a complete rect, so there is nothing left to wait
       // for: clear a hide left over from a mode switch instead of letting the
       // safety net be the only thing that brings the surface back (that was the
