@@ -964,6 +964,12 @@ export class AppWindowAdapter extends BaseAdapter {
     let proxy = this.abilityManager.getProxy(id);
     let windowClass = proxy?.getWindow();
     try {
+      // [OHSidian] BUG-002: this is the OTHER writer of button visibility. If
+      // the trio still appears with 窗口边框样式 = 隐藏, this call (from the
+      // engine's frame-style handling) is the one that re-shows it - the log
+      // below says whether that happened.
+      LogUtil.info(TAG, '[OHSidian] setUseNativeFrame: useNativeFrame=' + useNativeFrame +
+        ' id=' + id);
       windowClass?.setWindowDecorVisible(useNativeFrame);
       // Keep title-bar dragging enabled regardless of the frame style: on
       // this engine the web content has no -webkit-app-region support, so
@@ -988,8 +994,7 @@ export class AppWindowAdapter extends BaseAdapter {
   }
 
   @LogMethod
-  setBackgroundColor(id: number, argbColor: number) {
-    let windowClass = this.getWindow(id);
+  setBackgroundColor(id: number, argbColor: number) {    let windowClass = this.getWindow(id);
     let data = WindowStyle.getStyleData(id);
     if (data !== undefined) {
       data.backgroundColor = `${WindowStyle.decimalColorToHex(argbColor)}`;

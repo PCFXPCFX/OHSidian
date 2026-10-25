@@ -3548,18 +3548,45 @@ function ohsidianBuildSettingsTab(){
 function ohsidianEnsureSettingsTab(){
   try{
     var s=window.app&&window.app.setting;
-    if(!s||typeof s.addSettingTab!=="function")return false;
+    if(!s||typeof s.addSettingTab!=="function"){
+      window.__ohsidianSettingsError="app.setting 不可用";
+      return false;
+    }
     if(window.__ohsidianSettingsTab)return true;
     var tab=ohsidianBuildSettingsTab();
-    if(!tab)return false;
+    if(!tab){
+      window.__ohsidianSettingsError="无法构造 SettingTab（找不到基类）";
+      return false;
+    }
     s.addSettingTab(tab);
     window.__ohsidianSettingsTab=tab;
+    window.__ohsidianSettingsError="";
     try{console.log("[OHSidian] settings section registered")}catch(eL){}
     return true;
   }catch(e){
-    try{console.warn("[OHSidian] settings section failed:",e&&e.message||e)}catch(e2){}
+    window.__ohsidianSettingsError=String(e&&e.message||e);
+    try{console.warn("[OHSidian] settings section failed:",window.__ohsidianSettingsError)}catch(e2){}
     return false;
   }
+}
+/* Registration has to happen when the settings modal can accept it: its
+   container is created lazily, so a registration attempted too early throws
+   inside addSettingTab and (because we must not break startup) is swallowed.
+   Wrapping open() gives us the one moment where the container is guaranteed to
+   exist. */
+function ohsidianHookSettingsOpen(){
+  try{
+    var s=window.app&&window.app.setting;
+    if(!s||typeof s.open!=="function"||s.__ohsidianOpenHooked)return false;
+    var orig=s.open;
+    s.open=function(){
+      var r=orig.apply(s,arguments);
+      try{ohsidianEnsureSettingsTab()}catch(e){}
+      return r;
+    };
+    s.__ohsidianOpenHooked=1;
+    return true;
+  }catch(e){return false}
 }
 /* BUG-005 touch probe — TEMPORARY (remove once the toolbar is fixed).
    ArkTS logs already prove the touch reaches the page: the hit chain ends at
@@ -3641,7 +3668,34 @@ function ohsidianScheduleSettingsTab(){
     if(tries<40)setTimeout(tick,500);   /* up to 20 s: settings module comes up late */
   };
   try{window.app.workspace.onLayoutReady(function(){ohsidianEnsureSettingsTab()})}catch(e){}
+  try{ohsidianHookSettingsOpen()}catch(eH){}
   tick();
+}
+/* One-glance answer to "is the patch I am running the one we just built?".
+   It reports the patch revision this file was packed with, whether the
+   settings section registered (and why not), and whether the two most recent
+   behavioural fixes are live. Costs nothing until someone runs it. */
+var OHSIDIAN_PATCH_REV="175";
+function ohsidianBuildStatusLines(){
+  var L=[];
+  L.push("补丁版本: "+OHSIDIAN_PATCH_REV);
+  var tabState="未注册";
+  if(window.__ohsidianSettingsTab)tabState="已注册";
+  else if(window.__ohsidianSettingsError)tabState="未注册（"+window.__ohsidianSettingsError+"）";
+  L.push("设置栏目: "+tabState);
+  L.push("工具栏拖动区修复: "+(document.getElementById("ohsidian-toolbar-hit")?"已注入":"未注入"));
+  L.push("写盘闸: "+(window.app&&window.app.vault?"随补丁加载（无独立开关）":"-"));
+  try{
+    var p=ohsidianReadUiPrefs();
+    L.push("隐藏模式保留三键: "+(p.keepSystemTitleButtons===true?"开":"关"));
+    L.push("嵌入网页字体: "+(p.webviewFonts===false?"关":"开"));
+    L.push("Pandoc 路径: "+ohsidianPandocPath());
+  }catch(e){}
+  try{
+    L.push("平台: desktop="+(window.app&&window.app.isMobile?"mobile":"desktop")+
+      " 视口="+Math.round(window.innerWidth)+"x"+Math.round(window.innerHeight));
+  }catch(e2){}
+  return L;
 }
 var install=function(app){
   if(!app||!app.commands||typeof app.commands.addCommand!=="function")return false;
@@ -3678,6 +3732,11 @@ var install=function(app){
     /* Diagnostics are namespaced on purpose: every command whose only job is
        troubleshooting starts with "OHSidian 诊断:" so it reads as a tool, and
        sits next to its siblings in the palette. */
+    app.commands.addCommand({id:"ohsidian-diag-build",name:"OHSidian 诊断: 补丁与设置状态",
+      callback:function(){
+        var L=ohsidianBuildStatusLines();
+        try{ohsidianShowReportModal("OHSidian 诊断: 补丁与设置状态",L)}catch(e){}
+      }});
     app.commands.addCommand({id:"ohsidian-diag-pandoc",name:"OHSidian 诊断: Pandoc 环境",
       callback:function(){ohsidianRunPandocProbe()}});
     try{ohsidianScheduleSettingsTab()}catch(eTab){}

@@ -660,6 +660,12 @@ export class WebAbility extends WebBaseAbility {
         winObj.setWindowDecorVisible(true);
         this.decorVisibleLast = true;
       }
+      // [OHSidian] BUG-002: logged because this is the third writer of button
+      // visibility and the only one that ignores the frame style on purpose
+      // (window form factor = the caption is legitimate UI there). Seeing this
+      // line on a 2in1 means the form factor was judged as window mode.
+      LogUtil.info(TAG, '[OHSidian] ensureSystemCaption: forcing decor+buttons (pcMode=' +
+        this.pcModeEnabled + ')');
       winObj.setWindowTitleButtonVisible(true, true, true);
       // Re-enable WMS title-bar dragging: the startup path called
       // setWindowTitleMoveEnabled(!hideTitleBar) with hideTitleBar=true
@@ -2686,6 +2692,9 @@ export class WebAbility extends WebBaseAbility {
       // Obsidian's own .titlebar. Touch mode has no caption anyway - keep it.
       if (!this.pcModeEnabled) {
         try {
+          LogUtil.info(TAG, '[OHSidian] startup decor: hideTitleBar=' + this.hideTitleBar +
+            ' keepButtonsPref=' + this.keepSystemTitleButtons() +
+            ' pcMode=' + this.pcModeEnabled);
           mainWin.setWindowDecorVisible(!this.hideTitleBar);
           this.decorVisibleLast = !this.hideTitleBar;
         } catch (exception) {
@@ -2723,6 +2732,10 @@ export class WebAbility extends WebBaseAbility {
         // covered top-right controls" report on 2in1. Presentation must follow
         // the decor: no frame, no system buttons.
         const buttonsVisible: boolean = !this.hideTitleBar || this.keepSystemTitleButtons();
+        LogUtil.info(TAG, '[OHSidian] startup title buttons: hideTitleBar=' + this.hideTitleBar +
+          ' keepPref=' + this.keepSystemTitleButtons() +
+          ' maximizable=' + this.maximizable + ' minimizable=' + this.minimizable +
+          ' closable=' + this.closable + ' => visible=' + buttonsVisible);
         mainWin.setWindowTitleButtonVisible(buttonsVisible && this.maximizable,
           buttonsVisible && this.minimizable, buttonsVisible && this.closable);
       } catch (exception) {
