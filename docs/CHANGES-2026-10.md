@@ -3338,3 +3338,61 @@ OHSidian 补丁 181    设置栏 已注册
 
 - `node --check` → OK；重打 + `verify-asar` 全绿；补丁 181。
 - 下一份读数只要看两处：`设置页 … 行 M`（M 应为 3 个 setting-item + 1 个 h2 + h3），以及 `导航项在列表`。
+
+## 第 184 轮 (2026-10-25): 设置页只显示两行的真因（DOM helper 签名）+ 1.4.2 版本号
+
+### 一、真因：`createDiv(cls, opts)` 的第二个参数是**回调**，不是选项
+
+真机：设置 → OHSidian 里只有三样东西——`OHSidian` 标题、`补丁 181` 副标题、下面一条**空的长椭圆**。
+
+Obsidian 的 DOM helper 签名是：
+
+```js
+createDiv(o, cb)   // o: string(类名) | {cls,text,attr}; cb: 回调函数
+createEl(tag, o, cb)
+```
+
+而旧代码写的是：
+
+```js
+info.createDiv("setting-item-name", { text: name });   // ← {text} 被当成 cb 调用
+```
+
+于是 `cb is not a function` 抛错，被 `ohsidianSettingsRows` 外层的 `catch` 静默吞掉：
+
+1. `h2` 与副标题已经 append → 显示正常；
+2. 第一条 `setting-item` 已经 append（但还没填内容）→ 就是那条**空的长椭圆**；
+3. 之后的 toggle、诊断区、Pandoc 行全部没执行。
+
+这也解释了 `清空后=1`：容器里只有那一个 wrapper。
+
+### 二、修法：整段改用原生 DOM
+
+不依赖 Obsidian 的 helper 语义，全部 `document.createElement` + `textContent` + 显式内联样式（`display:flex` 行、说明文字 12px/透明度 .72、复选框 18×18、分隔线用 `--background-modifier-border`）：
+
+- 布局类名仍用 `setting-item / setting-item-info / setting-item-name / setting-item-description / setting-item-control`，主题 CSS 依然生效；
+- 内联样式只是"主题没覆盖到"时的保底，保证任何版本都能看；
+- 渲染失败时把错误写进 `window.__ohsidianSettingsError` **并 `console.warn`**（打开"运行日志捕获"时能进 hilog），不再静默。
+
+### 三、版本号
+
+- `AppScope/app.json5`：`1.4.1 / 1040001` → **`1.4.2 / 1040002`**；
+- `README.md` / `README_EN.md` 同步；
+- 补丁版本 `OHSIDIAN_PATCH_REV` → **182**。
+
+### 四、与本次真机日志的对照
+
+同批日志（22:21）里还能看到：
+
+```
+22:21:57.635  show system caption failed: {"code":1300002}
+22:21:57.647  WMSImms: OnSetWindowLayoutFullScreen device not support
+22:21:58.235  setUseNativeFrame: useNativeFrame=true id=1 userDrawsFrame=false
+```
+
+即启动瞬间 `userDrawsFrame=false`（渲染层还没 publish 档位），引擎先把原生框拉起来——这正是第 178 轮加 1s 看门狗要收敛的窗口期。本轮日志里**没有** `frame style = app-drawn` 与 `safe-area top:` 两行，说明该 HAP 里的 ArkTS 仍是旧版（这两条日志是第 178 轮才加的）。下次构建请确认 ArkTS 模块也重新编译，否则边框/insets 的修复不会生效。
+
+### 五、验证
+
+- `node --check` OK；重打 + `verify-asar` 全绿；补丁 182。
+- 预期：设置页出现 3 条可交互行（三键、网页字体、Pandoc 路径）+ 一条"检查"按钮 + 结果框。

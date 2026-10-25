@@ -3474,36 +3474,49 @@ function ohsidianSetKeepSystemTitleButtons(on){
 function ohsidianSettingsRows(root){
   try{
     if(!root)return;
-    if(root.empty)root.empty();
-    var wrap=root.createDiv?root.createDiv("ohsidian-settings"):null;
-    if(!wrap)return;
-    if(wrap.createEl)wrap.createEl("h2",{text:"OHSidian"});
-    if(wrap.createEl){
-      /* Identity line: tells the user (and us) that the page that just opened is
-         OUR page, and which patch version rendered it. */
-      try{
-        var sub=wrap.createEl("div",{text:"补丁 "+OHSIDIAN_PATCH_REV+
-          " · 其余诊断在命令面板搜索「OHSidian」"});
-        if(sub)sub.style.cssText="opacity:.65;font-size:12px;margin:-6px 0 14px";
-      }catch(eSub){}
-    }
+    while(root.firstChild){root.removeChild(root.firstChild)}
+    var mk=function(tag,cls,text){
+      var el=document.createElement(tag);
+      if(cls)el.className=cls;
+      if(text!==undefined)el.textContent=text;
+      return el;
+    };
+    var wrap=mk("div","ohsidian-settings");
+    root.appendChild(wrap);
+    wrap.appendChild(mk("h2",null,"OHSidian"));
+    var sub=mk("div",null,"补丁 "+OHSIDIAN_PATCH_REV+" · 其余诊断在命令面板搜索「OHSidian」");
+    sub.style.cssText="opacity:.65;font-size:12px;margin:-6px 0 14px";
+    wrap.appendChild(sub);
+    /* Plain DOM on purpose: Obsidian's createDiv(o, cb) treats the SECOND
+       argument as a callback, so the old createDiv("setting-item-name",{text})
+       threw "cb is not a function" and aborted the whole page after the first
+       empty row - on device that looked like "只有两行 + 一个长椭圆". */
     var mkRow=function(name,desc){
-      var row=wrap.createDiv?wrap.createDiv("setting-item"):null;
-      if(!row)return null;
-      var info=row.createDiv?row.createDiv("setting-item-info"):null;
-      if(info&&info.createDiv){
-        info.createDiv("setting-item-name",{text:name});
-        info.createDiv("setting-item-description",{text:desc});
-      }
-      var ctl=row.createDiv?row.createDiv("setting-item-control"):null;
+      var row=mk("div","setting-item");
+      row.style.cssText="display:flex;align-items:center;gap:14px;"+
+        "justify-content:space-between;padding:10px 0;"+
+        "border-top:1px solid var(--background-modifier-border,#8883)";
+      var info=mk("div","setting-item-info");
+      info.style.cssText="flex:1 1 auto;min-width:0";
+      var nm=mk("div","setting-item-name",name);
+      nm.style.cssText="font-weight:500;margin-bottom:3px";
+      var ds=mk("div","setting-item-description",desc);
+      ds.style.cssText="opacity:.72;font-size:12px;line-height:1.45";
+      info.appendChild(nm);info.appendChild(ds);
+      var ctl=mk("div","setting-item-control");
+      ctl.style.cssText="flex:0 0 auto;display:flex;align-items:center;gap:8px";
+      row.appendChild(info);row.appendChild(ctl);
+      wrap.appendChild(row);
       return ctl;
     };
     var mkToggle=function(ctl,on,onChange){
-      if(!ctl||!ctl.createEl)return;
-      var inp=ctl.createEl("input",{type:"checkbox"});
-      if(!inp)return;
+      if(!ctl)return;
+      var inp=document.createElement("input");
+      inp.type="checkbox";
       inp.checked=!!on;
+      inp.style.cssText="width:18px;height:18px";
       inp.addEventListener("change",function(){onChange(!!inp.checked)});
+      ctl.appendChild(inp);
     };
     /* 1) window buttons */
     mkToggle(mkRow("隐藏模式下保留系统窗口按钮",
@@ -3520,71 +3533,64 @@ function ohsidianSettingsRows(root){
         var ok=ohsidianWriteUiPrefs(prefs);
         try{new Notice("OHSidian: 嵌入网页字体跟随 → "+(on?"开":"关")+(ok?"（重开该网页生效）":"（写入失败）"),5000)}catch(e){}
       });
-    /* --- 诊断（Diagnostics）---------------------------------------------
-       Everything a user only reaches when something is broken lives under this
-       heading: no ribbon icon, no startup work, no notice unless they press a
-       button. New checks go here as plain rows so the section stays scannable. */
-    if(wrap.createEl)wrap.createEl("h3",{text:"诊断"});
+    /* --- 诊断 ---------------------------------------------------------- */
+    var h3=mk("h3",null,"诊断");
+    h3.style.cssText="margin:22px 0 6px";
+    wrap.appendChild(h3);
     /* 3a) pandoc path: a real setting, remembered, defaulted to the known one */
     var pathCtl=mkRow("Pandoc 路径",
       "导出 Word 时使用的 pandoc。留空或填回默认值即恢复默认：" + OHSIDIAN_PANDOC_DEFAULT);
-    if(pathCtl&&pathCtl.createEl){
-      var inp=pathCtl.createEl("input",{type:"text"});
-      if(inp){
-        inp.style.minWidth="320px";
-        inp.placeholder=OHSIDIAN_PANDOC_DEFAULT;
-        inp.value=ohsidianReadUiPrefs().pandocPath||"";
-        var save=function(){
-          var ok=ohsidianSetPandocPath(inp.value);
-          try{new Notice("OHSidian: Pandoc 路径 "+(ok?"已保存":"保存失败"),4000)}catch(e){}
-        };
-        inp.addEventListener("change",save);
-        inp.addEventListener("blur",save);
-      }
+    if(pathCtl){
+      var inp=document.createElement("input");
+      inp.type="text";
+      inp.style.cssText="min-width:260px;max-width:100%";
+      inp.placeholder=OHSIDIAN_PANDOC_DEFAULT;
+      inp.value=ohsidianReadUiPrefs().pandocPath||"";
+      var save=function(){
+        var ok=ohsidianSetPandocPath(inp.value);
+        try{new Notice("OHSidian: Pandoc 路径 "+(ok?"已保存":"保存失败"),4000)}catch(e){}
+      };
+      inp.addEventListener("change",save);
+      inp.addEventListener("blur",save);
+      pathCtl.appendChild(inp);
     }
     /* 3b) the check itself: runs only on click, result inline (copyable) */
     var checkCtl=mkRow("Pandoc 环境检查",
       "检查路径是否存在、是否软链接、权限位，并分别用两种调用方式实测（直接 execve / 经 /bin/sh）。结果写在下方，可复制。");
     var outEl=null;
-    if(checkCtl&&checkCtl.createEl){
-      var btn=checkCtl.createEl("button",{text:"检查"});
-      if(btn){
-        if(wrap.createEl){
-          outEl=wrap.createEl("pre",{cls:"ohsidian-diag-out"});
-          if(outEl){
-            outEl.style.display="none";
-            outEl.style.whiteSpace="pre-wrap";
-            outEl.style.wordBreak="break-all";
-            outEl.style.maxHeight="360px";
-            outEl.style.overflow="auto";
-            outEl.style.fontSize="12px";
-            outEl.style.background="var(--background-secondary)";
-            outEl.style.padding="10px";
-            outEl.style.borderRadius="8px";
-          }
-        }
-        btn.addEventListener("click",function(){
-          try{
-            btn.textContent="检查中…";
-            setTimeout(function(){
-              try{
-                var r=ohsidianBuildPandocReport();
-                if(outEl){
-                  outEl.textContent=r.lines.join("\n");
-                  outEl.style.display="block";
-                }
-                ohsidianWritePandocReport(r.report);
-              }catch(eR){
-                if(outEl){outEl.textContent="检查失败: "+String(eR&&eR.message||eR);outEl.style.display="block"}
-              }finally{
-                btn.textContent="检查";
+    if(checkCtl){
+      var btn=document.createElement("button");
+      btn.textContent="检查";
+      btn.addEventListener("click",function(){
+        try{
+          btn.textContent="检查中…";
+          setTimeout(function(){
+            try{
+              var r=ohsidianBuildPandocReport();
+              if(outEl){
+                outEl.textContent=r.lines.join("\n");
+                outEl.style.display="block";
               }
-            },50);
-          }catch(e){btn.textContent="检查"}
-        });
-      }
+              ohsidianWritePandocReport(r.report);
+            }catch(eR){
+              if(outEl){outEl.textContent="检查失败: "+String(eR&&eR.message||eR);outEl.style.display="block"}
+            }finally{
+              btn.textContent="检查";
+            }
+          },50);
+        }catch(e){btn.textContent="检查"}
+      });
+      checkCtl.appendChild(btn);
+      outEl=mk("pre","ohsidian-diag-out");
+      outEl.style.cssText="display:none;white-space:pre-wrap;word-break:break-all;"+
+        "max-height:360px;overflow:auto;font-size:12px;padding:10px;border-radius:8px;"+
+        "background:var(--background-secondary,#8881)";
+      wrap.appendChild(outEl);
     }
-  }catch(e){}
+  }catch(e){
+    window.__ohsidianSettingsError="渲染设置页失败: "+String((e&&e.message)||e);
+    try{console.warn("[OHSidian] settings rows failed:",window.__ohsidianSettingsError)}catch(e2){}
+  }
 }
 /* The tab has to be a REAL SettingTab instance, not a look-alike: app.setting
    .addSettingTab() calls tab.update() before it appends anything, and the base
@@ -3898,7 +3904,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="181";
+var OHSIDIAN_PATCH_REV="182";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
