@@ -2942,3 +2942,82 @@ if (t === "hidden") document.body.addClass("is-hidden-frameless");
 - 忽略引擎的 `setUseNativeFrame(true)` 意味着 `hidden`/`custom` 档下**没有系统标题条**，窗口拖动改由标签栏（app-region 已实现）承担；若某些形态下标签栏不可用，需要回调该策略。
 - `removeAllListeners("frame")` 会顶掉 Obsidian 自己的 handler；该 channel 只传边框样式，风险可控，但若上游新增逻辑需重新评估。
 - `mod-linux` 兜底是"就近取等价"，若 UA 本就含已知 token 则完全不生效。
+
+## 第 177 轮 (2026-10-25): 设置栏目第三次失败的真因 + 两份真机诊断的解读
+
+### 一、真机回执：边框那条赢了，设置那条还站着
+
+两次 `OHSidian 诊断: 补丁与设置状态`（补丁 175）关键行：
+
+| 行 | 输出 A | 输出 B |
+|----|--------|--------|
+| 窗口边框样式(实时读取) | `native` | `native` |
+| 布局 | `is-mobile=false is-hidden-frameless=false` | `is-mobile=true is-hidden-frameless=false` |
+| 元素 | `.titlebar=无` `.titlebar-button-container.mod-right=无` | 同左 |
+| 引擎发布 | `decor=system insets.top=0` | `decor=none insets.top=38.67` |
+| 平台 | `app.isMobile=false 视口=866x616` | `app.isMobile=true 视口=1245x818` |
+| 设置栏目 | **未注册（`refreshSearch` 空指针）** | **同一条错误** |
+
+**赢的那条**：`native` 档下 `.titlebar` 与自绘按钮容器**都不存在**了。这正是第 176 轮主进程 `frame` IPC 改动的目的——改之前 `sendSync("frame")` 对"未设置"返回 `null`，渲染层 `|| "hidden"` 会造出 `frameDom`（自绘标题栏 + 自绘三键），于是原生框和自绘框叠在一起。现在 IPC 回答生效值 `native`，`frameDom` 不再创建。**这是设备上第一次证实双控件那条修复真的生效**。
+
+**没赢的那条**：设置栏目的错误消息一字未变，说明第 170 轮"等 `searchComponent` 就绪再注册"的护栏根本没轮到生效——它在更早的地方就炸了。
+
+两份输出的差异（`is-mobile` / `decor` / 视口）不是回归：`app.js` 里 `EmulateMobile`（localStorage 键）会让 `rd.isMobile=!0` 并加 `emulate-mobile`，触屏模式走移动布局；桌面模式走桌面布局。输出 B 是触屏模式（`decor=none` + `insets.top=38.67` 让内容避开状态栏），输出 A 是桌面模式（`decor=system`）。两者各自自洽。
+
+顺带修正第 176 轮的一个推测：`--frame-right-space:126px` 的消费规则全部挂在 `.is-hidden-frameless` 下（`app.css:4153-4176`），而 `native`/`custom` 档不加这个类——所以那 126px 在系统边框档**完全不生效**，不会把控件往左推。`mod-linux` 兜底保留（`hidden` 档才真正用到它），但不再是"贴边"嫌疑。
+
+### 二、真因：`this.setting` 是 null，不是 `searchComponent`
+
+`app.setting.addSettingTab` 的真实实现（asar `app.js@3972172`，压缩但可读）：
+
+```js
+function(e){
+  e.navEl || (e.navEl = createDiv({cls:"vertical-tab-nav-item tappable", ...}));   // 导航项
+  e.update(),                                  // ← 先调我们的 update
+  this.searchIndex.addTab(e),                  // 只是 push
+  this.isPluginSettingTab(e) ? this.pluginTabs.push(e)
+                             : (this.settingTabs.push(e), this.tabContainer.appendChild(e.navEl)),
+  this.updatePluginSection(),
+  this.refreshSearch()                         // ← 最后才动 searchComponent
+}
+```
+
+而基类 `SettingTab.update()` 是：
+
+```js
+update(){
+  this.settingItems = this.getSettingDefinitions();
+  H2(this.settingItems, this.name);
+  this.setting.refreshSearch();          // ← this.setting 是构造函数第二个参数
+  this.setting.refreshCurrentPage(this);
+}
+```
+
+我们的构造调用一直是 `new Base(window.app, null)`——**把 `setting` 显式传成了 null**。于是 `addSettingTab` 第一句 `e.update()` 就抛 `Cannot read properties of null (reading 'refreshSearch')`。
+
+这条错误的措辞极具误导性：`refreshSearch` 这个词让人（包括第 170 轮的我）立刻想到"搜索组件还没建好"，于是加了就绪护栏——护栏本身是对的（`refreshSearch` 里确实要 `searchComponent.getValue()`），但它压根没被走到：错误来自**我们自己传进去的 null**，不是 Obsidian 的内部状态。两轮修补都在错误的对象上。
+
+### 三、改法
+
+1. `new Base(window.app, s)`——把设置模态本身作为 `setting` 传入，与 Obsidian 构造任何核心 tab 的方式一致。
+2. 基类选择改为**跳过插件 tab**（`isPluginSettingTab` / `plugin` / `manifest` 三重判断）：万一 `settingTabs[0]` 是某个社区插件注册的 tab，继承它的类会让我们被归进"社区插件"分组，还会带 `manifest` 依赖。
+3. 构造结果缓存到 `window.__ohsidianSettingsTabObj`：重试不再反复 new，也避免半成功状态下重复入列。
+4. 失败分阶段记录：`addSettingTab 抛错: … @栈第2-3帧`，不再只有一句 message。
+5. 注册后校验导航项：`tabContainer.querySelector('[data-setting-id="ohsidian"]')`，缺失则记 `已注册，但导航项未出现`（说明注册路径通了、渲染没通，是两件事）。
+6. 兜底 tab 形状补齐 `setting/settingItems/getSettingDefinitions/update`——万一基类找不到，`addSettingTab` 仍能跑完。
+7. 诊断命令新增：
+   - `设置注册前置: searchComponent=… searchIndex=… tabContainer=… 尝试=N`（未注册时才打印）——下一次一眼看出是"没轮到"还是"又炸了"；
+   - `触屏模式: EmulateMobile=开/关 override=… want=… systemMode=…`——解释两份输出为什么布局不同；
+   - 布局行补 `emulate-mobile=…`。
+
+### 四、验证
+
+- `node --check scripts/patches/touch-mode.js` → OK
+- `node scripts/refresh-app-patch.mjs` → 重打成功
+- `node scripts/verify-asar.cjs` → 全绿，新增标记 `app settings tab constructed with the modal`（锁住 `new Base(window.app,s)`，防止下次重打包退回 null）
+
+### 五、风险与待确认
+
+- 触屏模式下设置面板是"页面栈"形态，`tabContainer` 仍存在（`addSettingTab` 自己就往里 append），预期可用；若真机仍失败，新的分阶段错误会直接指出炸在 `update` 还是 `appendChild`。
+- `refreshCurrentPage(this)` 在非当前页时应当无副作用；若出现"注册后设置页被强制切走"，回退点就在这里。
+- 仍未知：桌面模式与触屏模式两次输出的窗口大小不同（866x616 vs 1245x818），下次开机日志里对着 `windowId` 看一眼即可，不影响本次结论。

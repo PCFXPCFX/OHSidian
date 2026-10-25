@@ -3514,15 +3514,39 @@ function ohsidianSettingsRows(root){
     }
   }catch(e){}
 }
+/* The tab has to be a REAL SettingTab instance, not a look-alike: app.setting
+   .addSettingTab() calls tab.update() before it appends anything, and the base
+   implementation is
+       update(){ this.settingItems=this.getSettingDefinitions(); H2(...);
+                 this.setting.refreshSearch(); this.setting.refreshCurrentPage(this) }
+   - `this.setting` is the SECOND constructor argument. Round 170 passed null
+   there, so addSettingTab threw "Cannot read properties of null (reading
+   'refreshSearch')" from our own tab, not from Obsidian's search component.
+   The readiness gate fixed the other half (searchComponent must exist for
+   refreshSearch to call getValue on it), but registration kept dying on this
+   one. Pass the settings modal itself; that is what Obsidian passes to every
+   core tab it constructs. */
+function ohsidianSettingsTabBase(s){
+  try{
+    var tabs=s.settingTabs||[],i=0,t=null,isPlugin=false;
+    for(i=0;i<tabs.length;i++){
+      t=tabs[i];
+      if(!t||!t.constructor)continue;
+      isPlugin=false;
+      try{isPlugin=typeof s.isPluginSettingTab==="function"&&s.isPluginSettingTab(t)}catch(eP){}
+      /* plugin tabs need a manifest and would be filed under "community
+         plugins"; a plain core tab gives us the untouched base class */
+      if(!isPlugin&&!t.plugin&&!t.manifest)return t.constructor;
+    }
+  }catch(e){}
+  return null;
+}
 function ohsidianBuildSettingsTab(){
   try{
     var s=window.app&&window.app.setting;
     if(!s)return null;
-    var Base=null;
-    try{
-      var core=(s.settingTabs&&s.settingTabs.length)?s.settingTabs[0]:null;
-      if(core&&core.constructor)Base=core.constructor;
-    }catch(e1){}
+    if(window.__ohsidianSettingsTabObj)return window.__ohsidianSettingsTabObj;
+    var Base=ohsidianSettingsTabBase(s);
     if(!Base){
       try{
         var pt=(s.pluginTabs&&s.pluginTabs.length)?s.pluginTabs[0]:null;
@@ -3531,10 +3555,16 @@ function ohsidianBuildSettingsTab(){
     }
     var tab=null;
     if(Base){
-      try{tab=new Base(window.app,null)}catch(e3){tab=null}
+      try{tab=new Base(window.app,s)}catch(e3){tab=null}
     }
     if(!tab){
-      tab={};
+      /* last resort: shape addSettingTab accepts (navEl is created by it) */
+      tab={
+        setting:s,
+        settingItems:[],
+        getSettingDefinitions:function(){return[]},
+        update:function(){return this}
+      };
       try{
         tab.containerEl=document.createElement("div");
         tab.containerEl.className="vertical-tab-content";
@@ -3544,7 +3574,9 @@ function ohsidianBuildSettingsTab(){
     tab.name="OHSidian";
     tab.display=function(){ohsidianSettingsRows(this.containerEl)};
     tab.hide=function(){};
-    return (tab.containerEl||tab.navEl)?tab:null;
+    if(!tab.containerEl&&!tab.navEl)return null;
+    window.__ohsidianSettingsTabObj=tab;
+    return tab;
   }catch(e){return null}
 }
 /* The settings modal builds its search component in onOpen(), and
@@ -3570,14 +3602,30 @@ function ohsidianEnsureSettingsTab(){
       window.__ohsidianSettingsError="等待设置面板打开（searchComponent 尚未创建）";
       return false;
     }
+    window.__ohsidianSettingsTries=(window.__ohsidianSettingsTries||0)+1;
     var tab=ohsidianBuildSettingsTab();
     if(!tab){
       window.__ohsidianSettingsError="无法构造 SettingTab（找不到基类）";
       return false;
     }
-    s.addSettingTab(tab);
+    try{
+      if(!s.settingTabs||s.settingTabs.indexOf(tab)<0)s.addSettingTab(tab);
+    }catch(eAdd){
+      var where="";
+      try{where=String((eAdd&&eAdd.stack)||"").split("\n").slice(1,3).join(" | ").slice(0,180)}catch(eS){}
+      window.__ohsidianSettingsError="addSettingTab 抛错: "+
+        String((eAdd&&eAdd.message)||eAdd)+(where?"  @"+where:"");
+      try{console.warn("[OHSidian] settings section failed:",window.__ohsidianSettingsError)}catch(e2){}
+      return false;
+    }
     window.__ohsidianSettingsTab=tab;
     window.__ohsidianSettingsError="";
+    window.__ohsidianSettingsNote="";
+    try{
+      var nav=(s.tabContainer&&s.tabContainer.querySelector)?
+        s.tabContainer.querySelector('[data-setting-id="ohsidian"]'):null;
+      if(!nav)window.__ohsidianSettingsNote="已注册，但导航项未出现";
+    }catch(eN){}
     try{console.log("[OHSidian] settings section registered")}catch(eL){}
     return true;
   }catch(e){
@@ -3752,7 +3800,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="175";
+var OHSIDIAN_PATCH_REV="176";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -3770,9 +3818,21 @@ function ohsidianBuildStatusLines(){
   var L=[];
   L.push("补丁版本: "+OHSIDIAN_PATCH_REV);
   var tabState="未注册";
-  if(window.__ohsidianSettingsTab)tabState="已注册";
-  else if(window.__ohsidianSettingsError)tabState="未注册（"+window.__ohsidianSettingsError+"）";
+  if(window.__ohsidianSettingsTab){
+    tabState="已注册"+(window.__ohsidianSettingsNote?"（"+window.__ohsidianSettingsNote+"）":"");
+  }else if(window.__ohsidianSettingsError){
+    tabState="未注册（"+window.__ohsidianSettingsError+"）";
+  }
   L.push("设置栏目: "+tabState);
+  if(!window.__ohsidianSettingsTab){
+    try{
+      var ss=window.app&&window.app.setting;
+      L.push("设置注册前置: searchComponent="+(ss&&ss.searchComponent?"有":"无")+
+        " searchIndex="+(ss&&ss.searchIndex?"有":"无")+
+        " tabContainer="+(ss&&ss.tabContainer?"有":"无")+
+        " 尝试="+(window.__ohsidianSettingsTries||0));
+    }catch(eSS){}
+  }
   L.push("工具栏拖动区修复: "+(document.getElementById("ohsidian-toolbar-hit")?"已注入":"未注入"));
   L.push("窗口边框样式(实时读取): "+ohsidianReadFrameStyle()+
     "  → ArkTS 应" + (ohsidianAppDrawsFrame()?"自绘（隐藏系统标题条）":"用系统标题条"));
@@ -3781,7 +3841,8 @@ function ohsidianBuildStatusLines(){
     var has=function(sel){try{return document.querySelector(sel)?"有":"无"}catch(e){return "?"}};
     L.push("布局: is-mobile="+(body.indexOf("is-mobile")>=0) +
       " is-hidden-frameless="+(body.indexOf("is-hidden-frameless")>=0) +
-      " is-fullscreen="+(body.indexOf("is-fullscreen")>=0));
+      " is-fullscreen="+(body.indexOf("is-fullscreen")>=0)+
+      " emulate-mobile="+(body.indexOf("emulate-mobile")>=0));
     L.push("元素: .titlebar="+has(".titlebar")+"  .mobile-toolbar="+has(".mobile-toolbar")+
       "  .mobile-navbar="+has(".mobile-navbar")+"  .titlebar-button-container.mod-right="+
       has(".titlebar-button-container.mod-right"));
@@ -3803,6 +3864,14 @@ function ohsidianBuildStatusLines(){
     L.push("嵌入网页字体: "+(p.webviewFonts===false?"关":"开"));
     L.push("Pandoc 路径: "+ohsidianPandocPath());
   }catch(e){}
+  try{
+    var cfgT=readMode(),wantT=null;
+    try{wantT=resolveWant(cfgT)}catch(eW){}
+    L.push("触屏模式: EmulateMobile="+(localStorage.getItem(KEY)?"开":"关")+
+      "  override="+((cfgT&&cfgT.override)||"auto")+
+      "  want="+(wantT===null||wantT===undefined?"?":(wantT?"touch":"desktop"))+
+      "  systemMode="+((cfgT&&cfgT.systemMode)||"?"));
+  }catch(eT){}
   try{
     L.push("平台: app.isMobile="+((window.app&&window.app.isMobile)?"true":"false")+
       "  视口="+Math.round(window.innerWidth)+"x"+Math.round(window.innerHeight));

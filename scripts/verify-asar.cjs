@@ -95,6 +95,11 @@ try {
     'wrapper FontFace guard retained': wrapper.includes('installFontFaceGuard'),
     // BUG-002: user switch that keeps the system window buttons in 隐藏 mode.
     'app title-buttons switch (settings + command)': app.includes('ohsidianEnsureSettingsTab') && app.includes('keepSystemTitleButtons'),
+    // The tab must be constructed with the settings modal as its `setting`:
+    // addSettingTab() calls tab.update(), and the base update() dereferences
+    // this.setting.refreshSearch(). Passing null (rounds 168-176) killed the
+    // registration with a message that pointed at the search component instead.
+    'app settings tab constructed with the modal': app.includes('new Base(window.app,s)') && app.includes('ohsidianSettingsTabBase'),
     // BUG-004 probe — TEMPORARY: ships so the reporter can answer "ENOENT vs
     // EACCES" in one click. Remove this marker together with the probe code,
     // its command and its settings button in the version after next.
