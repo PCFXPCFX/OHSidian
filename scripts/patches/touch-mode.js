@@ -3824,7 +3824,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="176";
+var OHSIDIAN_PATCH_REV="177";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -3860,6 +3860,12 @@ function ohsidianBuildStatusLines(){
   L.push("工具栏拖动区修复: "+(document.getElementById("ohsidian-toolbar-hit")?"已注入":"未注入"));
   L.push("窗口边框样式(实时读取): "+ohsidianReadFrameStyle()+
     "  → ArkTS 应" + (ohsidianAppDrawsFrame()?"自绘（隐藏系统标题条）":"用系统标题条"));
+  /* ArkTS can only see what we PUBLISH - if the two disagree (write failed,
+     different path), the frame fix is inert while this line still looks sane. */
+  try{
+    var pubSt=ohsidianReadUiPrefs().frameStyle;
+    L.push("已发布档位(ohsidian-ui-prefs.json): "+(pubSt||"(未写)"));
+  }catch(ePub){}
   try{
     var body=(document.body&&document.body.className)||"";
     var has=function(sel){try{return document.querySelector(sel)?"有":"无"}catch(e){return "?"}};
