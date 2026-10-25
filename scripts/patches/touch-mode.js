@@ -371,7 +371,14 @@ function applySafeArea(){
 function watchBodyStyles(){
   try{
     if(!window.MutationObserver)return;
-    var mo=new MutationObserver(function(){applySafeArea()});
+    var mo=new MutationObserver(function(){
+      applySafeArea();
+      /* round 180: the mobile-titlebar rule keys off `is-mobile`, which is
+         added during Obsidian's bootstrap - react to the class change. This
+         only rewrites a <style> element, so it cannot re-trigger the body
+         observer (no body mutation). */
+      try{applyWindowDecor()}catch(eW){}
+    });
     var hook=function(){
       var b=document.body;
       /* "class" too: the pad decision now depends on is-mobile, which Obsidian
@@ -395,14 +402,32 @@ function applyWindowDecor(){
     var cfg=readMode();
     var g=resolveGeometry(cfg);
     var system=!!(g?(g.decor==="system"):(cfg&&cfg.windowDecor==="system"));
+    /* Round 180: the MOBILE layout has no desktop title bar - Obsidian's own
+       mobile chrome (drawer + floating nav) is the top of the UI. But with
+       窗口边框样式 = 隐藏/custom the bootstrap still builds frameDom, body gets
+       `is-frameless`, and app.css reserves --titlebar-height (30px) for it:
+         body.is-frameless:not(.is-hidden-frameless, .is-fullscreen){padding-top:30px}
+       On device this showed up as .app-container=30 on TOP of the 38.67px
+       status-bar inset - the "顶部留白很宽" report (68.67px total). Drop both:
+       no mobile chrome element and no reserved strip. */
+    var mobile=false;
+    try{mobile=!!(document.body&&document.body.classList&&
+      document.body.classList.contains("is-mobile"))}catch(eM){}
+    var css="";
+    if(system)css+=".titlebar{display:none!important}";
+    if(mobile)css+="body.is-mobile .titlebar{display:none!important}"+
+      "body.is-mobile.is-frameless{padding-top:0!important}"+
+      "body.is-mobile .titlebar-button-container{display:none!important}";
     var el=document.getElementById(DECOR_STYLE_ID);
-    if(system&&!el&&document.head){
+    if(css&&!el&&document.head){
       el=document.createElement("style");
       el.id=DECOR_STYLE_ID;
-      el.textContent=".titlebar{display:none!important}";
+      el.textContent=css;
       document.head.appendChild(el);
-    }else if(!system&&el){
+    }else if(!css&&el){
       if(el.parentNode){el.parentNode.removeChild(el)}
+    }else if(el&&el.textContent!==css){
+      el.textContent=css;
     }
   }catch(e){}
 }
@@ -3839,7 +3864,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="178";
+var OHSIDIAN_PATCH_REV="179";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the

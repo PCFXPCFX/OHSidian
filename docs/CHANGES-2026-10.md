@@ -3150,3 +3150,58 @@ topPx = Math.max(0, overlapTop - prop.drawableRect.top);
 ### 五、明确查不到的部分
 
 引擎派发 `contextmenu` 的代码行（符号已剥离）、`relaunch` 后 `quit()` 的实际结果、pinch 是否被转成 `wheel+ctrlKey`。这三条只能真机自证。
+
+## 第 180 轮 (2026-10-25): 留白定性修正——不是双重避让，是 30px 的桌面标题栏残留在移动布局
+
+### 一、真机读数（补丁 178，触屏模式，`custom` 档）
+
+```
+窗口边框样式(实时读取): custom
+已发布档位(ohsidian-ui-prefs.json): custom     ← 发布链路通了
+布局: is-mobile=true … emulate-mobile=true
+元素: .titlebar=有  .titlebar-button-container.mod-right=有
+引擎发布: decor=none  insets.top=38.67
+媒体查询: hover=none pointer=coarse clipboard=object
+最近右键: trusted=true firesTouch=true
+安全区: body 内联 padding-top=(无)  data-pad=0  --safe-area-inset-top=38.67px
+顶部坐标: .app-container=30  .workspace=30  .view-header=109
+body 类: … is-frameless … emulate-mobile is-tablet is-mobile …
+```
+
+### 二、定性：38.67 是对的，多出来的是 30
+
+| 来源 | 高度 | 判定 |
+|------|------|------|
+| `.is-mobile .workspace>.mod-root{padding-top:var(--safe-area-inset-top)}` | 38.67 | ✅ 正好一个状态栏（`drawableRect.top=0`，可绘制面贴顶，所以这一份必须给） |
+| `body.is-frameless{padding-top:var(--titlebar-height)}` + `.titlebar` | **30** | ❌ 桌面标题栏在移动布局里的残留 |
+
+`.app-container=30` 与 `--titlebar-height:30px` 精确吻合，合计 68.67 —— 就是"很宽"。
+
+上一轮怀疑的"双重避让"在这份读数里**不成立**（`data-pad=0`、body 无 padding），那是更早 build 的现象；第 178 轮的 `is-mobile` 防线把那条路永久堵住了。
+
+### 三、修法
+
+移动布局本来就没有桌面标题栏（Obsidian 手机端用抽屉 + 浮动导航），`frame=hidden/custom` 只是让引导过程建了 `frameDom`。所以：
+
+```css
+body.is-mobile .titlebar{display:none!important}
+body.is-mobile.is-frameless{padding-top:0!important}
+body.is-mobile .titlebar-button-container{display:none!important}
+```
+
+挂在 `applyWindowDecor()` 里（它本来就在管"什么时候藏 `.titlebar`"），并把 `applyWindowDecor()` 加进 body 的 MutationObserver —— `is-mobile` 是在 Obsidian 自己的引导过程中加上的，晚到时也要立刻生效。只改 `<style>` 文本，不会再次触发 body 观察者。
+
+### 四、顺带结案的三条
+
+- **D1**：`最近右键: trusted=true firesTouch=true` → 菜单由引擎派发，结案；
+- **B2**：`clipboard=object` → 渲染层有 clipboard，不是问题；
+- **C2**：`hover=none` → 折叠箭头确实要常显（这条前提终于有读数了）。
+
+### 五、验证与风险
+
+- `node --check` → OK；重打 + `verify-asar` 全绿，新增标记 `app mobile layout drops the desktop titlebar`；补丁 179。
+- 风险：`custom` 档在**桌面布局**下不受影响（选择器限定 `is-mobile`）；触摸模式下标题栏消失后，窗口操作交给系统手势/任务管理器（触摸模式本来就是全屏，没有窗口三键的语义）。
+
+### 六、另登记 BUG-008（退出时 SIGTRAP）
+
+崩溃报告：`CrBrowserMain` SIGTRAP，另一线程停在 `MainThread::HandleTerminateApplication → Watchdog::Stop()`，页面历史 `leaves foreground` 与崩溃同一时刻，进程寿命 24 s。判读为**退出拆除阶段的 CHECK**，非运行中崩溃。已登记待复现，并列出两个待确认问题（是否每次退出都报、使用中有没有闪退）。

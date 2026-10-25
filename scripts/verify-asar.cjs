@@ -112,6 +112,10 @@ try {
     // framed window and the user sees two sets of window buttons.
     'main frame ipc answers effective style': main.includes('__ohsidianFrameIpc') && main.includes('removeAllListeners("frame")'),
     'app platform class fallback': app.includes('applyPlatformClassFix') && app.includes('mod-linux'),
+    // Mobile layout has no desktop title bar: with frame=hidden/custom the
+    // bootstrap still builds frameDom and body.is-frameless reserves 30px for
+    // it, which stacked on top of the status-bar inset (68.67px blank).
+    'app mobile layout drops the desktop titlebar': app.includes('body.is-mobile.is-frameless{padding-top:0!important}'),
     // Self-report command: proves which patch revision is actually running and
     // why the settings section did or did not register.
     'app build/settings status command': app.includes('ohsidianBuildStatusLines') && app.includes('ohsidian-diag-build'),
