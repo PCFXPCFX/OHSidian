@@ -3021,3 +3021,62 @@ update(){
 - 触屏模式下设置面板是"页面栈"形态，`tabContainer` 仍存在（`addSettingTab` 自己就往里 append），预期可用；若真机仍失败，新的分阶段错误会直接指出炸在 `update` 还是 `appendChild`。
 - `refreshCurrentPage(this)` 在非当前页时应当无副作用；若出现"注册后设置页被强制切走"，回退点就在这里。
 - 仍未知：桌面模式与触屏模式两次输出的窗口大小不同（866x616 vs 1245x818），下次开机日志里对着 `windowId` 看一眼即可，不影响本次结论。
+
+## 第 178 轮 (2026-10-25): 双控件真因（闩锁先于档位判定）+ 留白双重避让防线 + 平台清单复核
+
+### 一、双控件：这次找到的是"顺序"问题
+
+真机回报：`隐藏` 与 `Obsidian 风格` 两档**仍然**各有两套窗口键（两个 × / 两个放大 / 两个最小化）。上一轮（176）的判定方向没错，但生效条件写错了位置：
+
+```ts
+private ensureSystemCaption(winObj) {
+  if (this.captionApplied) return true;     // ← 闩锁先return
+  if (this.appDrawsFrame()) return false;   // ← 档位判定永远轮不到
+```
+
+`captionApplied` 在启动时就被置真——那时渲染层还没把 `frameStyle` 写进 `ohsidian-ui-prefs.json`（预览层要等 DOM ready），所以 `appDrawsFrame()` 返回 false，系统标题条被正常应用并闩锁。之后渲染层 publish 了 `hidden`，但闩锁已真，**再也不会重看档位**。
+
+第二个写入者是引擎：`setUseNativeFrame(true)` 在窗口显示后约 0.6 s 自己触发（无 JS/ArkTS 调用方）。它在 `AppWindowAdapter` 的覆盖分支里被拦下，但**拦截条件同样依赖 prefs 文件**，竞态窗口内仍会把标题条拉回来。
+
+### 二、改法
+
+1. **判定前置**：`ensureSystemCaption` 先查档位，再查闩锁；档位为自绘时调用 `enforceFrameStyle()` 并返回 false。
+2. **新增 `enforceFrameStyle()`**：由已有的 1 s 看门狗驱动，自绘档下每 3 s 重 assert 一次
+   `setWindowDecorVisible(false)` + `setWindowTitleButtonVisible(keep,keep,keep)`，并清 `captionApplied`；
+   切回 `native` 时重置闩锁并 `pushSafeAreaInsets()`，让系统标题条重新出现、同时把 `decor` 重新发布给渲染层。
+3. **渲染层 5 s 轮询 publish `frameStyle`**：改档不必重启（写文件只在值变化时发生，日志也只记变化）。
+4. 保底特性不变：`隐藏模式保留三键 = 开` 时仍会留系统三键（`keep=true`）。
+
+风险（必须在真机确认）：自绘档下系统标题条被彻底收起后，**拖动/缩放只能依赖标签栏或 `.titlebar` 的 app-region**。若发现窗口不能拖动，说明引擎的 app-region 只是"自有热区"而非真的实现，需要改用 `AppWindow.StartWindowMoving` 手动接管——这条与 C1 的定性是同一个问题。
+
+### 三、顶部留白：先堵"双重避让"，再加读数
+
+现象：触屏移动布局顶部留白约为状态栏两倍。三条候选（见 `BUG-BACKLOG.md` BUG-007）：
+
+1. 桌面兜底 padding 落到了移动布局上（判据用的是模式文件，而实际布局由 `is-mobile` 类决定）；
+2. `densityPixels`(1.9125) 与 Chromium 实际 DPR(≈2.249) 不是同一个数，换算整体偏大；
+3. 窗口本身已在状态栏下方，再叠一次 insets。
+
+本轮只做第 1 条的**结构性排除**：`pad` 判据改为"模式文件说桌面 **且** body 无 `is-mobile`"；`MutationObserver` 的 `attributeFilter` 加 `class`，`is-mobile` 晚到也能立刻撤回 padding。第 2、3 条要靠读数，故诊断命令新增：
+
+- `平台: … dpr=…`
+- `安全区: body 内联 padding-top=… data-pad=… --safe-area-inset-top=…`
+- `顶部坐标: .app-container=… .workspace=… .view-header=… .mobile-navbar=…`
+
+### 四、平台能力清单复核（`docs/PLATFORM-ADAPTATION.md`）
+
+- **撤回 D1**："鸿蒙 isIosApp 恒 false ⇒ 没有右键通路"是错的。用户实测长按可唤出菜单；代码里右键菜单至少三条通路：引擎/Chromium 在触摸下的合成 `contextmenu`、拖动排序组件的触摸兜底（未拖动即 `dispatchEvent(new MouseEvent("contextmenu"))`，与 iOS 无关）、以及 iOS 专有的补充。原结论作废。
+- 新增**可信度评级表**（每条给出"能修好且不引入回归"的主观概率与扣分理由），Top 3 改为 A1 / C3 / C2；C1 降级为"待定性"，取决于下一次真机验证工具栏是否恢复点击。
+- 顺带核实：`Nf` 是 Capacitor 的 Keyboard 插件，本引擎不存在 → `hasPhysicalKeyboard` 永远是 `true`，A1 的成因确认；真值可改用 `inputDevice.getDeviceList()`。
+
+### 五、验证
+
+- `node --check scripts/patches/touch-mode.js` → OK
+- `node scripts/refresh-app-patch.mjs` → 重打成功、`verify-asar` 全绿
+- **未编译 ArkTS**：`WebAbility.ets` 的改动等 DevEco 构建
+
+### 六、待确认
+
+1. 自绘两档是否只剩一套键；窗口还能不能拖动/缩放。
+2. 诊断里 `安全区` / `顶部坐标` / `dpr` 三行读数，用来给留白定性。
+3. 工具栏点击是否恢复（决定 C1 的定性）。

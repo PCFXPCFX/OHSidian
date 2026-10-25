@@ -38,16 +38,47 @@
 
 | # | 依赖点 | 原文 | 后果 | 建议 |
 |---|--------|------|------|------|
-| D1 | 长按→`contextmenu` 只在 iOS 安装 | `app.js@3884400`：`rd.isIosApp&&…dispatchEvent(new MouseEvent("contextmenu"…))` | 鸿蒙 `isIosApp` 恒 false → **没有任何右键通路**，重命名/删除/"更多"菜单不可达 | 条件换成 isMobile/OHOS |
+| D1 | 长按→`contextmenu` | ~~`rd.isIosApp&&…dispatchEvent(new MouseEvent("contextmenu"…))`~~ | **原判断错误（第 178 轮更正）**：用户实测长按能唤出右键菜单 | 见下方"更正" |
+
+> **更正（2026-10-25，用户实测）**：清单初版把 `app.js` 里 `rd.isIosApp && … dispatchEvent(new MouseEvent("contextmenu"))` 当成唯一右键通路，推论"鸿蒙上 isIosApp 恒 false ⇒ 没有任何右键菜单"——**这条不成立**。真相是右键菜单至少有三条独立通路：
+> 1. **引擎/Chromium 自己**：长按在触摸设备上会合成 `contextmenu` 事件（Android 语义），Obsidian 各处 `addEventListener("contextmenu", …)` 直接收到；
+> 2. **拖动排序组件的触摸兜底**（与 iOS 无关）：触摸抬起且未发生拖动时，`t.target.dispatchEvent(new MouseEvent("contextmenu", …))`——文件/标签/侧栏项的"长按出菜单"多来自这里；
+> 3. `rd.isIosApp` 分支只是 **iOS 专有**的合成 click / 三指手势等补充，缺失不影响菜单可达性。
+>
+> 因此"重命名/删除/更多菜单不可达"的说法作废；真正需要单独处理的只剩"长按菜单的**触摸位置/尺寸**是否适合手指"这类体验问题。
 | D2 | 中键/修饰键语义 | `app.js@1133443`：`1===e.button?"tab":isModifier(t,"Mod")…` | 中键新标签、Ctrl 点击、Alt 拆屏、Shift 连选全不可用 | 补长按菜单/多选入口 |
 | D3 | 缩放只认 wheel | `app.js@1727661`、`@2418740` | 图片/Canvas/图谱无法双指缩放 | 合成 pinch → scale |
 | D4 | Ctrl+滚轮字体缩放 | `app.js@3101987` | 触摸不可用（系统档已由 fontScale 补丁覆盖，用户手动缩放失效） | 设置项接 `fontScaleOverride` |
 
-## 优先适配 Top 3
+## 优先适配 Top 3（第 178 轮复核后）
 
-1. **A1 `hasPhysicalKeyboard`**——影响每个输入框的焦点与输入法弹出，面积最大、改动最小（一行覆盖）。
-2. **C1 app-region / 窗口拖动**——桌面布局的窗口拖动与最大化目前依赖它，属"不能用"级别。
-3. **D1 长按右键缺失**——鸿蒙上所有"更多菜单 → 重命名/删除"入口都会消失，功能面最广。
+1. **A1 `hasPhysicalKeyboard`**——影响每个输入框的焦点与输入法弹出，面积最大；改法是一行文本替换 + 由 ArkTS 用 `inputDevice.getDeviceList()` 给出真实值（避免把带键盘保护套的平板判错）。
+2. **C3 分栏分隔条 1–3px → ≥12px**——纯 CSS，改动最小、几乎无回归风险。
+3. **C2 只认 `hover` 的交互**——折叠箭头等触摸端常显（`@media (hover:hover)` 共 149 块，只需挑高频的几处）。
+
+> C1（app-region / 窗口拖动）不再进 Top 3：它的整组策略取决于"引擎到底实不实现 app-region"这个**尚未定性**的问题，见文末。
+
+## 可信度评级（"改动能真正修好且不引入回归"的主观概率）
+
+| # | 条目 | 可信度 | 依据 / 扣分点 |
+|---|------|--------|----------------|
+| C3 | 分隔条加宽 | **85%** | 单条 CSS 覆盖，命中 `--divider-width`；扣分：拖拽命中区还受 `-webkit-app-region`/指针事件影响 |
+| B1 | remote 兜底补键 | **85%** | 纯 JS 兜底对象补 `getCurrentWindow` 等；扣分：只有该模块确实缺失时才走这条路，未实测 |
+| A1 | `hasPhysicalKeyboard=false` | **80%** | `Nf` 是 Capacitor 的 Keyboard 插件，本引擎不存在 → 值永远是 `true`。`inputDevice.getDeviceList()` 能给真值；扣分：外接键盘热插拔需要监听，否则只在启动时准确 |
+| C2 | hover 交互常显 | **75%** | CSS 覆盖可做；扣分：149 处 `hover` 媒体查询需逐处挑，漏掉的地方仍不可见 |
+| D4 | Ctrl+滚轮缩放替代 | **70%** | 已有 fontScale 通道，加设置项即可；扣分：与系统字体缩放叠加语义要定清 |
+| C1 | app-region / 拖动 | **60%** | 工具栏 `no-drag` 已改，等真机确认；若引擎实现的是"自有热区"而非 app-region，整组结论要改 |
+| B3 | `app.relaunch()` | **60%** | 可改由 ArkTS 重启 Ability；扣分：重启时机与会话恢复（未保存内容）需处理 |
+| C4 | 跳过 styled-scrollbars | **60%** | 一个 body 类；扣分：滚动条宽度参与布局的补偿逻辑在别处 |
+| A2 | `isPhone` 改按窗口宽 | **55%** | 判据可改；扣分：`canSplit/canStackTabs` 一串派生行为，回归面大，且我们日常窗口本就 >600px |
+| B4 | 麦克风权限 | **55%** | 需 `abilityAccessCtrl` + 引擎侧转发；扣分：引擎录音链路是否可用未验证 |
+| B2 | 剪贴板分支 | **50%** | 取决于兼容层是否提供渲染层 `clipboard`；未实测 |
+| D2 | 中键/修饰键语义 | **40%** | 触摸设备没有中键，只能做替代入口，本质是产品设计而非修 bug |
+| D3 | 双指缩放 | **35%** | 要合成 wheel/scale 事件链，图片/Canvas/图谱三处各自实现，工作量大且易被上游改写 |
+| A3 | 更新链接 | **不做** | 更新器已禁用，纯展示问题 |
+| A4 | ctime 分支 | **不做** | 影响极低 |
+| B5 | 回收站语义 | **不做** | 已有 `.trash` 替代并在文档说明 |
+| D1 | 长按右键 | **不适用** | 原判断错误：长按本来就能出菜单（见第四节更正） |
 
 ## 待澄清：`-webkit-app-region` 到底实不实现
 
