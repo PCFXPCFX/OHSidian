@@ -2872,3 +2872,73 @@ Obsidian 自己的 `app.css` 里：
 - 触摸探针（临时的）可对照：`inToolbar=YES` 且命中元素是 `.mobile-toolbar` 时按钮生效。
 
 **风险**：无。只改一个 CSS 属性，不影响窗口模式、桌面布局与既有拖动区。若将来需要"从工具栏拖窗口"，再在 OHSidian 设置里加开关，本轮不做。
+
+## 第 176 轮 (2026-10-25): 窗口边框三档的真实语义 + 双控件根因（引擎覆盖）+ 日志挖掘
+
+### 一、三档边框到底画了什么（源码核对）
+
+`app.js` 的窗口引导处只有一句判定：
+
+```js
+var t = ipcRenderer.sendSync("frame") || "hidden";
+if (t !== "native") frameDom = new ObsidianFrameDom(electronWindow, win);   // 自绘标题栏
+if (t === "hidden") document.body.addClass("is-hidden-frameless");
+```
+
+| 档 | body 类 | 桌面 `.titlebar` | 自绘窗控 | 依赖系统边框 |
+|----|---------|------------------|----------|--------------|
+| `hidden`（隐藏） | `is-frameless is-hidden-frameless mod-*` | 存在但**透明**、`pointer-events:none`（`app.css:6245`），只剩右上按钮容器可点（`:6260`） | 有 | 否 |
+| `custom`（Obsidian 风格） | `is-frameless mod-*` | 显示整条 30px，可拖动（`:4088-4112`） | 有 + logo | 否 |
+| `native`（系统） | 无 | **DOM 里不存在** | 无 | 是 |
+
+窗控按钮的 onclick 直接调 `remote.getCurrentWindow().minimize()/maximize()/close()`（`app.js@1585915`），所以用 CSS 隐藏它们只挡点击、不丢功能。
+
+`-webkit-app-region`：`.titlebar` 是 drag（`app.css:6150`），但 `hidden` 档被改成 `no-drag`（`:4138`）——所以该档的拖动面是**标签栏**（`.workspace-tab-header-container-inner`，`:6657`）和左侧 ribbon。
+
+### 二、双控件的根因（真机日志 + 三条写入路径）
+
+```
+13.545  ensureSystemCaption: forcing decor+buttons (pcMode=true) → WMS [4671] [1,1,1]
+13.546  [OHSidian] startup title buttons … => visible=false      → WMS [4671] [0,0,0]   ← 我们的修复生效
+14.204  engine: setUseNativeFrame(1,true)                        → WMS [4671] [1,1,1]   ← 引擎 0.6s 后覆盖
+14.212  engine: setUseNativeFrame(1,true)                        → WMS [4671] [1,1,1]
+```
+
+`setUseNativeFrame` 的调用方**不在任何 JS / ArkTS 里**（app.js、asar 全部 JS、全部 `.ets` 都搜过），是引擎原生侧回调我们的绑定——和 `StartWindowMoving` 同一个机制。
+
+同时日志里 `show system caption failed {"code":1300002}` 出现两次、`SetWindowType: permission denied!` 两次、`Get rect of buttons row failed, buttonRow are hidden` 三次——这套 caption API 在本机本来就不稳。
+
+### 三、改法
+
+1. **渲染层 publish 真实档位**：`ipcRenderer.sendSync("frame")` 是 Obsidian 自己的问法（主进程读全局 `obsidian.json` 的 `frame`），渲染层把它写进 `ohsidian-ui-prefs.json` 的 `frameStyle`；ArkTS 这才第一次能知道"用户选的是哪档"（那份配置在全局文件里，ArkTS 读不到）。
+2. **ArkTS 尊重用户选择**：
+   - `setUseNativeFrame(true)` 在 `frameStyle` 为 `hidden`/`custom` 时**被忽略**（改为 `decor=false` + 按钮按偏好），并打日志；
+   - `ensureSystemCaption()` 在同一条件下**直接返回 false**（不再强推系统标题条）；
+   - 启动路径的按钮判定改为 `(!hideTitleBar && !appDrawsFrame()) || keepSystemTitleButtons`；
+   - `appDrawsFrame()` 带 2 s 缓存——它会在每次 insets 事件里被调用，不能每次都读盘。
+3. **主进程 `frame` IPC 回答生效值**：`D.frame` 为空时回 `"native"`（与第 93 轮"未设置=原生"的窗口创建语义一致），消除"原生窗口 + 自绘 titlebar"这种自相矛盾状态。
+4. **平台类兜底**：Obsidian 用 UA 决定 `mod-windows/mod-linux`，`--frame-right-space:126px` 等右侧预留只在这些类下存在；UA 不含已知 token 时补 `mod-linux`（引擎基于 Linux），让窗口按钮的几何规则生效。
+
+### 四、日志里挖到的其他东西
+
+| 发现 | 数据 | 处置 |
+|------|------|------|
+| `LoadFromTypeface … not variable font!` | **194 次**，集中在启动 200ms 内 | 待查：疑似字体桥反复注册静态字体；记入待办 |
+| `GetText failed to get uv entry` | 50 次 | IME 取文本失败，输入法侧，暂不影响功能 |
+| `Failed to find font name Microsoft YaHei` ×3 | 用户设置里有雅黑但设备没有 | 属预期（鸿蒙无雅黑），选择器应过滤 |
+| `GetResult: wait for 30, timeout` ×4 + `MoveToAsync: Layout timeout` | 每次 `setUseNativeFrame` 之后伴随 setBounds/MoveTo 抖动 | 与"引擎在窗口创建后重设几何"同源，待观察 |
+| 第二个窗口 `obsidian1/4672` `hideTitleBar=false` | 它是**带原生框的另一个窗口**，三键可见是正确行为 | 诊断时勿与主窗口混淆 |
+| 布局 `UpdateRect [577 217] -> [577 87]` 往返 3 次（Δ130） | 窗口在两种几何间反复 | 记入窗口状态机待办 |
+
+### 五、验证
+
+- `node --check scripts/patches/touch-mode.js` / `main-process.js` → OK
+- `node scripts/refresh-app-patch.mjs` → 重打成功（asar 24.83 MiB）
+- `node scripts/verify-asar.cjs` → 全绿，新增 `main frame ipc answers effective style`、`app platform class fallback`
+- **未跑 `hvigorw`**：`WebAbility` / `AppWindowAdapter` 两处 ArkTS 改动仍需 DevEco 编译验证
+
+### 六、风险
+
+- 忽略引擎的 `setUseNativeFrame(true)` 意味着 `hidden`/`custom` 档下**没有系统标题条**，窗口拖动改由标签栏（app-region 已实现）承担；若某些形态下标签栏不可用，需要回调该策略。
+- `removeAllListeners("frame")` 会顶掉 Obsidian 自己的 handler；该 channel 只传边框样式，风险可控，但若上游新增逻辑需重新评估。
+- `mod-linux` 兜底是"就近取等价"，若 UA 本就含已知 token 则完全不生效。

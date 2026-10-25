@@ -38,6 +38,7 @@ import { deviceInfo, settings } from '@kit.BasicServicesKit';
 import { image } from '@kit.ImageKit';
 import Want from '@ohos.app.ability.Want';
 
+import { fileIo } from '@kit.CoreFileKit';
 import { AbilityManager } from '../common/AbilityManager';
 import { BaseAdapter } from '../common/BaseAdapter';
 import { ConfigData } from '../common/Constants';
@@ -959,17 +960,68 @@ export class AppWindowAdapter extends BaseAdapter {
     }
   }
 
+  // [OHSidian] BUG-002 helpers: read the renderer-published frame facts.
+  private readUiPrefs(): Record<string, Object> {
+    try {
+      const ctx = this.ctxAdapter.getActiveContext() || this.ctxAdapter.getContext();
+      if (!ctx) {
+        return {};
+      }
+      const p: string = ctx.filesDir + '/ohsidian-ui-prefs.json';
+      if (!fileIo.accessSync(p)) {
+        return {};
+      }
+      const cfg = JSON.parse(fileIo.readTextSync(p)) as Record<string, Object>;
+      if (cfg === null || cfg === undefined) {
+        return {};
+      }
+      return cfg;
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // "hidden" / "custom" both mean "Obsidian draws the bar itself".
+  private userDrawsFrame(): boolean {
+    const st: string = this.readUiPrefs()['frameStyle'] as string;
+    return st === 'hidden' || st === 'custom';
+  }
+
+  private keepSystemTitleButtonsPref(): boolean {
+    return this.readUiPrefs()['keepSystemTitleButtons'] === true;
+  }
+
   @LogMethod
   setUseNativeFrame(id: number, useNativeFrame: boolean) {
     let proxy = this.abilityManager.getProxy(id);
     let windowClass = proxy?.getWindow();
     try {
-      // [OHSidian] BUG-002: this is the OTHER writer of button visibility. If
-      // the trio still appears with 窗口边框样式 = 隐藏, this call (from the
-      // engine's frame-style handling) is the one that re-shows it - the log
-      // below says whether that happened.
+      // [OHSidian] BUG-002: this is the OTHER writer of button visibility, and on
+      // device it is the one that wins: the engine calls it ~0.6 s after the
+      // window is shown (log: "useNativeFrame=true id=1" twice, right after our
+      // startup path had correctly hidden the trio), which re-shows the system
+      // caption on top of Obsidian's own titlebar.
+      // Obsidian's own bootstrap decides the bar by asking the main process for
+      // "frame": native -> system caption and no Obsidian frameDom; hidden /
+      // custom -> frameless, Obsidian draws frameDom, and THIS engine implements
+      // -webkit-app-region so that bar can still drag the window. The renderer
+      // publishes that value into ohsidian-ui-prefs.json (the config itself lives
+      // in the global obsidian.json, which ArkTS cannot read).
+      const userDraws: boolean = this.userDrawsFrame();
       LogUtil.info(TAG, '[OHSidian] setUseNativeFrame: useNativeFrame=' + useNativeFrame +
-        ' id=' + id);
+        ' id=' + id + ' userDrawsFrame=' + userDraws);
+      if (useNativeFrame && userDraws) {
+        const keep: boolean = this.keepSystemTitleButtonsPref();
+        windowClass?.setWindowDecorVisible(false);
+        windowClass?.setWindowTitleButtonVisible(keep, keep, keep);
+        let prefs: WindowPreferences | undefined = proxy?.getWindowPreferences();
+        if (prefs) {
+          prefs.hideTitleBar = true;
+          proxy?.setWindowPreferences(prefs);
+        }
+        LogUtil.info(TAG, '[OHSidian] setUseNativeFrame(true) overridden by frame style, buttons=' + keep);
+        return;
+      }
       windowClass?.setWindowDecorVisible(useNativeFrame);
       // Keep title-bar dragging enabled regardless of the frame style: on
       // this engine the web content has no -webkit-app-region support, so

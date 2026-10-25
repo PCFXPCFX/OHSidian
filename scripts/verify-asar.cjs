@@ -102,6 +102,11 @@ try {
     // BUG-005: the mobile toolbar must not be a window drag region - this
     // engine implements -webkit-app-region and turned every tap into a move.
     'app toolbar not a drag region': app.includes('ohsidian-toolbar-hit') && app.includes('applyToolbarHitFix'),
+    // BUG-002: the frame IPC must answer with the EFFECTIVE style (unset ->
+    // native), otherwise the renderer builds its own titlebar on a natively
+    // framed window and the user sees two sets of window buttons.
+    'main frame ipc answers effective style': main.includes('__ohsidianFrameIpc') && main.includes('removeAllListeners("frame")'),
+    'app platform class fallback': app.includes('applyPlatformClassFix') && app.includes('mod-linux'),
     // Self-report command: proves which patch revision is actually running and
     // why the settings section did or did not register.
     'app build/settings status command': app.includes('ohsidianBuildStatusLines') && app.includes('ohsidian-diag-build'),

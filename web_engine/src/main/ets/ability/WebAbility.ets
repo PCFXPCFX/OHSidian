@@ -655,6 +655,15 @@ export class WebAbility extends WebBaseAbility {
     if (this.captionApplied) {
       return true;
     }
+    // BUG-002: with 隐藏 / Obsidian 风格 the user asked for Obsidian's own bar.
+    // Obsidian creates its frameDom for both of those values, and this engine
+    // implements -webkit-app-region, so that bar carries the window controls AND
+    // drags the window. Showing the system caption here is what produced the
+    // "two sets of controls" report on device.
+    if (this.appDrawsFrame()) {
+      LogUtil.info(TAG, '[OHSidian] caption skipped: frame style draws its own bar');
+      return false;
+    }
     try {
       if (this.decorVisibleLast !== true) {
         winObj.setWindowDecorVisible(true);
@@ -704,6 +713,39 @@ export class WebAbility extends WebBaseAbility {
       return prefs !== null && prefs !== undefined && prefs['keepSystemTitleButtons'] === true;
     } catch (exception) {
       LogUtil.warn(TAG, 'read ui prefs failed: ' + JSON.stringify(exception));
+      return false;
+    }
+  }
+
+  // BUG-002: "hidden" / "custom" both mean the user wants Obsidian's own title
+  // bar. The renderer publishes the value (it is the only side that can ask the
+  // main process for "frame"); ArkTS cannot read the global config itself.
+  private framePrefCache: string = '';
+  private framePrefCacheAt: number = 0;
+
+  private appDrawsFrame(): boolean {
+    // pushSafeAreaInsets() calls ensureSystemCaption() on every geometry event,
+    // so this must not touch the disk each time.
+    const now: number = Date.now();
+    if (this.framePrefCacheAt > 0 && now - this.framePrefCacheAt < 2000) {
+      return this.framePrefCache === 'hidden' || this.framePrefCache === 'custom';
+    }
+    try {
+      const prefsPath: string = this.context.getApplicationContext().filesDir +
+        '/ohsidian-ui-prefs.json';
+      if (!fileIo.accessSync(prefsPath)) {
+        this.framePrefCache = '';
+        this.framePrefCacheAt = now;
+        return false;
+      }
+      const prefs: Record<string, Object> = JSON.parse(fileIo.readTextSync(prefsPath)) as
+        Record<string, Object>;
+      const st: string = (prefs !== null && prefs !== undefined) ? prefs['frameStyle'] as string : '';
+      this.framePrefCache = st;
+      this.framePrefCacheAt = now;
+      return st === 'hidden' || st === 'custom';
+    } catch (exception) {
+      this.framePrefCacheAt = now;
       return false;
     }
   }
@@ -2731,7 +2773,8 @@ export class WebAbility extends WebBaseAbility {
         // the content while Obsidian drew its own: the "double window controls /
         // covered top-right controls" report on 2in1. Presentation must follow
         // the decor: no frame, no system buttons.
-        const buttonsVisible: boolean = !this.hideTitleBar || this.keepSystemTitleButtons();
+        const buttonsVisible: boolean = (!this.hideTitleBar && !this.appDrawsFrame()) ||
+          this.keepSystemTitleButtons();
         LogUtil.info(TAG, '[OHSidian] startup title buttons: hideTitleBar=' + this.hideTitleBar +
           ' keepPref=' + this.keepSystemTitleButtons() +
           ' maximizable=' + this.maximizable + ' minimizable=' + this.minimizable +

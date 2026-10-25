@@ -2731,10 +2731,12 @@ applySafeArea();
 applyWindowDecor();
 applySystemFonts();
 applyToolbarHitFix();
+applyPlatformClassFix();
+try{ohsidianPublishFrameStyle()}catch(eFs){}
 hookTrash();
 applyKeyboard();
 watchBodyStyles();
-document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor();applySystemFonts();applyToolbarHitFix();hookTrash();applyKeyboard()});
+document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor();applySystemFonts();applyToolbarHitFix();applyPlatformClassFix();try{ohsidianPublishFrameStyle()}catch(eFs2){}hookTrash();applyKeyboard()});
 pollTick();
 /* The touch-mode drawer exposes the vault switcher as a <select> whose
    options are rendered through an engine-native popup. That popup's render
@@ -3613,6 +3615,66 @@ function ohsidianHookSettingsOpen(){
    position differs from its layout box. This logs exactly that for touches in
    the lower part of the screen - one tap answers it.
    Needs the console bridge: run "OHSidian: 运行日志捕获 开/关" first. */
+/* The frame style, asked the same way Obsidian asks it.
+   app.js does `var t = electron.ipcRenderer.sendSync("frame") || "hidden"` in the
+   window bootstrap, so the main process is the source of truth (it reads
+   <userData>/obsidian.json's `frame`). The renderer can therefore obtain the
+   EXACT value Obsidian is using - no file parsing, no guessing - and publish it
+   for the ArkTS side, which cannot see that config at all:
+     native           -> system caption + system buttons; no Obsidian titlebar
+     hidden / custom  -> Obsidian draws its own titlebar (frameDom) AND the engine
+                         implements -webkit-app-region, so that bar also drags the
+                         window; a system caption on top of it is the duplicate
+   ArkTS uses `frameStyle` in ohsidian-ui-prefs.json to decide whether to honour
+   or ignore the engine's "use native frame" callback. */
+function ohsidianReadFrameStyle(){
+  try{
+    var el=require("electron");
+    if(el&&el.ipcRenderer&&typeof el.ipcRenderer.sendSync==="function"){
+      var v=el.ipcRenderer.sendSync("frame");
+      if(typeof v==="string"&&v)return v;
+    }
+  }catch(e){}
+  try{
+    var fs2=require("fs"),np=require("path"),remote=require("@electron/remote");
+    var j=JSON.parse(fs2.readFileSync(np.join(remote.app.getPath("userData"),"obsidian.json"),"utf8"));
+    if(j&&typeof j.frame==="string"&&j.frame)return j.frame;
+  }catch(e2){}
+  return "hidden";   /* Obsidian's own fallback in the bootstrap above */
+}
+function ohsidianAppDrawsFrame(){
+  var st=ohsidianReadFrameStyle();
+  return st==="hidden"||st==="custom";
+}
+function ohsidianPublishFrameStyle(){
+  try{
+    var st=ohsidianReadFrameStyle();
+    var prefs=ohsidianReadUiPrefs();
+    if(prefs.frameStyle!==st){
+      prefs.frameStyle=st;
+      ohsidianWriteUiPrefs(prefs);
+    }
+    try{console.log("[OHSidian] frame style:",st)}catch(eL){}
+    return st;
+  }catch(e){return ""}
+}
+/* Obsidian derives `mod-windows` / `mod-linux` / `mod-macos` from the user
+   agent, and several frame rules only exist under one of them - notably
+   `--frame-right-space: 126px`, the room reserved on the right for the window
+   buttons. If this engine's UA carries none of the tokens Obsidian looks for,
+   those rules silently disappear and the title bar degrades (controls flush to
+   the edge, no reservation). Declare the closest equivalent so the geometry
+   rules apply; harmless if the class is already there. */
+function applyPlatformClassFix(){
+  try{
+    var b=document.body;
+    if(!b||!b.classList)return;
+    var cl=b.classList;
+    if(cl.contains("mod-windows")||cl.contains("mod-macos")||cl.contains("mod-linux"))return;
+    cl.add("mod-linux");
+    try{console.log("[OHSidian] platform class fallback: mod-linux")}catch(eL){}
+  }catch(e){}
+}
 /* BUG-005 root cause (device log + obsidian's own app.css):
    `.mobile-toolbar { -webkit-app-region: drag }` marks the whole mobile toolbar
    as a WINDOW DRAG REGION, and THIS engine implements app-region - its C++ side
@@ -3712,7 +3774,8 @@ function ohsidianBuildStatusLines(){
   else if(window.__ohsidianSettingsError)tabState="未注册（"+window.__ohsidianSettingsError+"）";
   L.push("设置栏目: "+tabState);
   L.push("工具栏拖动区修复: "+(document.getElementById("ohsidian-toolbar-hit")?"已注入":"未注入"));
-  L.push("窗口边框样式(obsidian.json frame): "+ohsidianFrameStyle());
+  L.push("窗口边框样式(实时读取): "+ohsidianReadFrameStyle()+
+    "  → ArkTS 应" + (ohsidianAppDrawsFrame()?"自绘（隐藏系统标题条）":"用系统标题条"));
   try{
     var body=(document.body&&document.body.className)||"";
     var has=function(sel){try{return document.querySelector(sel)?"有":"无"}catch(e){return "?"}};
@@ -3722,6 +3785,11 @@ function ohsidianBuildStatusLines(){
     L.push("元素: .titlebar="+has(".titlebar")+"  .mobile-toolbar="+has(".mobile-toolbar")+
       "  .mobile-navbar="+has(".mobile-navbar")+"  .titlebar-button-container.mod-right="+
       has(".titlebar-button-container.mod-right"));
+    L.push("平台类: "+(body.indexOf("mod-linux")>=0?"mod-linux":(body.indexOf("mod-windows")>=0?"mod-windows":
+      (body.indexOf("mod-macos")>=0?"mod-macos":"(none)")))+
+      "  右侧预留(--frame-right-space)="+
+      (getComputedStyle(document.body).getPropertyValue("--frame-right-space").trim()||"(未定义)"));
+    L.push("UA: "+String(navigator.userAgent||"").slice(0,120));
   }catch(eB){}
   try{
     var fs2=require("fs"),np=require("path"),remote=require("@electron/remote");

@@ -387,4 +387,50 @@ __vrEl.ipcMain.on("vault-open",function(ev){
     try{console.log("[OHSidian] vault-open: closed "+killed+" old vault window(s) behind the chooser")}catch(e){}
   }catch(e){}
 });
+}catch(e){}})();
+;(function(){try{
+/* BUG-002: the frame style over IPC.
+   The renderer decides its title bar with
+       var t = ipcRenderer.sendSync("frame") || "hidden";
+       if (t !== "native") frameDom = new ObsidianFrameDom(...);
+   and the main process answers with the RAW config value - null when the user
+   never picked one. Our round-93 patch makes an UNSET value mean NATIVE when the
+   window is created, so answering null built Obsidian's own titlebar on a
+   natively framed window: two sets of window buttons (device log
+   17:12:13.545 [1,1,1] -> 13.546 [0,0,0] -> 14.204 [1,1,1]).
+   Answer with the EFFECTIVE style so both sides agree. */
+var __ohEl=require("electron");
+var __ohApp=__ohEl&&__ohEl.app;
+var __ohIpc=__ohEl&&__ohEl.ipcMain;
+if(__ohApp&&__ohIpc&&typeof __ohIpc.on==="function"){
+  var __ohEffectiveFrame=function(){
+    try{
+      var fs2=require("fs"),np=require("path");
+      var p=np.join(__ohApp.getPath("userData"),"obsidian.json");
+      if(!fs2.existsSync(p))return "native";
+      var j=JSON.parse(fs2.readFileSync(p,"utf8"));
+      var f=j&&j.frame;
+      if(f==="native"||f==="custom"||f==="hidden")return f;
+      return "native";   /* unset -> native, same rule as window creation */
+    }catch(e){return "native"}
+  };
+  var __ohInstallFrameIpc=function(){
+    try{
+      if(__ohIpc.__ohsidianFrameIpc)return;
+      try{__ohIpc.removeAllListeners("frame")}catch(eR){}
+      __ohIpc.on("frame",function(event){
+        try{event.returnValue=__ohEffectiveFrame()}catch(e){}
+      });
+      __ohIpc.__ohsidianFrameIpc=1;
+      try{console.log("[OHSidian] frame IPC -> "+__ohEffectiveFrame()+" (unset counts as native)")}catch(e){}
+    }catch(e){}
+  };
+  if(__ohApp.isReady&&__ohApp.isReady()){
+    __ohInstallFrameIpc();
+  }else if(typeof __ohApp.whenReady==="function"){
+    __ohApp.whenReady().then(__ohInstallFrameIpc).catch(function(){});
+  }else{
+    setTimeout(__ohInstallFrameIpc,0);
+  }
+}
 }catch(e){}})();/*OHSIDIAN-MAIN-PATCH-END*/
