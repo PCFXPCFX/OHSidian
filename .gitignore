@@ -98,3 +98,7 @@ web_engine/src/main/resources/resfile/resources/app/obsidian.asar
 
 # DevEco AppAnalyzer output (tool artifact, not source)
 .appanalyzer/
+
+# Agent / package-manager working directories (environment artifacts)
+.dsh-tmp/
+.pnpm-store/
