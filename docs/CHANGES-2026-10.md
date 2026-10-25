@@ -3284,3 +3284,57 @@ tab.display = function(){
 
 - `docs/PLATFORM-ADAPTATION.md`：C1 由"待定/很可能不实现"改为"定案：无边框才认 app-region"，并删掉那条已解除的派生风险。
 - `docs/BUG-BACKLOG.md` BUG-002：第 179 轮的"自绘档可能失去拖动面"标记为**已解除**。
+
+## 第 183 轮 (2026-10-25): BUG-005 结案 + 诊断输出改版（四段式）+ 设置页身份行
+
+### 一、BUG-005 结案
+
+用户真机：触摸模式下键盘上方的格式化工具栏**按钮有反应了**。
+
+最终根因写实：`.mobile-toolbar{-webkit-app-region:drag}`（`app.css:21034`），而引擎在**无边框窗口**下确实把 app-region 转成窗口拖动——手指移 5px 就被判成拖窗，点击到不了按钮。第 175 轮的 `no-drag` 注入即修复。
+
+这条也顺带证实了第 182 轮的推断：引擎认 app-region（`hidden`/`custom` 下 web 标题栏与标签栏都能拖窗）。
+
+### 二、诊断输出改版
+
+旧输出 20 行、含 UA 与整串 body 类，平板上难读。改成四段、每段一行一事：
+
+```
+OHSidian 补丁 181    设置栏 已注册
+
+▍窗口
+  边框样式    hidden · 自绘标题栏 · 引擎 decor=none
+  顶部        38.67 安全区 · app-container 0 · view-header 79
+  布局        移动 · 无边框 · 1247x820 @2.25
+
+▍输入
+  媒体        hover=none · pointer=coarse · clipboard=object
+  最近右键    未捕获（长按一次再看）
+  工具栏      no-drag 已注入
+
+▍功能
+  窗口三键    不保留 · 网页字体 开
+  Pandoc      /storage/…
+
+▍调试
+  触屏模式    EmulateMobile 开 · auto → 触摸
+  设置页      清空 0 → 行 3 · 导航项在列表
+  元素        .titlebar 有 · .mobile-toolbar 无 · 按钮容器 有
+```
+
+丢掉：UA（120 字符）、平台类、整串 body 类、`is-fullscreen` 等很少用到的位。
+保留：所有"用来判断一次就够"的数值，且合并到所属那一行。
+
+### 三、设置页：加身份行 + 行数读数
+
+用户反馈"设置里看不到我们的选项，但页面确实是新的页面"。`清空后=1` 只能说明容器里有**一个 wrapper**（我们所有行都装在它里面），所以加了两个读数：
+
+- `display()` 渲染完统计 `querySelectorAll(".setting-item").length` → 诊断里的 `行 M`；
+- 判断 `tab.navEl.isConnected` → `导航项在列表 / 不在列表`。
+
+设置页顶部也加了一行身份文字：`补丁 181 · 其余诊断在命令面板搜索「OHSidian」`，用来区分"我们的页面"与"别人的页面"。
+
+### 四、验证
+
+- `node --check` → OK；重打 + `verify-asar` 全绿；补丁 181。
+- 下一份读数只要看两处：`设置页 … 行 M`（M 应为 3 个 setting-item + 1 个 h2 + h3），以及 `导航项在列表`。
