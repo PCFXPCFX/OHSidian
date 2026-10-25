@@ -516,7 +516,7 @@ function embedFontDataUrl() {
 function injectEmbeddedFont(webContents) {
 	try {
 		if (!webContents || (typeof webContents.isDestroyed === 'function' && webContents.isDestroyed())) return;
-		if (readUiPrefs().webviewFonts === false) return;
+		if (readUiPrefs().webviewFonts !== true) return;   /* opt-in: both OHSidian switches default OFF */
 		let url = embedFontDataUrl();
 		if (!url) return;
 		try {

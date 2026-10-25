@@ -3481,71 +3481,92 @@ function ohsidianSettingsRows(root){
       if(text!==undefined)el.textContent=text;
       return el;
     };
-    var wrap=mk("div","ohsidian-settings");
-    root.appendChild(wrap);
-    wrap.appendChild(mk("h2",null,"OHSidian"));
-    var sub=mk("div",null,"补丁 "+OHSIDIAN_PATCH_REV+" · 其余诊断在命令面板搜索「OHSidian」");
-    sub.style.cssText="opacity:.65;font-size:12px;margin:-6px 0 14px";
-    wrap.appendChild(sub);
-    /* Plain DOM on purpose: Obsidian's createDiv(o, cb) treats the SECOND
-       argument as a callback, so the old createDiv("setting-item-name",{text})
-       threw "cb is not a function" and aborted the whole page after the first
-       empty row - on device that looked like "只有两行 + 一个长椭圆". */
-    var mkRow=function(name,desc){
-      var row=mk("div","setting-item");
-      row.style.cssText="display:flex;align-items:center;gap:14px;"+
-        "justify-content:space-between;padding:10px 0;"+
-        "border-top:1px solid var(--background-modifier-border,#8883)";
+    var tx=function(el,t){el.textContent=t;return el};
+    /* Page skeleton mirrors Obsidian's own (app.js: Qb + Xb + Setting):
+         .setting-page.vertical-tab-content      (page root - our container)
+           .setting-page-content                 (page padding)
+             [page title block]
+             .setting-group > .setting-items > .setting-item ...
+       Item markup is exactly what `new Setting(parent)` builds:
+         .setting-item > .setting-item-info > .setting-item-name/.setting-item-description
+                      > .setting-item-control
+       Sizes: the theme gives EVERY .setting-item-name the same
+       --setting-group-heading-size (medium), so a bare heading row is visually
+       identical to an item name - section headings therefore get one explicit
+       step up (1.18x of --font-ui-medium); everything else stays on theme. */
+    root.classList.add("setting-page");
+    var page=mk("div","setting-page-content");
+    /* Breathing room at the top. No page title and no version/patch line here:
+       the settings nav already names this page, and "补丁 188 / 搜索命令面板"
+       is developer-facing noise on a settings screen. The patch number and the
+       full status dump stay in 命令面板 → OHSidian 诊断. */
+    page.style.paddingTop="var(--size-4-6)";
+    root.appendChild(page);
+    var newGroup=function(heading){
+      var group=mk("div","setting-group");
+      page.appendChild(group);
+      if(heading){
+        var h=mk("div","setting-item setting-item-heading");
+        var n=mk("div","setting-item-name",heading);
+        /* explicit step above item names; the theme would render it at
+           --setting-group-heading-size, identical to the rows below */
+        n.style.cssText="font-size:calc(var(--font-ui-medium) * 1.18);"+
+          "font-weight:var(--font-semibold,600)";
+        h.appendChild(n);h.appendChild(mk("div","setting-item-control"));
+        group.appendChild(h);
+      }
+      var list=mk("div","setting-items");
+      group.appendChild(list);
+      return list;
+    };
+    var itemEl=function(list,name,desc,toggleRow){
+      var r=mk("div","setting-item"+(toggleRow?" mod-toggle":""));
+      r.setAttribute("tabindex","-1");
       var info=mk("div","setting-item-info");
-      info.style.cssText="flex:1 1 auto;min-width:0";
-      var nm=mk("div","setting-item-name",name);
-      nm.style.cssText="font-weight:500;margin-bottom:3px";
-      var ds=mk("div","setting-item-description",desc);
-      ds.style.cssText="opacity:.72;font-size:12px;line-height:1.45";
-      info.appendChild(nm);info.appendChild(ds);
+      info.appendChild(tx(mk("div","setting-item-name"),name));
+      info.appendChild(tx(mk("div","setting-item-description"),desc));
       var ctl=mk("div","setting-item-control");
-      ctl.style.cssText="flex:0 0 auto;display:flex;align-items:center;gap:8px";
-      row.appendChild(info);row.appendChild(ctl);
-      wrap.appendChild(row);
+      r.appendChild(info);r.appendChild(ctl);
+      list.appendChild(r);
       return ctl;
     };
-    var mkToggle=function(ctl,on,onChange){
-      if(!ctl)return;
+    var toggleEl=function(ctl,on,onChange){
+      var box=mk("div","checkbox-container"+(on?" is-enabled":""));
       var inp=document.createElement("input");
       inp.type="checkbox";
       inp.checked=!!on;
-      inp.style.cssText="width:18px;height:18px";
-      inp.addEventListener("change",function(){onChange(!!inp.checked)});
-      ctl.appendChild(inp);
+      box.appendChild(inp);
+      inp.addEventListener("change",function(){
+        if(inp.checked){box.classList.add("is-enabled")}
+        else{box.classList.remove("is-enabled")}
+        onChange(!!inp.checked);
+      });
+      ctl.appendChild(box);
     };
-    /* 1) window buttons */
-    mkToggle(mkRow("隐藏模式下保留系统窗口按钮",
-      "开启：窗口边框样式选「隐藏」时仍显示鸿蒙的关闭/最大化/最小化（重启生效）。关闭：无边框时只显示 Obsidian 自己的标题栏。"),
+    var basic=newGroup("常规");
+    toggleEl(itemEl(basic,"隐藏模式下保留系统窗口按钮",
+      "开启：窗口边框样式选「隐藏」时仍显示鸿蒙的关闭/最大化/最小化（重启生效）。关闭：无边框时只显示 Obsidian 自己的标题栏。",true),
       ohsidianReadUiPrefs().keepSystemTitleButtons,
       function(on){ohsidianSetKeepSystemTitleButtons(on)});
-    /* 2) fonts inside embedded web pages */
-    mkToggle(mkRow("嵌入网页跟随界面字体",
-      "开启：Custom Frames / 网页视图里也用当前字体（只改正文，代码块与图标字体保持原样）。关闭：网页用系统默认字体。改动在下次打开该网页时生效。"),
-      ohsidianReadUiPrefs().webviewFonts!==false,
+    toggleEl(itemEl(basic,"嵌入网页跟随界面字体",
+      "开启后 Custom Frames / 网页视图里也使用当前字体（只改正文，代码块与图标字体保持原样）；默认关闭，改动在下次打开该网页时生效。",true),
+      ohsidianReadUiPrefs().webviewFonts===true,
       function(on){
         var prefs=ohsidianReadUiPrefs();
         prefs.webviewFonts=!!on;
         var ok=ohsidianWriteUiPrefs(prefs);
         try{new Notice("OHSidian: 嵌入网页字体跟随 → "+(on?"开":"关")+(ok?"（重开该网页生效）":"（写入失败）"),5000)}catch(e){}
       });
-    /* --- 诊断 ---------------------------------------------------------- */
-    var h3=mk("h3",null,"诊断");
-    h3.style.cssText="margin:22px 0 6px";
-    wrap.appendChild(h3);
-    /* 3a) pandoc path: a real setting, remembered, defaulted to the known one */
-    var pathCtl=mkRow("Pandoc 路径",
+    /* --- 诊断 --- */
+    var diag=newGroup("导出");
+    var pathCtl=itemEl(diag,"Pandoc 路径",
       "导出 Word 时使用的 pandoc。留空或填回默认值即恢复默认：" + OHSIDIAN_PANDOC_DEFAULT);
     if(pathCtl){
       var inp=document.createElement("input");
       inp.type="text";
-      inp.style.cssText="min-width:260px;max-width:100%";
       inp.placeholder=OHSIDIAN_PANDOC_DEFAULT;
       inp.value=ohsidianReadUiPrefs().pandocPath||"";
+      inp.style.minWidth="220px";
       var save=function(){
         var ok=ohsidianSetPandocPath(inp.value);
         try{new Notice("OHSidian: Pandoc 路径 "+(ok?"已保存":"保存失败"),4000)}catch(e){}
@@ -3554,9 +3575,8 @@ function ohsidianSettingsRows(root){
       inp.addEventListener("blur",save);
       pathCtl.appendChild(inp);
     }
-    /* 3b) the check itself: runs only on click, result inline (copyable) */
-    var checkCtl=mkRow("Pandoc 环境检查",
-      "检查路径是否存在、是否软链接、权限位，并分别用两种调用方式实测（直接 execve / 经 /bin/sh）。结果写在下方，可复制。");
+    var checkCtl=itemEl(diag,"Pandoc 环境检查",
+      "检查路径是否存在、是否软链接、权限位，并分别用直接 execve 与经 /bin/sh 两种方式实测。结果可复制。");
     var outEl=null;
     if(checkCtl){
       var btn=document.createElement("button");
@@ -3584,8 +3604,8 @@ function ohsidianSettingsRows(root){
       outEl=mk("pre","ohsidian-diag-out");
       outEl.style.cssText="display:none;white-space:pre-wrap;word-break:break-all;"+
         "max-height:360px;overflow:auto;font-size:12px;padding:10px;border-radius:8px;"+
-        "background:var(--background-secondary,#8881)";
-      wrap.appendChild(outEl);
+        "background:var(--background-secondary)";
+      diag.appendChild(outEl);
     }
   }catch(e){
     window.__ohsidianSettingsError="渲染设置页失败: "+String((e&&e.message)||e);
@@ -3904,7 +3924,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="182";
+var OHSIDIAN_PATCH_REV="188";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -3977,7 +3997,7 @@ function ohsidianBuildStatusLines(){
   var prefs={};
   try{prefs=ohsidianReadUiPrefs()||{}}catch(ePf){}
   row("窗口三键",(prefs.keepSystemTitleButtons===true?"保留":"不保留")+
-    " · 网页字体 "+(prefs.webviewFonts===false?"关":"开"));
+    " · 网页字体 "+(prefs.webviewFonts===true?"开":"关"));
   row("Pandoc",(function(){try{return ohsidianPandocPath()}catch(e){return "?"}})());
   /* ---- 调试 --------------------------------------------------------- */
   sec("调试");

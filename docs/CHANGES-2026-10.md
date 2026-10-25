@@ -3396,3 +3396,160 @@ info.createDiv("setting-item-name", { text: name });   // ← {text} 被当成 c
 
 - `node --check` OK；重打 + `verify-asar` 全绿；补丁 182。
 - 预期：设置页出现 3 条可交互行（三键、网页字体、Pandoc 路径）+ 一条"检查"按钮 + 结果框。
+
+## 第 185 轮 (2026-10-25): 设置页改成 Obsidian 自己的标记（卡片内、配色跟随主题）
+
+### 一、问题
+
+第 184 轮改用原生 DOM 后功能正常，但**样式不对**：文字没有落在卡片里，整页也不像 Obsidian 的设置。
+
+原因是那版仍用自己的内联样式（`display:flex`、`padding:10px 0`、`border-top`），而这些恰好和主题的 `.setting-item` 规则打架——主题里 `.setting-item` 本身就是卡片：
+
+```css
+.setting-item{
+  display:flex; align-items:flex-start;
+  border-radius: var(--setting-items-radius);
+  background-color: var(--setting-items-background);
+  padding: var(--size-4-4);
+  margin-bottom: var(--size-4-2);
+}
+```
+
+我们显式设了 `padding`/`border-top`，等于把卡片的呼吸感抹掉；同时缺少 `.setting-group` 包裹（`max-width: var(--setting-group-max-width)` + `margin-inline:auto`），整页贴在左边缘。
+
+### 二、改法：完全用主题的类名，不写样式
+
+```
+.ohsidian-settings             （只加左右 padding）
+└ .setting-group               （限宽 + 居中）
+  ├ .setting-item.setting-item-heading + .setting-item-name / -description
+  ├ .setting-item.mod-toggle   + .setting-item-control > .checkbox-container(.is-enabled) > input
+  ├ .setting-item              + control > input[type=text]（Pandoc 路径）
+  └ .setting-item              + control > button（检查）
+```
+
+- 标题不再是裸 `h2`，而是主题的 `setting-item-heading`（字号/颜色/间距都由主题变量控制）；
+- 开关用主题的 `.checkbox-container`，`change` 时同步 `is-enabled`，外观与 Obsidian 原生开关一致；
+- 卡片背景/圆角/内边距全部交给主题，我们**不写**任何影响布局的内联样式（只给最外层加左右 padding 兜底）。
+
+### 三、验证
+
+- `node --check` OK；重打 + `verify-asar` 全绿；补丁 **183**（1.4.2 的第二个构建）。
+- 预期：设置 → OHSidian 里出现两张分组卡片：上面两张开关卡（窗口三键、网页字体），下面「诊断」组（Pandoc 路径输入框 + 检查按钮 + 结果框），文字都在卡片内、间距与其它设置页一致。
+
+## 第 186 轮 (2026-10-25): 设置页按 Obsidian 自己的页面结构重写（照抄上游 DOM）
+
+### 一、为什么前两版都不好看
+
+不是类名错，是**层级不对**。上游的设置页由三个东西拼出来（`app.js` 里的 `Qb` / `Xb` / `Setting`）：
+
+```
+Qb（页面）
+  rootEl      = createDiv("setting-page vertical-tab-content")
+  titlebarEl  = rootEl.createDiv("setting-page-titlebar")
+  containerEl = rootEl.createDiv("setting-page-content")     ← 页面内边距在这一层
+
+Xb（分组）
+  groupEl  = createDiv("setting-group")                      ← 限宽 + 居中
+  headerEl = createDiv("setting-item setting-item-heading")  ← 标题：name 是**直接子节点**
+  listEl   = createDiv("setting-items")                      ← 列表在这一层
+
+Setting（一行）
+  .setting-item > .setting-item-info(>.setting-item-name/.setting-item-description)
+               > .setting-item-control
+```
+
+我们前两版：没有 `setting-page-content`（少了一层页面内边距）、标题的 name 塞进了 `.setting-item-info`（上游是直接子节点）、列表没有 `.setting-items` 包裹。于是间距、居中和卡片背景都对不上。
+
+### 二、这一版
+
+- 容器加上 `setting-page` 类，内部再建 `.setting-page-content`；
+- 每组用 `.setting-group` + `.setting-item.setting-item-heading`（name 直接挂）+ `.setting-items`；
+- 每一行严格按 `Setting` 构造：`.setting-item` > `.setting-item-info` > name/desc，`.setting-item-control` 放控件，并补 `tabindex="-1"`；
+- 开关用 `.checkbox-container`（`is-enabled` 同步）；
+- **不写任何影响布局的内联样式**（只有 Pandoc 输入框的 `min-width` 和结果框的背景）。
+
+### 三、验证
+
+- `node --check` OK；重打 + `verify-asar` 全绿；补丁 **184**（1.4.2 的第三个构建）。
+- 预期：设置 → OHSidian 与「关于」等页面视觉一致——顶部有页面标题、内容是限宽的卡片列、每行左侧标题+说明、右侧开关/输入框。
+
+## 第 187 轮 (2026-10-25): 设置页层次——标题与分组标题显式放大
+
+### 一、为什么"层次不清晰"
+
+主题里 `.setting-item-name` 的字号来自同一个变量：
+
+```css
+--setting-group-heading-size: var(--font-ui-medium);   /* 正文字号 */
+.setting-item-name { font-size: var(--setting-group-heading-size); }
+```
+
+也就是说**分组标题和普通设置项名称天生一样大**。上游的分组标题只靠 `padding/margin` 和"不加卡片背景"来区分（`.setting-group .setting-item-heading{background:transparent}`）。我们照抄结构后，视觉上自然是一排同样大小的字。
+
+### 二、改法（只动三处字号，其余仍交给主题）
+
+| 元素 | 字号 | 说明 |
+|------|------|------|
+| 页面标题 `OHSidian` | `calc(var(--font-ui-medium) * 1.5)` | 独立的一块，下面是补丁号副标题 |
+| 分组标题 `诊断` | `calc(var(--font-ui-medium) * 1.18)` + 600 | 明显高于设置项名称 |
+| 副标题（补丁号 · 提示） | `--font-ui-smaller` + `--text-muted` | 弱化 |
+
+结构不变（`setting-page-content` → `setting-group` → `setting-items` → `setting-item`），间距仍由主题的 `.setting-group + .setting-group{margin-top}` 与 `--setting-items-padding-*` 负责。
+
+### 三、验证
+
+- `node --check` OK；重打 + `verify-asar` 全绿；补丁 **185**。
+
+## 第 188 轮 (2026-10-25): 设置页定稿——去掉开发者信息、统一默认值、补上留白
+
+### 一、从用户视角删掉的三样东西
+
+| 删掉 | 原因 |
+|------|------|
+| 页面大标题 `OHSidian` | 左侧导航已经写着这个名字，正文再写一遍是重复 |
+| `补丁 188 · 其余诊断在命令面板搜索「OHSidian」` | 补丁号是开发信息；"去命令面板搜"是对用户的额外负担 |
+| 分组标题 `诊断` | Pandoc 是**导出**用的，不是诊断；改成用户能理解的分类 |
+
+这些信息只保留在命令面板的诊断命令里（出问题才用）。
+
+### 二、定稿后的结构
+
+```
+[顶部留白 var(--size-4-6)]
+
+常规
+  隐藏模式下保留系统窗口按钮        [开关]
+  嵌入网页跟随界面字体              [开关]
+
+导出
+  Pandoc 路径                      [输入框]
+  Pandoc 环境检查                  [检查]
+```
+
+### 三、两个开关的默认值统一为「关」
+
+之前一个默认开、一个默认关，看起来像随机：
+
+- `keepSystemTitleButtons`：缺省关（本来就对，默认开会在隐藏档浮出系统三键，正是"两套按钮"）；
+- `webviewFonts`：从 `!== false`（缺省开）改成 `=== true`（缺省关），**包装层 `main.js` 同步**：`if (readUiPrefs().webviewFonts !== true) return;`。
+
+代价：嵌入网页跟随字体变成需要手动开一次，好处是行为可预期、不悄悄改别人的网页。
+
+### 四、修掉的显示 bug
+
+`mk(tag,cls,text)` 在重写时丢了第三个参数，而调用处仍在传文本：
+
+```js
+var title=mk("div","ohsidian-title","OHSidian");   // 文本被丢 → 空 div
+var n    =mk("div","setting-item-name",heading);   // 「诊断」同理
+```
+
+条目名称走 `tx(mk(...),name)` 所以正常——真机上表现为"只有这两个标题消失"。补回文本参数。
+
+### 五、验证
+
+- `node --check scripts/patches/touch-mode.js` OK；`main.js` 由 `verify-asar` 语法检查覆盖；
+- 重打 asar 24.92 MiB，`verify-asar` 全绿（`FRESH-PROCESS VERIFY: SYNTAX OK`）；
+- 复查 asar 内容：坏代码已消失、`page.style.paddingTop` 在、补丁号 188、旧副标题不在；
+- 注意：`main.js` 属于 HAP 包装层（不在 asar 内），必须重编 HAP 才带上 opt-in 改动。
