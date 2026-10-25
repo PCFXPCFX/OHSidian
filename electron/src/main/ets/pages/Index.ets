@@ -93,6 +93,13 @@ interface NativeVideoRequest {
   event?: string;
 }
 
+// BUG-005 liveness budget. The renderer refreshes the overlay request on every
+// geometry change and, while the geometry is stable, once per ~1.2s (theme
+// heartbeat in touch-mode.js). 6s is therefore "several missed beats", which
+// cannot happen while the page is alive, and is short enough that the user
+// never sits with a swallowed tap for long.
+const NATIVE_IDLE_CLOSE_MS: number = 6000;
+
 const DEFAULT_NATIVE_VIDEO_THEME: NativeVideoTheme = {
   bg: '#1e1e1e',
   panel: '#252525',
@@ -179,6 +186,20 @@ struct Index {
   private nativeIpcPrimed: boolean = false;
   private nativeThumbBusy: boolean = false;
   private disposed: boolean = false;
+  // BUG-005: the renderer owns the overlay's lifetime (it sends 'close' on IME,
+  // modal, off-screen), but it cannot send ANYTHING once its page reloads,
+  // crashes, or simply stops producing frames (rAF pauses while the document is
+  // hidden). The overlay is a sibling of the web content with
+  // HitTestMode.Default, so a stale one swallows every tap inside its frame -
+  // the "mobile toolbar stopped responding" report. Two cheap liveness rules
+  // close that hole:
+  //   * no accepted request for NATIVE_IDLE_CLOSE_MS -> the renderer is gone;
+  //   * the IME rises -> the toolbar owns that strip. The renderer's own
+  //     "--keyboard-height > 0" check depends on a CSS variable fed by a push
+  //     that is known to lag or miss (TODO.md #8), so the system callback is
+  //     the reliable signal and must not be routed through the renderer.
+  private nativeLastActivity: number = 0;
+  private nativeWatchdog: number = -1;
 
   private initStyle: IStyleData = {
     backgroundColor: 'ffffffff',
@@ -196,6 +217,7 @@ struct Index {
       this.opacity_ = style.opacity;
     });
     this.nativeTimer = setInterval(() => this.pollNativeRequest(), 200);
+    this.nativeWatchdog = setInterval(() => this.sweepNativeOverlay(), 1000);
     this.attachNativeWindow();
     this.startNativeIpc();
   }
@@ -208,6 +230,10 @@ struct Index {
     if (this.nativeTimer >= 0) {
       clearInterval(this.nativeTimer);
       this.nativeTimer = -1;
+    }
+    if (this.nativeWatchdog >= 0) {
+      clearInterval(this.nativeWatchdog);
+      this.nativeWatchdog = -1;
     }
     if (this.backTimer >= 0) {
       clearTimeout(this.backTimer);
@@ -275,6 +301,9 @@ struct Index {
       if (typeof req.ts === 'number' && req.ts > 0 && Date.now() - req.ts > 15000) {
         return;
       }
+      // Liveness: any accepted request (open / rect / thumb) proves the renderer
+      // is still alive and still driving this overlay.
+      this.nativeLastActivity = Date.now();
       const action: string = req.action ? req.action : 'open';
       if (action === 'thumb') {
         if (req.path && req.thumbFile) {
@@ -1015,9 +1044,57 @@ struct Index {
     try {
       const win: window.Window = await window.getLastWindow(getContext(this));
       this.nativeWin = win;
+      // BUG-005: the reliable "the IME is up" signal. The renderer closes the
+      // native surface when its own --keyboard-height says so, but that value is
+      // a CSS variable fed by a push that is known to lag or miss (TODO.md #8).
+      // When it misses, the overlay frame keeps the pre-keyboard geometry and
+      // the raised formatting toolbar sits inside it - every tap on the toolbar
+      // is then eaten by HitTestMode.Default. Close from the system callback
+      // instead of trusting the variable.
+      try {
+        win.on('keyboardHeightChange', (height: number) => {
+          if (this.disposed) {
+            return;
+          }
+          if (height > 0 && this.nativeRequest !== null) {
+            console.info('NativeVideoIpc', 'closed for IME rise: h=' + height);
+            this.dropNativeOverlay();
+          }
+        });
+      } catch (eKb) {
+        console.warn('NativeVideoIpc', 'keyboard watch failed: ' + JSON.stringify(eKb));
+      }
     } catch (e) {
       console.warn('NativeVideoIpc', 'window watch failed: ' + JSON.stringify(e));
     }
+  }
+
+  // BUG-005 watchdog: a renderer that stopped refreshing the request (page
+  // reload, crash, or a hidden document where rAF is paused) never sends
+  // 'close', so the overlay would stay on top of the web content forever.
+  private sweepNativeOverlay(): void {
+    if (this.disposed || this.nativeRequest === null) {
+      return;
+    }
+    if (this.nativeLastActivity <= 0) {
+      this.nativeLastActivity = Date.now();
+      return;
+    }
+    const idle: number = Date.now() - this.nativeLastActivity;
+    if (idle < NATIVE_IDLE_CLOSE_MS) {
+      return;
+    }
+    console.warn('NativeVideoIpc', 'closed by watchdog: idle ' + idle + 'ms');
+    this.dropNativeOverlay();
+  }
+
+  // Single teardown path for every "the overlay must go" decision.
+  private dropNativeOverlay(): void {
+    this.nativeRequest = null;
+    this.nativeFullscreen = false;
+    this.nativePc = -1;
+    this.applySystemBars(false);
+    this.notifyNativeClosed();
   }
 
   // Mode switches close the player on purpose - see the call site.
@@ -1025,10 +1102,7 @@ struct Index {
     if (this.nativeRequest === null) {
       return;
     }
-    this.nativeRequest = null;
-    this.nativeFullscreen = false;
-    this.applySystemBars(false);
-    this.notifyNativeClosed();
+    this.dropNativeOverlay();
     console.info('NativeVideoIpc', 'closed for mode switch (touch<->window)');
   }
 

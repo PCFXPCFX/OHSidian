@@ -458,6 +458,117 @@ process.on('uncaughtException', function (error) {
 // creates its windows from app.whenReady, which runs after this file).
 installFontFaceGuard();
 
+/* Embedded web pages (Custom Frames, Web viewer): fonts inside the frame.
+   ---------------------------------------------------------------------
+   Obsidian renders an embedded page with a <webview> - and Custom Frames does
+   exactly the same on desktop (`src/frame.ts`: `parent.createEl("webview")`,
+   `partition = "persist:vault-" + appId`). A guest is a SEPARATE webContents
+   with its own document, so the renderer-side font bridge (FontFace +
+   --font-default in the top document) can never reach it. That is the reported
+   bug: the page keeps the engine default font whatever the user picks.
+   Because a guest IS a webContents, the same `web-contents-created` hook that
+   installs the FontFace guard can push the family into it:
+     - insertCSS() for the family (body only, so the page's own element rules,
+       icon fonts and code blocks still win through inheritance),
+     - a FontFace registration carrying the ttf as a data: URL - the guest runs
+       in the vault partition where the app:// handler is not registered, and
+       `local()` is rejected by this engine (see the guard's comment above).
+   Only style-font users need this, so nothing is injected when no
+   themeFontPath is published, and `{"webviewFonts": false}` in
+   <userData>/ohsidian-ui-prefs.json turns it off. */
+const EMBED_FONT_CSS = 'body{font-family:"OhosThemeFont","HarmonyOS Sans",sans-serif !important}' +
+	':is(code,pre,kbd,samp){font-family:revert}';
+
+function readUiPrefs() {
+	let out = {};
+	try {
+		let p = path.join(dataPath, 'ohsidian-ui-prefs.json');
+		if (fs.existsSync(p)) {
+			let raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+			if (raw && typeof raw === 'object') out = raw;
+		}
+	} catch (e) {
+	}
+	return out;
+}
+
+let embedFontCache = {src: '', url: ''};
+function embedFontDataUrl() {
+	let src = '';
+	try {
+		let mode = JSON.parse(fs.readFileSync(path.join(dataPath, 'ohsidian-mode.json'), 'utf8'));
+		src = (mode && mode.themeFontPath) || '';
+	} catch (e) {
+		return '';
+	}
+	if (!src) return '';
+	if (src === embedFontCache.src) return embedFontCache.url;
+	let url = '';
+	try {
+		url = 'data:font/ttf;base64,' + fs.readFileSync(src).toString('base64');
+	} catch (e) {
+		return '';
+	}
+	embedFontCache = {src: src, url: url};
+	return url;
+}
+
+function injectEmbeddedFont(webContents) {
+	try {
+		if (!webContents || (typeof webContents.isDestroyed === 'function' && webContents.isDestroyed())) return;
+		if (readUiPrefs().webviewFonts === false) return;
+		let url = embedFontDataUrl();
+		if (!url) return;
+		try {
+			Promise.resolve(webContents.insertCSS(EMBED_FONT_CSS)).catch(function () {
+			});
+		} catch (e) {
+		}
+		let js = '(function(){try{var u=' + JSON.stringify(url) + ';'
+			+ 'if(!u||typeof FontFace!=="function")return;'
+			+ 'var f=new FontFace("OhosThemeFont","url("+u+")");'
+			+ 'f.load().then(function(x){document.fonts.add(x)},function(){})'
+			+ '}catch(e){}})()';
+		try {
+			Promise.resolve(webContents.executeJavaScript(js)).catch(function () {
+			});
+		} catch (e) {
+		}
+	} catch (e) {
+	}
+}
+
+function installEmbeddedFontInjector() {
+	if (!app || typeof app.on !== 'function') {
+		log('embedded font injector not installed: app.on unavailable');
+		return;
+	}
+	app.on('web-contents-created', function (event, webContents) {
+		if (!webContents) return;
+		let isGuest = false;
+		try {
+			isGuest = !!webContents.hostWebContents;
+		} catch (e) {
+			isGuest = false;
+		}
+		// Only <webview> guests: the main window and its iframes share one
+		// webContents, which the renderer bridge already covers.
+		if (!isGuest) return;
+		try {
+			webContents.on('dom-ready', function () {
+				injectEmbeddedFont(webContents);
+			});
+			webContents.on('did-finish-load', function () {
+				injectEmbeddedFont(webContents);
+			});
+		} catch (e) {
+		}
+	});
+	log('embedded font injector installed');
+}
+
+installEmbeddedFontInjector();
+
 // Actual startup routine
 // Load the Obsidian app bundled with this HAP. Side-loading obsidian-*.asar
 // from userData was removed for security: those files cannot be verified

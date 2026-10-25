@@ -2762,3 +2762,71 @@ ode --check\ OK；repack → asar **25,952,289 B**；
 \BUILD SUCCESSFUL in 28 s 633 ms\；HAP **120,534,845 B**，SHA-256 \A33E429DEF1B2A9903DB06BABBE947DB155A9108BC2777FEE046885112017B85\；包内 \170\、\writeNativeOpenedAckShared\、asar **25,952,289 B** 均在位。
 
 \.appanalyzer/\（DevEco 工具产物）已加入 \.gitignore\，不入库。
+## 第 174 轮 (2026-10-25): 登记缺陷批处理——数据安全三道闸、窗口三键开关、嵌入网页字体、覆盖层存活、pandoc 探针
+
+**背景**：用户报障 5 条，逐条登记、逐条定位（登记簿在工作区，不入库）。本轮提交代码改动；ArkTS 侧需 DevEco 构建验证，**本轮未跑 `hvigorw`**。
+
+### 一、改动清单
+
+| 文件 | 对应 | 改动 |
+|---|---|---|
+| `scripts/patches/touch-mode.js` | 001/002/004 | ① 布局同步加二进制扩展名黑名单（`OHSIDIAN_BINARY_EXT` / `ohsidianLeafAcceptsPath` / `ohsidianSetLeafFile`），三处 `st.state.file` 赋值改走守卫并**清洗**旧脏路径；② `ohsidianInstallWriteGuard()`：写入前按"目标在磁盘上是二进制 + 载荷无 NUL"判定，拒绝文本覆盖二进制；③ 覆盖前快照：媒体文件本会话首次被覆盖前拷到 `<userData>/ohsidian-snapshots/`（按路径去重、单文件 ≤1 GiB、**目录总预算 1.5 GiB**、只留最新 3 份；拷贝前检查剩余空间需 ≥ 文件大小 + 256 MiB，任一条件不满足就跳过并记日志）；④ 迁移命令 `flushEditors` 跳过非文本视图；⑤ OHSidian 设置页（`app.setting.addSettingTab`）+ 两条命令；⑥ **Pandoc 环境检查**（功能：路径可在设置里改，点「检查」出内联报告） |
+| `web_engine/.../components/NativeVideoOverlay.ets` | 001 | `probeContainerHead()`：`initPlayer()` 读前 512 字节，MKV/AVI/FLV/OGG/TS 直接给结论、不再空转重试；**前 512 字节内 U+FFFD ≥ 4 即判定"被当文本写过"**（只看开头三个字节会漏判——实测样本的 `ftyp` 是完好的） |
+| `web_engine/.../ability/WebAbility.ets` | 002 | 三键可见性跟随装饰：`buttonsVisible = !hideTitleBar \|\| keepSystemTitleButtons()`；新增 `keepSystemTitleButtons()` 读 `<filesDir>/ohsidian-ui-prefs.json`（默认关 = 走"无框无三键"） |
+| `electron/.../pages/Index.ets` | 005 | 覆盖层存活：`nativeLastActivity` + 1 s `sweepNativeOverlay()`（6 s 无请求 → `dropNativeOverlay()`）；`keyboardHeightChange` 升起即卸载；`closeForModeSwitch()` 收敛到同一出口 |
+| `web_engine/.../resources/app/main.js` | 003 | `installEmbeddedFontInjector()`：只处理 `<webview>` guest（`hostWebContents` 非空），在 `dom-ready` / `did-finish-load` 注入 `insertCSS` + `data:` URL 的 `FontFace`；没有 `themeFontPath` 时不注入，`{"webviewFonts": false}` 可关 |
+| `scripts/verify-asar.cjs` | 构建校验 | 新增 4 个标记（binary-path guard / text-over-binary write guard / title-buttons switch / pandoc probe〔临时〕）；并增加**包装层 main.js 的直读校验**（它随 HAP 打包，不在 asar 内，原脚本看不到） |
+
+### 二、每条改动的依据
+
+| # | 依据（真机或源码） |
+|---|---|
+| 001 | 用户提供的损坏样本：`ffprobe` 报 `moov atom not found`；全文件 **79,531,039 个 `EF BF BD`（U+FFFD）**，首个在 offset 31；按"1 非法字节 → 1 U+FFFD"反推原文件 ≈182 MiB、现 350 MB（+83%）。根因链：布局同步把媒体路径写进 markdown 叶 → `Leaf.setViewState` 只按 `state.type` 取工厂、不按扩展名重选 → `TextFileView` 以 UTF-8 读二进制 → 某次保存写回 |
+| 002 | 2in1 上 `pcModeEnabled` 恒 false → decor 恒 `none`；启动 `setWindowTitleButtonVisible(maximizable, minimizable, closable)` 的三个默认值在 `WebBaseAbility.ets:67-69` 为 `true`（`c026b64` 2026-05-15 为欢迎页放宽），而无框窗口仍被画出三键；渲染层只在 `decor==='system'` 时藏 Obsidian 标题栏 |
+| 003 | 插件源码取证：Custom Frames 桌面端 `parent.createEl("webview")`；guest 是独立 webContents，顶层文档的 FontFace / `--font-default` 到不了；guest 在 `persist:vault-<appId>` 分区，`app://` handler 不在其中，故字体必须用 `data:` URL |
+| 005 | 渲染层"键盘升起即 close"的唯一判据是 `--keyboard-height`，而该推送已知会漏（`TODO.md` 第 8 项）；ArkTS 侧原先无任何存活检测，覆盖层又是 `HitTestMode.Default` 的兄弟节点 |
+
+### 三、六维审计
+
+| 维度 | 结论 |
+|---|---|
+| 必要性 | 每条都有可核对的证据链（损坏样本字节、提交历史、插件源码、日志时序），不是"看着可疑就改" |
+| 正确性 | 001 三闸互补：写入前过滤（源头）→ 写盘指纹拒绝（类别）→ 覆盖前快照（兜底）；002 与 `WebBaseExtensionAbility.ets:56-58` 的口径对齐（`!hideTitleBar`）；003 与插件自身的 `dom-ready` 注入时机一致；005 走系统回调而非渲染层变量 |
+| 安全性 | 未新增网络/权限调用；写盘闸只在"目标是二进制且载荷无 NUL"时拒绝，正常笔记写入不受影响；快照只读源文件、写入 `userData` 内 |
+| 代码质量 | 新增函数单一职责且有注释；ArkTS 侧沿用既有 `LogUtil` / 状态字段风格；verify 标记覆盖全部新代码路径 |
+| 架构 | 001 把"数据安全"从"防某个 bug"改为"按写操作指纹"（唯一不依赖已知路径的防线）；005 把"谁该关覆盖层"收敛到 `dropNativeOverlay()` 单出口 |
+| 性能 | 写盘闸只在非文本扩展名上做 64 字节预读（文本写入零开销）；快照按路径去重，不反复拷贝；覆盖层看门狗 1 s 一次空转检查 |
+
+### 四、风险与已知限制
+
+- **未跑 HAP 构建**：ArkTS 三处（`NativeVideoOverlay` / `WebAbility` / `Index`）只做了人工审查，需 DevEco 构建 + 真机验证；渲染层与包装层已通过 `node --check` 与 asar 标记校验。
+- **Pandoc 检查已转正为功能**（不再按临时探针处理）：位于 OHSidian 设置 →「诊断」，路径可编辑、默认为 harmonybrew 位置、结果内联可复制、命令面板入口为 `OHSidian 诊断: Pandoc 环境`；仅当用户点击时才执行，不在启动或后台运行。
+- **第 2 道闸未做**：在 `setViewState` 拦"文本视图 + 媒体文件"。需要从 `iterateAllLeaves()` 取实例原型，且不得在启动早期创建 leaf，**必须真机验证后**再上。
+- 003 只覆盖 `<webview>`：用户若在 Custom Frames 里开 `forceIframe`，会退化为跨域 iframe，需另走主进程 `did-frame-finish-load`。
+- 快照占用：**上限 1.5 GiB**（单文件 ≤1 GiB、最多 3 份，超出预算先删最旧），位于 `<userData>/ohsidian-snapshots/`，可手动清理。
+
+### 五、验证
+
+- `node --check scripts/patches/touch-mode.js` → OK
+- `node --check web_engine/src/main/resources/resfile/resources/app/main.js` → OK
+- `node scripts/refresh-app-patch.mjs` → 重打成功（asar 24.78 MiB）
+- `node scripts/verify-asar.cjs` → `FRESH-PROCESS VERIFY: SYNTAX OK | all markers present`
+- **未跑 `hvigorw assembleHap`**（见"风险"）
+
+### 六、追加修正：OHSidian 设置栏目
+
+首次实现是**错的**，两个原因：
+
+1. **时机**：`install(app)` 执行时 `app.setting` 还不存在，函数直接 return，**之后再没有重试**；
+2. **形状**：设置面板通过真实的 `SettingTab` 基类渲染，需要构造函数创建的 `containerEl`；裸对象没有它，即使注册成功也是一片空白。
+
+现在改为：从 `app.setting.settingTabs[0]` **借用真实基类**构造 tab（拿不到时退化为手工创建 `containerEl`），并**轮询重试注册**（最多 20 s）+ `workspace.onLayoutReady` 再试一次。栏目里统一放三项：隐藏模式保留系统三键、嵌入网页跟随字体、Pandoc 检测（临时）。注册失败只打 `console.warn`，不影响启动。
+
+验证：设置左侧出现 **OHSidian** 栏目；控制台出现 `[OHSidian] settings section registered`。
+### 七、触摸栏仍点不动：日志给出的新结论 + 临时探针
+
+`10-25 12:17` 的 InputKeyFlow 日志：命中链 `page → NodeContainer → XComponent`、`Consumed ... notify:1`、`AceFocus: XComponent/secure_field`，即**触摸已经到达网页、且落在编辑器上**——原生覆盖层不在命中链里，说明 005 的 ArkTS 部分有效，剩余问题在网页内部的"视觉位置 vs 命中位置"。
+
+另有三条 `AppWindowAdapter#startWindowMoving(1)`，伴 `AceGesture: Pan not READY ... FID:[,0,1]`（当时两个触点），把点击判成了拖窗口。该调用既不在本仓库补丁里、也不在 `obsidian.asar` 里，暂记为独立现象。
+
+新增临时探针 `ohsidianInstallTouchProbe()`：屏幕下半部每次按下会打印命中元素链、`.mobile-toolbar` 矩形、`--keyboard-height`、`pointer-events`、`z-index`、是否落在工具栏内。**需先执行「OHSidian: 运行日志捕获 开/关」**才看得到输出；定位后移除（Pandoc 检查已转正为功能，不在此列）。

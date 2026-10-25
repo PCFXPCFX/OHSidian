@@ -2296,6 +2296,218 @@ function hookTrash(){
    target layout file leaves nothing to rewrite (first switch, layout will
    be built fresh and empty-main fallback opens lastOpenFiles[0], which we
    also set). */
+/* BUG-001 guard. "The article follows the user" must never drag a MEDIA/binary
+   file into a markdown leaf: Leaf.setViewState() resolves the view from
+   state.type and never re-checks the extension, so a path written here is
+   opened by MarkdownView/TextFileView and decoded as UTF-8 (a 334 MB video =>
+   a minute-long freeze and a page full of replacement characters). A blacklist
+   is used instead of a whitelist so exotic TEXT formats keep the old
+   "article follows" behaviour. */
+var OHSIDIAN_BINARY_EXT=",mp4,m4v,mkv,webm,ogv,ogm,mov,avi,wmv,flv,3gp,mpg,mpeg,m2ts,"+
+  "mp3,m4a,aac,wav,flac,ogg,oga,opus,wma,aiff,"+
+  "png,jpg,jpeg,gif,webp,bmp,tif,tiff,ico,heic,avif,svg,"+
+  "pdf,epub,mobi,azw3,djvu,doc,docx,xls,xlsx,ppt,pptx,odt,ods,odp,rtf,"+
+  "zip,rar,7z,gz,bz2,xz,iso,dmg,exe,msi,apk,hap,";
+function ohsidianLeafAcceptsPath(p){
+  try{
+    var s=String(p||"");
+    var i=s.lastIndexOf(".");
+    if(i<0||i===s.length-1)return true;
+    var ext=s.slice(i+1).toLowerCase();
+    return OHSIDIAN_BINARY_EXT.indexOf(","+ext+",")<0;
+  }catch(e){return true}
+}
+/* Writes the active path into a markdown leaf, or SCRUBS a stale binary path an
+   older build already left there (the damage persists in workspace-mobile.json
+   otherwise, so every touch-mode boot reopens the video as text). Returns true
+   only when the layout actually changed. */
+function ohsidianSetLeafFile(st,path){
+  try{
+    if(!st||typeof st.state!=="object"||st.state===null)return false;
+    var cur=st.state.file;
+    if(ohsidianLeafAcceptsPath(path)){
+      if(cur===path)return false;
+      st.state.file=path;
+      return true;
+    }
+    if(typeof cur==="string"&&cur&&!ohsidianLeafAcceptsPath(cur)){
+      try{delete st.state.file}catch(eD){st.state.file=null}
+      try{console.warn("[OHSidian] dropped binary path from a markdown leaf:",cur)}catch(eL){}
+      return true;
+    }
+    return false;
+  }catch(e){return false}
+}
+/* Last line of defense for BUG-001. The damage that destroyed a ~182 MiB video
+   was a text view saving its UTF-8 rendering back over the original bytes.
+   Every guard above removes a known cause (extension filter on the layout
+   write, scrub of stale paths, skip-save of non-text views); this one removes
+   the CLASS: a write is refused when ALL of
+     - the target has a media/binary extension (the blacklist above),
+     - the file currently on disk is binary (a NUL byte within the first 64),
+     - and the payload about to be written is text (not a single NUL byte).
+   Legit saves never hit this: notes are not in the blacklist, and Obsidian
+   never writes a media file as text. The write is skipped and reported, so the
+   bytes on disk stay intact - a lost save is recoverable, a rewritten video
+   is not. */
+function ohsidianInstallWriteGuard(){
+  try{
+    var fsMod=require("fs");
+    if(!fsMod||fsMod.__ohsidianWriteGuard)return false;
+    var headIsBinary=function(p){
+      try{
+        var fd=fsMod.openSync(p,"r");
+        try{
+          var b=Buffer.alloc(64);
+          var n=fsMod.readSync(fd,b,0,64,0);
+          for(var i=0;i<n;i++){if(b[i]===0)return true}
+          return false;
+        }finally{
+          try{fsMod.closeSync(fd)}catch(eC){}
+        }
+      }catch(e){return false}
+    };
+    var payloadIsText=function(data){
+      try{
+        var buf=null;
+        if(Buffer.isBuffer(data))buf=data;
+        else if(typeof data==="string")buf=Buffer.from(data,"utf8");
+        else if(data instanceof Uint8Array)buf=Buffer.from(data.buffer,data.byteOffset,data.byteLength);
+        else return false;
+        for(var i=0;i<buf.length;i++){if(buf[i]===0)return false}
+        return true;
+      }catch(e){return false}
+    };
+    var block=function(p){
+      try{console.error("[OHSidian] blocked text write over binary file:",p)}catch(e){}
+      try{new Notice("OHSidian: 已阻止把文本写进媒体文件（"+p+"），文件未被改动",9000)}catch(e2){}
+    };
+    var check=function(p,data){
+      try{
+        if(typeof p!=="string"||!p)return false;
+        if(ohsidianLeafAcceptsPath(p))return false;
+        if(!payloadIsText(data))return false;
+        if(!headIsBinary(p))return false;
+        block(p);
+        return true;
+      }catch(e){return false}
+    };
+    /* Overwrite insurance (BUG-001). The write guard above only catches the
+       "text over binary" signature; this one covers every OTHER way a binary
+       file could be rewritten (a plugin, a future bug we cannot imagine). It
+       copies the CURRENT bytes aside before the first overwrite of that path
+       in this session, so a wrong write costs one restore instead of the file.
+       Deduped per path, size-capped, and pruned to the newest few, because
+       media files are large and rare - we are not building a version history,
+       just a last-resort copy. */
+    var snapshotDir="";
+    var snapshotDirFor=function(){
+      if(snapshotDir)return snapshotDir;
+      try{
+        var np=require("path"),remote=require("@electron/remote");
+        snapshotDir=np.join(remote.app.getPath("userData"),"ohsidian-snapshots");
+        try{fsMod.mkdirSync(snapshotDir,{recursive:true})}catch(eM){}
+      }catch(e){snapshotDir=""}
+      return snapshotDir;
+    };
+    /* Storage budget for the overwrite insurance. A snapshot is a FULL COPY, so
+       the policy has to bound the directory, not just each file: one media file
+       can be hundreds of megabytes and six of them would be gigabytes. Three
+       numbers, all enforced together:
+         SNAP_MAX_FILE - larger files are not copied (a 2 GB copy freezes the UI
+                         for seconds and is not worth the space);
+         SNAP_BUDGET   - total bytes across the whole directory;
+         SNAP_KEEP     - newest entries kept, whatever their size.
+       Plus a free-space check before copying (256 MiB headroom), so the guard
+       never fills the disk on its own. Every refusal is logged. */
+    var SNAP_MAX_FILE=1024*1024*1024;      /* 1 GiB per file */
+    var SNAP_BUDGET=1536*1024*1024;        /* 1.5 GiB total */
+    var SNAP_KEEP=3;                       /* newest entries */
+    var snapshotsTaken={};
+    var listSnapshots=function(dir){
+      var list=[];
+      try{
+        var names=fsMod.readdirSync(dir);
+        for(var i=0;i<names.length;i++){
+          var f=dir+"/"+names[i],st=null;
+          try{st=fsMod.statSync(f)}catch(e){continue}
+          if(st&&st.isFile())list.push({f:f,t:st.mtimeMs||0,s:st.size||0});
+        }
+        list.sort(function(a,b){return b.t-a.t});
+      }catch(e){}
+      return list;
+    };
+    var pruneSnapshots=function(dir,need){
+      try{
+        var list=listSnapshots(dir);
+        var total=0;
+        for(var i=0;i<list.length;i++)total+=list[i].s;
+        /* drop oldest (end of the mtime-desc list) until both bounds hold */
+        for(var k=list.length-1;k>=0;k--){
+          if(list.length<=SNAP_KEEP&&(total+need)<=SNAP_BUDGET)break;
+          try{fsMod.unlinkSync(list[k].f)}catch(eU){}
+          total-=list[k].s;
+          list.pop();
+        }
+      }catch(e){}
+    };
+    var snapshotBefore=function(p){
+      try{
+        if(typeof p!=="string"||!p)return;
+        if(ohsidianLeafAcceptsPath(p))return;      /* text targets: Obsidian owns them */
+        if(snapshotsTaken[p])return;
+        var st=null;
+        try{st=fsMod.lstatSync(p)}catch(e){return}  /* new file: nothing to save */
+        if(!st||!st.isFile()||st.size<=0)return;
+        if(st.size>SNAP_MAX_FILE){
+          try{console.warn("[OHSidian] snapshot skipped (too large):",p,st.size)}catch(eL){}
+          snapshotsTaken[p]=1;                      /* do not retry every write */
+          return;
+        }
+        var dir=snapshotDirFor();
+        if(!dir)return;
+        try{
+          if(typeof fsMod.statfsSync==="function"){
+            var sfs=fsMod.statfsSync(dir);
+            var free=(sfs.bavail!==undefined?sfs.bavail:sfs.bfree)*(sfs.bsize||4096);
+            if(free<st.size+256*1024*1024){
+              try{console.warn("[OHSidian] snapshot skipped (low space):",p)}catch(eS){}
+              snapshotsTaken[p]=1;
+              return;
+            }
+          }
+        }catch(eFs){}
+        pruneSnapshots(dir,st.size);
+        var np2=require("path");
+        var dst=np2.join(dir,np2.basename(p)+"-"+Date.now()+".bak");
+        fsMod.copyFileSync(p,dst);
+        snapshotsTaken[p]=1;
+        try{console.warn("[OHSidian] snapshot before overwrite:",p,"->",dst)}catch(eL){}
+      }catch(e){}
+    };
+    var wrapSync=function(name){
+      var orig=fsMod[name];
+      if(typeof orig!=="function")return;
+      fsMod[name]=function(p,data){
+        if(check(p,data))return;
+        snapshotBefore(p);
+        return orig.apply(fsMod,arguments);
+      };
+    };
+    wrapSync("writeFileSync");
+    if(fsMod.promises&&typeof fsMod.promises.writeFile==="function"){
+      var origP=fsMod.promises.writeFile;
+      fsMod.promises.writeFile=function(p,data){
+        if(check(p,data))return Promise.resolve();
+        snapshotBefore(p);
+        return origP.apply(fsMod.promises,arguments);
+      };
+    }
+    fsMod.__ohsidianWriteGuard=1;
+    try{console.log("[OHSidian] text-over-binary write guard installed")}catch(e3){}
+    return true;
+  }catch(e){return false}
+}
 function syncActiveFileToTargetLayout(on,done){
   /* settle() fires exactly once, after every write chain finished (or on an
      early return with nothing to write). The caller reloads on it: a fixed
@@ -2329,8 +2541,7 @@ function syncActiveFileToTargetLayout(on,done){
       if(node.type==="leaf"){
         var st=node.state;
         if(st&&st.type==="markdown"&&st.state&&typeof st.state==="object"){
-          st.state.file=active.path;
-          changed++;
+          if(ohsidianSetLeafFile(st,active.path))changed++;
         }
         return changed;
       }
@@ -2350,8 +2561,7 @@ function syncActiveFileToTargetLayout(on,done){
           if(node.type==="leaf"){
             var st=node.state;
             if(st&&st.type==="markdown"&&st.state&&typeof st.state==="object"){
-              st.state.file=active.path;
-              touched++;
+              if(ohsidianSetLeafFile(st,active.path))touched++;
             }
             return;
           }
@@ -2366,8 +2576,7 @@ function syncActiveFileToTargetLayout(on,done){
             if(node.type==="leaf"&&node.id===layout.active){
               var st=node.state;
               if(st&&st.type==="markdown"&&st.state&&typeof st.state==="object"){
-                st.state.file=active.path;
-                touched++;
+                if(ohsidianSetLeafFile(st,active.path))touched++;
               }
               return;
             }
@@ -2669,7 +2878,19 @@ function migrateVaultToVisibleFolder(){
       try{
         if(window.app&&window.app.workspace&&typeof window.app.workspace.iterateAllLeaves==="function"){
           window.app.workspace.iterateAllLeaves(function(leaf){
-            try{if(leaf&&leaf.view&&typeof leaf.view.save==="function")leaf.view.save()}catch(eS){}
+            try{
+              /* BUG-001: never let a text view write a media file back. If a
+                 markdown leaf ever points at a video - which is what the
+                 layout sync used to produce - save() re-encodes the raw bytes
+                 as text, and that is exactly how a 182 MiB sample in this
+                 round was destroyed. */
+              var vf=(leaf&&leaf.view&&leaf.view.file&&leaf.view.file.path)?leaf.view.file.path:"";
+              if(vf&&!ohsidianLeafAcceptsPath(vf)){
+                try{console.warn("[OHSidian] skip save of non-text view:",vf)}catch(eL){}
+                return;
+              }
+              if(leaf&&leaf.view&&typeof leaf.view.save==="function")leaf.view.save();
+            }catch(eS){}
           });
         }
       }catch(e){}
@@ -2831,6 +3052,571 @@ function restoreSystemFonts(){
     try{new Notice("OHSidian: 已恢复系统字体 (HarmonyOS Sans)")}catch(e){}
   }catch(e){}
 }
+/* ===== BUG-004 PROBE — TEMPORARY (remove in the version after next) =====
+   The reporter's Pandoc export fails with
+     /bin/sh: /storage/.../.harmonybrew/bin/pandoc: inaccessible or not found
+   and toybox merges ENOENT (gone / dangling symlink) with EACCES (exists but
+   not executable - which includes a SELinux denial) into that one sentence, so
+   the cause cannot be read off the message. This probe separates them in one
+   click: file layer (lstat / realpath / stat / access X_OK) plus one real
+   execve of `--version`, then shows the whole result in a dialog.
+   REMOVE this block together with its command, its settings button and its
+   verify-asar marker once the reporter has run it. */
+/* Pandoc environment check - a FEATURE, not a throwaway probe.
+   Product shape: the path is a setting (OHSidian → 诊断), the check only runs
+   when asked, results are shown in place, and nothing here fires at startup -
+   a user who never opens diagnostics never notices this exists.
+   Default is the harmonybrew location seen on device; anything typed in the
+   settings row wins and is remembered in ohsidian-ui-prefs.json. */
+var OHSIDIAN_PANDOC_DEFAULT="/storage/Users/currentUser/.harmonybrew/bin/pandoc";
+function ohsidianPandocPath(){
+  try{
+    var p=ohsidianReadUiPrefs().pandocPath;
+    if(typeof p==="string"&&p.trim())return p.trim();
+  }catch(e){}
+  return OHSIDIAN_PANDOC_DEFAULT;
+}
+function ohsidianSetPandocPath(v){
+  try{
+    var prefs=ohsidianReadUiPrefs();
+    var s=String(v||"").trim();
+    if(!s||s===OHSIDIAN_PANDOC_DEFAULT)delete prefs.pandocPath;
+    else prefs.pandocPath=s;
+    return ohsidianWriteUiPrefs(prefs);
+  }catch(e){return false}
+}
+function ohsidianProbeExecutable(exePath,opt){
+  opt=opt||{};
+  var out={path:exePath,isLink:false,target:"",exists:false,size:0,mode:"",execBits:false,
+    xOk:false,fsErr:"",verdict:"unknown",human:"",errno:"",status:null,signal:null,version:"",
+    dirOk:false};
+  var fs2,np;
+  try{fs2=require("fs");np=require("path")}catch(e){out.verdict="no-node";out.human="渲染进程里没有 Node 的 fs";return out}
+  var probePath=exePath;
+  try{
+    var ls=fs2.lstatSync(exePath);
+    out.isLink=!!(ls.isSymbolicLink&&ls.isSymbolicLink());
+    if(out.isLink){
+      out.target=fs2.realpathSync(exePath);   /* dangling link throws ENOENT here */
+      probePath=out.target;
+    }
+    var st=fs2.statSync(probePath);
+    out.exists=true;
+    out.size=st.size;
+    out.execBits=(st.mode&0o111)!==0;
+    out.mode="0"+(st.mode&0o777).toString(8);
+    try{fs2.accessSync(probePath,fs2.constants.X_OK);out.xOk=true}catch(eA){out.xOk=false}
+    try{fs2.statSync(np.dirname(exePath));out.dirOk=true}catch(eD){out.dirOk=false}
+  }catch(e){
+    out.fsErr=(e&&e.code)?e.code:String(e);
+    if(out.fsErr==="ENOENT"){
+      out.verdict="missing";
+      out.human=out.isLink?("软链接存在但目标不存在（悬空）："+exePath):("路径不存在或上级目录不可访问："+exePath);
+    }else if(out.fsErr==="EACCES"){
+      out.verdict="stat-eacces";
+      out.human="连 stat 都被拒（EACCES）："+exePath+" —— 文件层面就读不到，exec 更不可能";
+    }else{
+      out.verdict="stat-error";
+      out.human="文件预检失败（"+(out.fsErr||"?")+"）："+exePath;
+    }
+    return out;
+  }
+  if(opt.fsOnly){
+    out.verdict=(out.execBits&&out.xOk)?"fs-ok":"fs-suspect";
+    out.human="仅文件预检：可执行位"+(out.execBits?"有":"无")+"，X_OK "+(out.xOk?"通过":"不通过")+"（不含 SELinux 裁决）";
+    return out;
+  }
+  var cp;
+  try{cp=require("child_process")}catch(e){out.verdict="no-child_process";out.human="引擎没有提供 child_process，无法做 execve 探测";return out}
+  var r=null;
+  try{
+    r=cp.spawnSync(probePath,["--version"],{timeout:opt.timeout||2500,encoding:"utf8"});
+  }catch(eS){
+    out.verdict="spawn-threw";
+    out.human="探测调用本身抛错："+String(eS&&eS.message||eS);
+    return out;
+  }
+  if(!r){out.verdict="spawn-null";out.human="探测没有返回结果";return out}
+  out.status=(typeof r.status==="number")?r.status:null;
+  out.signal=r.signal||null;
+  out.errno=(r.error&&(r.error.code||String(r.error.errno)))?r.error.code||String(r.error.errno):"";
+  out.version=String(r.stdout||"").split("\n")[0].slice(0,120);
+  if(out.errno==="ENOENT"){
+    out.verdict="exec-enoent";
+    out.human="execve 报 ENOENT：可执行文件或它的 #! 解释器不存在（软链接目标失效也算这个）";
+  }else if(out.errno==="EACCES"){
+    out.verdict="exec-eacces";
+    out.human="execve 报 EACCES：文件存在但被拒绝执行 —— SELinux/沙箱限制，应用层绕不过去，只能换位置或换方案";
+  }else if(out.errno==="ENOEXEC"){
+    out.verdict="exec-noexec";
+    out.human="execve 报 ENOEXEC：不是本机可执行格式（架构不符或缺解释器）";
+  }else if(out.errno==="ETXTBSY"){
+    out.verdict="exec-txtbusy";
+    out.human="execve 报 ETXTBSY：文件正被写入/占用，稍后重试";
+  }else if(out.errno==="ETIMEDOUT"){
+    out.verdict="timeout";
+    out.human="探测超时（"+(opt.timeout||2500)+"ms），结论不可用";
+  }else if(out.status===0){
+    out.verdict="ok";
+    out.human="可以执行："+(out.version||"（无输出）");
+  }else{
+    out.verdict="exit-"+(out.status===null?("signal:"+out.signal):out.status);
+    out.human="能启动，但退出码 "+(out.status===null?("signal:"+out.signal):out.status)+" —— 路径没问题，问题在这个程序内部";
+  }
+  return out;
+}
+function ohsidianPathReportLines(d){
+  var L=[];
+  L.push("结论: "+d.human);
+  L.push("检查路径: "+d.path);
+  L.push("是否软链接: "+(d.isLink?"是":"否")+(d.isLink?("  →  "+d.target):""));
+  L.push("目标存在: "+(d.exists?"是":"否")+(d.exists?("  ("+d.size+" B)"):""));
+  if(d.exists){
+    L.push("权限位: "+d.mode+"   执行位: "+(d.execBits?"有":"无")+"   访问(X_OK): "+(d.xOk?"通过":"不通过"));
+  }
+  L.push("上级目录可读: "+(d.dirOk?"是":"否"));
+  L.push("文件层错误: "+(d.fsErr||"无"));
+  if(d.verdict!=="fs-ok"&&d.verdict!=="fs-suspect"){
+    L.push("execve 结果: errno="+(d.errno||"无")+"  exit="+(d.status===null?"-":String(d.status))+
+      "  signal="+(d.signal||"无"));
+    L.push("程序输出首行: "+(d.version||"（无）"));
+  }
+  L.push("");
+  if(d.verdict==="exec-eacces"){
+    L.push("说明: 文件层检查通过、execve 仍被拒 → 这是系统级执行限制（不是路径写错，也不是文件损坏）。");
+  }else if(d.verdict==="missing"){
+    L.push("说明: 路径或软链接目标不存在 → 重新安装/修正链接即可，应用层可以顺手做路径预检。");
+  }else if(d.verdict==="ok"){
+    L.push("说明: 这条路径可以被执行 → 插件失败的原因在别处（例如插件里填的路径不是这一条、或 cwd/env 不同）。");
+  }
+  return L;
+}
+function ohsidianShowReportModal(title,lines){
+  try{
+    var d=document,body=d.body;
+    var back=d.createElement("div");
+    back.style.cssText="position:fixed;inset:0;z-index:2147483600;background:rgba(0,0,0,.45);"+
+      "display:flex;align-items:center;justify-content:center;padding:24px";
+    var panel=d.createElement("div");
+    panel.style.cssText="max-width:760px;width:100%;max-height:82vh;overflow:auto;"+
+      "background:var(--background-primary,#fff);color:var(--text-normal,#222);"+
+      "border:1px solid var(--background-modifier-border,#ccc);border-radius:12px;"+
+      "padding:18px 20px;box-shadow:0 14px 44px rgba(0,0,0,.38);font-size:13px;line-height:1.55";
+    var h=d.createElement("div");
+    h.style.cssText="font-weight:600;font-size:15px;margin-bottom:10px";
+    h.textContent=title;
+    var pre=d.createElement("pre");
+    pre.style.cssText="white-space:pre-wrap;word-break:break-all;margin:0 0 14px;padding:12px;"+
+      "border-radius:8px;background:var(--background-secondary,#f2f2f2);font-size:12px;"+
+      "max-height:50vh;overflow:auto";
+    pre.textContent=lines.join("\n");
+    var row=d.createElement("div");
+    row.style.cssText="display:flex;gap:8px;justify-content:flex-end";
+    var btnCss="padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;"+
+      "border:1px solid var(--background-modifier-border,#ccc)";
+    var copy=d.createElement("button");
+    copy.textContent="复制详细信息";
+    copy.style.cssText=btnCss+";background:var(--interactive-normal,#eee);color:inherit";
+    copy.addEventListener("click",function(){
+      try{navigator.clipboard.writeText(title+"\n"+lines.join("\n"));copy.textContent="已复制"}catch(e){copy.textContent="复制失败"}
+    });
+    var ok=d.createElement("button");
+    ok.textContent="关闭";
+    ok.style.cssText=btnCss+";background:var(--interactive-accent,#7b6cf6);color:var(--text-on-accent,#fff)";
+    ok.addEventListener("click",function(){try{back.remove()}catch(e){}});
+    row.appendChild(copy);row.appendChild(ok);
+    panel.appendChild(h);panel.appendChild(pre);panel.appendChild(row);
+    back.appendChild(panel);
+    back.addEventListener("click",function(ev){if(ev.target===back){try{back.remove()}catch(e){}}});
+    body.appendChild(back);
+  }catch(e){
+    try{new Notice(title+"\n"+lines.join("\n"),20000)}catch(e2){}
+  }
+}
+/* Where the two pandoc plugins actually keep their configured binary.
+   obsidian-pandoc (OliverBalfour): settings.pandoc, data.json key "pandoc".
+   pandoc-gui (pan4ratte): platform-keyed path setting. Neither schema is
+   hardcoded here - every string value that looks like a pandoc binary is
+   collected, so a plugin update that renames its key cannot hide the answer. */
+function ohsidianPluginPandocPaths(){
+  var out=[],seen={};
+  try{
+    var fs2=require("fs"),np=require("path"),remote=require("@electron/remote");
+    var base="";
+    try{base=window.app.vault.adapter.getBasePath()}catch(eB){base=remote.app.getPath("userData")}
+    var dirs=[];
+    try{dirs=fs2.readdirSync(np.join(base,".obsidian","plugins"))}catch(eD){dirs=[]}
+    var walk=function(v,depth,src){
+      if(depth>5||v===null||v===undefined)return;
+      if(typeof v==="string"){
+        var s=v.replace(/^"+|"+$/g,"");
+        if(/pandoc(\.exe)?$/i.test(s)&&s.length<512&&!seen[s]){seen[s]=1;out.push({path:s,source:src})}
+        return;
+      }
+      if(typeof v==="object"){
+        for(var k in v){try{walk(v[k],depth+1,src)}catch(eW){}}
+      }
+    };
+    for(var i=0;i<dirs.length;i++){
+      var p=np.join(base,".obsidian","plugins",dirs[i],"data.json");
+      try{walk(JSON.parse(fs2.readFileSync(p,"utf8")),0,dirs[i]+"/data.json")}catch(eF){}
+    }
+  }catch(e){}
+  var wanted=ohsidianPandocPath();
+  if(!seen[wanted]){out.push({path:wanted,source:"OHSidian 设置里的路径"})}
+  return out;
+}
+/* The two plugins fail in completely different places, so probe BOTH ways:
+   spawn() directly (obsidian-pandoc) and /bin/sh -c "path --version"
+   (pandoc-gui). One failing while the other works points at shell/quoting,
+   both failing at the same errno points at the file or the platform. */
+function ohsidianProbeExecModes(exePath,timeout){
+  var res={direct:{errno:"",status:null,out:"",err:""},
+    shell:{errno:"",status:null,out:"",err:""}};
+  var cp;
+  try{cp=require("child_process")}catch(e){res.direct.errno="no-child_process";res.shell.errno="no-child_process";return res}
+  try{
+    var r=cp.spawnSync(exePath,["--version"],{timeout:timeout||2000,encoding:"utf8"});
+    res.direct.errno=(r&&r.error&&(r.error.code||String(r.error.errno)))||"";
+    res.direct.status=(r&&typeof r.status==="number")?r.status:null;
+    res.direct.out=String((r&&r.stdout)||"").split("\n")[0].slice(0,90);
+    res.direct.err=String((r&&r.stderr)||"").split("\n")[0].slice(0,160);
+  }catch(e1){res.direct.errno="throw";res.direct.err=String(e1&&e1.message||e1)}
+  try{
+    var q=/\s/.test(exePath)?('"'+exePath+'"'):exePath;
+    var r2=cp.spawnSync("/bin/sh",["-c",q+" --version"],{timeout:timeout||2000,encoding:"utf8"});
+    res.shell.errno=(r2&&r2.error&&(r2.error.code||String(r2.error.errno)))||"";
+    res.shell.status=(r2&&typeof r2.status==="number")?r2.status:null;
+    res.shell.out=String((r2&&r2.stdout)||"").split("\n")[0].slice(0,90);
+    res.shell.err=String((r2&&r2.stderr)||"").split("\n")[0].slice(0,160);
+  }catch(e2){res.shell.errno="throw";res.shell.err=String(e2&&e2.message||e2)}
+  return res;
+}
+/* One sweep over: the path from the settings row, then whatever the installed
+   plugins actually point at (so a mismatch is visible instead of guessed).
+   Pure: returns {lines, report}; showing or writing is the caller's business. */
+function ohsidianBuildPandocReport(){
+  var lines=[],report={configured:ohsidianPandocPath(),candidates:[],at:new Date().toISOString()};
+  var cands=[{path:report.configured,source:"OHSidian 设置"}];
+  try{
+    var extra=ohsidianPluginPandocPaths();
+    for(var x=0;x<extra.length;x++){
+      var dup=false;
+      for(var y=0;y<cands.length;y++){if(cands[y].path===extra[x].path)dup=true}
+      if(!dup)cands.push(extra[x]);
+    }
+  }catch(eC){}
+  for(var i=0;i<cands.length;i++){
+    var c=cands[i],d=null;
+    lines.push("─────────────────────────────────────────");
+    lines.push("候选 "+(i+1)+"／"+cands.length+"    来源: "+c.source);
+    try{d=ohsidianProbeExecutable(c.path,{timeout:2000})}catch(eP){d=null}
+    if(!d){lines.push("探针执行出错，跳过该候选");continue}
+    var rl=ohsidianPathReportLines(d);
+    for(var k=0;k<rl.length;k++)lines.push(rl[k]);
+    var modes=ohsidianProbeExecModes(c.path,2000);
+    lines.push("");
+    lines.push("→ 直接 execve（Pandoc Plugin 的调用方式）: "+
+      (modes.direct.errno?("errno="+modes.direct.errno):("exit="+(modes.direct.status===null?"-":String(modes.direct.status))))+
+      (modes.direct.out?("  输出: "+modes.direct.out):"")+
+      (modes.direct.err?("  stderr: "+modes.direct.err):""));
+    lines.push("→ /bin/sh -c（Pandoc GUI 的调用方式）: "+
+      (modes.shell.errno?("errno="+modes.shell.errno):("exit="+(modes.shell.status===null?"-":String(modes.shell.status))))+
+      (modes.shell.out?("  输出: "+modes.shell.out):"")+
+      (modes.shell.err?("  stderr: "+modes.shell.err):""));
+    report.candidates.push({source:c.source,file:d,direct:modes.direct,shell:modes.shell});
+  }
+  lines.push("─────────────────────────────────────────");
+  lines.push("怎么读这份结果：");
+  lines.push("· Pandoc Plugin 用 spawn()，而且没有挂 error 监听 —— execve 失败时它既不报错也不结束，这就是\"没有报错原因\"的来源。");
+  lines.push("· Pandoc GUI 用 exec()（/bin/sh -c），同一个失败会显示成 /bin/sh: … inaccessible or not found。");
+  lines.push("· 两种方式都失败、且 errno 都是 EACCES → 系统拒绝执行该文件（SELinux 一类），应用层绕不过去。");
+  lines.push("· 只有 /bin/sh 那条失败 → 问题在 shell/引号/PATH，文件本身没问题。");
+  lines.push("· 文件层就报 ENOENT（软链接悬空）→ 重新安装或改链接即可。");
+  return {lines:lines,report:report};
+}
+function ohsidianWritePandocReport(report){
+  try{
+    var fs2=require("fs"),np=require("path"),remote=require("@electron/remote");
+    var out=np.join(remote.app.getPath("userData"),"ohsidian-pandoc-check.json");
+    fs2.writeFileSync(out,JSON.stringify(report,null,2));
+    try{console.warn("[OHSidian] pandoc check",JSON.stringify(report))}catch(eL){}
+  }catch(eW){}
+}
+/* Command-palette entry: the same report, shown in a dialog. */
+function ohsidianRunPandocProbe(){
+  try{new Notice("OHSidian: 正在检测 pandoc…",4000)}catch(e){}
+  var r=null;
+  try{r=ohsidianBuildPandocReport()}catch(eB){r=null}
+  if(!r){
+    ohsidianShowReportModal("OHSidian 诊断: Pandoc 环境",["检测本身失败，无法生成报告。"]);
+    return;
+  }
+  ohsidianShowReportModal("OHSidian 诊断: Pandoc 环境",r.lines);
+  ohsidianWritePandocReport(r.report);
+}
+/* ===== end BUG-004 PROBE ===== */
+
+/* BUG-002 user switch. "No frame => no system trio" is right by default, but
+   some users WANT the native buttons while keeping Obsidian's 隐藏 frame style
+   (that is exactly what a Hider-style setup gives them today). ArkTS reads this
+   flag when it decides button visibility (WebAbility.keepSystemTitleButtons),
+   so it applies on the next start - the same rule as the frame-style setting. */
+function ohsidianUiPrefsPath(){
+  try{
+    var remote=require("@electron/remote"),np=require("path");
+    return np.join(remote.app.getPath("userData"),"ohsidian-ui-prefs.json");
+  }catch(e){return ""}
+}
+function ohsidianReadUiPrefs(){
+  try{
+    var p=ohsidianUiPrefsPath(),fs2=require("fs");
+    if(!p||!fs2.existsSync(p))return {};
+    var j=JSON.parse(fs2.readFileSync(p,"utf8"));
+    return (j&&typeof j==="object")?j:{};
+  }catch(e){return {}}
+}
+function ohsidianWriteUiPrefs(obj){
+  try{
+    var p=ohsidianUiPrefsPath();if(!p)return false;
+    var fs2=require("fs");
+    var tmp=p+".tmp-"+Date.now();
+    fs2.writeFileSync(tmp,JSON.stringify(obj,null,2));
+    try{fs2.renameSync(tmp,p)}catch(eR){try{fs2.unlinkSync(p)}catch(eU){};fs2.renameSync(tmp,p)}
+    return true;
+  }catch(e){return false}
+}
+function ohsidianSetKeepSystemTitleButtons(on){
+  var prefs=ohsidianReadUiPrefs();
+  prefs.keepSystemTitleButtons=!!on;
+  var ok=ohsidianWriteUiPrefs(prefs);
+  try{new Notice("OHSidian: 隐藏模式下"+(on?"保留":"不保留")+"系统窗口按钮 —— "+(ok?"重启应用后生效":"写入失败"),6000)}catch(e){}
+  return ok;
+}
+/* OHSidian settings section.
+   Two things had to be right, and the first attempt got both wrong:
+   1) TIMING - `install(app)` runs before `app.setting` exists, so a one-shot
+      registration silently did nothing and never retried;
+   2) SHAPE - the settings modal renders a tab through the real `SettingTab`
+      base class: it needs `containerEl` (created by that constructor) and the
+      modal assigns/opens it. A bare object literal has no containerEl, so even
+      when registered the pane came up empty.
+   Now the tab is built from the class of an EXISTING core tab (borrowing it
+   from `app.setting.settingTabs[0]`), and registration retries until the
+   settings module is ready. Everything is guarded: worst case the section is
+   absent and the commands still work. */
+function ohsidianSettingsRows(root){
+  try{
+    if(!root)return;
+    if(root.empty)root.empty();
+    var wrap=root.createDiv?root.createDiv("ohsidian-settings"):null;
+    if(!wrap)return;
+    if(wrap.createEl)wrap.createEl("h2",{text:"OHSidian"});
+    var mkRow=function(name,desc){
+      var row=wrap.createDiv?wrap.createDiv("setting-item"):null;
+      if(!row)return null;
+      var info=row.createDiv?row.createDiv("setting-item-info"):null;
+      if(info&&info.createDiv){
+        info.createDiv("setting-item-name",{text:name});
+        info.createDiv("setting-item-description",{text:desc});
+      }
+      var ctl=row.createDiv?row.createDiv("setting-item-control"):null;
+      return ctl;
+    };
+    var mkToggle=function(ctl,on,onChange){
+      if(!ctl||!ctl.createEl)return;
+      var inp=ctl.createEl("input",{type:"checkbox"});
+      if(!inp)return;
+      inp.checked=!!on;
+      inp.addEventListener("change",function(){onChange(!!inp.checked)});
+    };
+    /* 1) window buttons */
+    mkToggle(mkRow("隐藏模式下保留系统窗口按钮",
+      "开启：窗口边框样式选「隐藏」时仍显示鸿蒙的关闭/最大化/最小化（重启生效）。关闭：无边框时只显示 Obsidian 自己的标题栏。"),
+      ohsidianReadUiPrefs().keepSystemTitleButtons,
+      function(on){ohsidianSetKeepSystemTitleButtons(on)});
+    /* 2) fonts inside embedded web pages */
+    mkToggle(mkRow("嵌入网页跟随界面字体",
+      "开启：Custom Frames / 网页视图里也用当前字体（只改正文，代码块与图标字体保持原样）。关闭：网页用系统默认字体。改动在下次打开该网页时生效。"),
+      ohsidianReadUiPrefs().webviewFonts!==false,
+      function(on){
+        var prefs=ohsidianReadUiPrefs();
+        prefs.webviewFonts=!!on;
+        var ok=ohsidianWriteUiPrefs(prefs);
+        try{new Notice("OHSidian: 嵌入网页字体跟随 → "+(on?"开":"关")+(ok?"（重开该网页生效）":"（写入失败）"),5000)}catch(e){}
+      });
+    /* --- 诊断（Diagnostics）---------------------------------------------
+       Everything a user only reaches when something is broken lives under this
+       heading: no ribbon icon, no startup work, no notice unless they press a
+       button. New checks go here as plain rows so the section stays scannable. */
+    if(wrap.createEl)wrap.createEl("h3",{text:"诊断"});
+    /* 3a) pandoc path: a real setting, remembered, defaulted to the known one */
+    var pathCtl=mkRow("Pandoc 路径",
+      "导出 Word 时使用的 pandoc。留空或填回默认值即恢复默认：" + OHSIDIAN_PANDOC_DEFAULT);
+    if(pathCtl&&pathCtl.createEl){
+      var inp=pathCtl.createEl("input",{type:"text"});
+      if(inp){
+        inp.style.minWidth="320px";
+        inp.placeholder=OHSIDIAN_PANDOC_DEFAULT;
+        inp.value=ohsidianReadUiPrefs().pandocPath||"";
+        var save=function(){
+          var ok=ohsidianSetPandocPath(inp.value);
+          try{new Notice("OHSidian: Pandoc 路径 "+(ok?"已保存":"保存失败"),4000)}catch(e){}
+        };
+        inp.addEventListener("change",save);
+        inp.addEventListener("blur",save);
+      }
+    }
+    /* 3b) the check itself: runs only on click, result inline (copyable) */
+    var checkCtl=mkRow("Pandoc 环境检查",
+      "检查路径是否存在、是否软链接、权限位，并分别用两种调用方式实测（直接 execve / 经 /bin/sh）。结果写在下方，可复制。");
+    var outEl=null;
+    if(checkCtl&&checkCtl.createEl){
+      var btn=checkCtl.createEl("button",{text:"检查"});
+      if(btn){
+        if(wrap.createEl){
+          outEl=wrap.createEl("pre",{cls:"ohsidian-diag-out"});
+          if(outEl){
+            outEl.style.display="none";
+            outEl.style.whiteSpace="pre-wrap";
+            outEl.style.wordBreak="break-all";
+            outEl.style.maxHeight="360px";
+            outEl.style.overflow="auto";
+            outEl.style.fontSize="12px";
+            outEl.style.background="var(--background-secondary)";
+            outEl.style.padding="10px";
+            outEl.style.borderRadius="8px";
+          }
+        }
+        btn.addEventListener("click",function(){
+          try{
+            btn.textContent="检查中…";
+            setTimeout(function(){
+              try{
+                var r=ohsidianBuildPandocReport();
+                if(outEl){
+                  outEl.textContent=r.lines.join("\n");
+                  outEl.style.display="block";
+                }
+                ohsidianWritePandocReport(r.report);
+              }catch(eR){
+                if(outEl){outEl.textContent="检查失败: "+String(eR&&eR.message||eR);outEl.style.display="block"}
+              }finally{
+                btn.textContent="检查";
+              }
+            },50);
+          }catch(e){btn.textContent="检查"}
+        });
+      }
+    }
+  }catch(e){}
+}
+function ohsidianBuildSettingsTab(){
+  try{
+    var s=window.app&&window.app.setting;
+    if(!s)return null;
+    var Base=null;
+    try{
+      var core=(s.settingTabs&&s.settingTabs.length)?s.settingTabs[0]:null;
+      if(core&&core.constructor)Base=core.constructor;
+    }catch(e1){}
+    if(!Base){
+      try{
+        var pt=(s.pluginTabs&&s.pluginTabs.length)?s.pluginTabs[0]:null;
+        if(pt&&pt.constructor)Base=pt.constructor;
+      }catch(e2){}
+    }
+    var tab=null;
+    if(Base){
+      try{tab=new Base(window.app,null)}catch(e3){tab=null}
+    }
+    if(!tab){
+      tab={};
+      try{
+        tab.containerEl=document.createElement("div");
+        tab.containerEl.className="vertical-tab-content";
+      }catch(e4){}
+    }
+    tab.id="ohsidian";
+    tab.name="OHSidian";
+    tab.display=function(){ohsidianSettingsRows(this.containerEl)};
+    tab.hide=function(){};
+    return (tab.containerEl||tab.navEl)?tab:null;
+  }catch(e){return null}
+}
+function ohsidianEnsureSettingsTab(){
+  try{
+    var s=window.app&&window.app.setting;
+    if(!s||typeof s.addSettingTab!=="function")return false;
+    if(window.__ohsidianSettingsTab)return true;
+    var tab=ohsidianBuildSettingsTab();
+    if(!tab)return false;
+    s.addSettingTab(tab);
+    window.__ohsidianSettingsTab=tab;
+    try{console.log("[OHSidian] settings section registered")}catch(eL){}
+    return true;
+  }catch(e){
+    try{console.warn("[OHSidian] settings section failed:",e&&e.message||e)}catch(e2){}
+    return false;
+  }
+}
+/* BUG-005 touch probe — TEMPORARY (remove once the toolbar is fixed).
+   ArkTS logs already prove the touch reaches the page: the hit chain ends at
+   the WebEngine XComponent and the editor gets focus. What they cannot show is
+   WHICH element inside the page received it, or whether the toolbar's painted
+   position differs from its layout box. This logs exactly that for touches in
+   the lower part of the screen - one tap answers it.
+   Needs the console bridge: run "OHSidian: 运行日志捕获 开/关" first. */
+function ohsidianInstallTouchProbe(){
+  try{
+    if(window.__ohsidianTouchProbe)return false;
+    window.__ohsidianTouchProbe=1;
+    var handler=function(ev){
+      try{
+        var t=(ev.touches&&ev.touches.length)?ev.touches[0]:ev;
+        if(typeof t.clientY!=="number")return;
+        var vh=window.innerHeight||document.documentElement.clientHeight||0;
+        if(!vh||t.clientY<vh*0.6)return;
+        var el=document.elementFromPoint(t.clientX,t.clientY);
+        var chain=[],n=el,guard=0;
+        while(n&&guard<6){
+          var cls=(n.className&&typeof n.className==="string")?
+            ("."+n.className.trim().split(/\s+/).slice(0,2).join(".")):"";
+          chain.push((n.tagName||"?")+cls);
+          n=n.parentElement;guard++;
+        }
+        var tb=document.querySelector(".mobile-toolbar");
+        var r=tb?tb.getBoundingClientRect():null;
+        var kb="";
+        try{kb=getComputedStyle(document.documentElement).getPropertyValue("--keyboard-height").trim()}catch(eK){}
+        var cs=tb?getComputedStyle(tb):null;
+        console.warn("[OHSidian touch]",
+          "y="+Math.round(t.clientY)+"/"+Math.round(vh),
+          "evt="+ev.type,
+          "hit="+chain.join(" < "),
+          "kb="+(kb||"(empty)"),
+          "toolbar="+(r?(Math.round(r.top)+".."+Math.round(r.bottom)+" h="+Math.round(r.height)):"(none)"),
+          "tbPointer="+(cs?cs.pointerEvents:"-"),
+          "tbZ="+(cs?cs.zIndex:"-"),
+          "inToolbar="+((r&&t.clientY>=r.top&&t.clientY<=r.bottom)?"YES":"no"));
+      }catch(e){}
+    };
+    document.addEventListener("touchstart",handler,true);
+    document.addEventListener("pointerdown",handler,true);
+    try{console.log("[OHSidian touch] probe installed")}catch(eL){}
+    return true;
+  }catch(e){return false}
+}
+function ohsidianScheduleSettingsTab(){
+  var tries=0;
+  var tick=function(){
+    tries++;
+    if(ohsidianEnsureSettingsTab())return;
+    if(tries<40)setTimeout(tick,500);   /* up to 20 s: settings module comes up late */
+  };
+  try{window.app.workspace.onLayoutReady(function(){ohsidianEnsureSettingsTab()})}catch(e){}
+  tick();
+}
 var install=function(app){
   if(!app||!app.commands||typeof app.commands.addCommand!=="function")return false;
   /* Round 93 (93e): the frame default is enforced by the MAIN-PROCESS body
@@ -2857,7 +3643,24 @@ var install=function(app){
       callback:function(){migrateVaultToVisibleFolder()}});
     app.commands.addCommand({id:"ohsidian-system-fonts",name:"OHSidian: 恢复系统字体 (HarmonyOS Sans)",
       callback:function(){restoreSystemFonts()}});
-    app.commands.addCommand({id:"ohsidian-console-capture",name:"OHSidian: 运行日志捕获 开/关 (重启生效)",
+    /* BUG-002 fallback entry: the settings tab above may not render in every
+       layout, so the same switch also lives in the command palette. */
+    app.commands.addCommand({id:"ohsidian-title-buttons",name:"OHSidian: 隐藏模式下保留系统窗口按钮 开/关 (重启生效)",
+      callback:function(){
+        ohsidianSetKeepSystemTitleButtons(!ohsidianReadUiPrefs().keepSystemTitleButtons);
+      }});
+    /* Diagnostics are namespaced on purpose: every command whose only job is
+       troubleshooting starts with "OHSidian 诊断:" so it reads as a tool, and
+       sits next to its siblings in the palette. */
+    app.commands.addCommand({id:"ohsidian-diag-pandoc",name:"OHSidian 诊断: Pandoc 环境",
+      callback:function(){ohsidianRunPandocProbe()}});
+    try{ohsidianScheduleSettingsTab()}catch(eTab){}
+    /* TEMPORARY: toolbar hit-test probe (remove with the fix). */
+    try{ohsidianInstallTouchProbe()}catch(eTP){}
+    /* BUG-001: install the text-over-binary write guard as early as the vault
+       allows - it is the only guard that covers code paths we do not know. */
+    try{ohsidianInstallWriteGuard()}catch(eWG){}
+    app.commands.addCommand({id:"ohsidian-console-capture",name:"OHSidian 诊断: 运行日志捕获 开/关 (重启生效)",
       callback:function(){
         try{
           var on=localStorage.getItem("ohsidianConsoleCapture")==="1";

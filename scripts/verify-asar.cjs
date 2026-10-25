@@ -6,6 +6,14 @@ const path = require('path');
 const vm = require('vm');
 const { extractFile } = require('@electron/asar');
 
+// The OB wrapper main.js ships inside the HAP (resfile), NOT inside the asar,
+// so it must be verified by reading the file directly.
+const wrapperPath = path.join(__dirname, '..', 'web_engine/src/main/resources/resfile/resources/app/main.js');
+let wrapper = '';
+try { wrapper = fs.readFileSync(wrapperPath, 'utf8'); } catch (e) {
+  console.log('  WARN wrapper main.js unreadable:', e.message);
+}
+
 const asarPath = path.join(__dirname, '..', 'web_engine/src/main/resources/resfile/resources/app/obsidian.asar');
 try {
   const app = extractFile(asarPath, 'app.js').toString('utf8');
@@ -72,6 +80,28 @@ try {
     'main default vault writable probe': main.includes('__ohDvWritable'),
     'main purge owner marker': main.includes('__ohTrashOwnerFile'),
     'app mode-switch file sync': app.includes('syncActiveFileToTargetLayout'),
+    // BUG-001: the layout sync must never write a media/binary path into a
+    // markdown leaf (Leaf.setViewState trusts state.type and never re-checks the
+    // extension, so the file would be opened as UTF-8 text). Guard + stale-path
+    // scrub must survive every re-pack.
+    'app binary-path guard (markdown leaf)': app.includes('ohsidianSetLeafFile') && app.includes('OHSIDIAN_BINARY_EXT'),
+    // BUG-001: the last-ditch guard - a text write onto a file that is binary
+    // on disk is refused. This is what would have saved the 182 MiB sample.
+    'app text-over-binary write guard': app.includes('ohsidianInstallWriteGuard') && app.includes('headIsBinary'),
+    // BUG-003: fonts inside an embedded <webview> (Custom Frames / Web viewer).
+    // The guest is a separate webContents, so the top-document bridge cannot
+    // reach it; the WRAPPER (HAP resfile) pushes insertCSS + a data: FontFace.
+    'wrapper embedded webview font injector': wrapper.includes('installEmbeddedFontInjector') && wrapper.includes('embedFontDataUrl'),
+    'wrapper FontFace guard retained': wrapper.includes('installFontFaceGuard'),
+    // BUG-002: user switch that keeps the system window buttons in 隐藏 mode.
+    'app title-buttons switch (settings + command)': app.includes('ohsidianEnsureSettingsTab') && app.includes('keepSystemTitleButtons'),
+    // BUG-004 probe — TEMPORARY: ships so the reporter can answer "ENOENT vs
+    // EACCES" in one click. Remove this marker together with the probe code,
+    // its command and its settings button in the version after next.
+    'app pandoc environment check (feature)': app.includes('ohsidianBuildPandocReport') && app.includes('ohsidianPandocPath'),
+    // BUG-005 touch probe — TEMPORARY as well: logs what a bottom-of-screen
+    // touch actually hits inside the page. Remove with the toolbar fix.
+    'app touch probe (temporary)': app.includes('ohsidianInstallTouchProbe'),
     'app font scale follower': app.includes('applyFontScale'),
     'app style-font follower (OhosThemeFont)': app.includes('"OhosThemeFont","HarmonyOS Sans"'),
     'app documents-dir migration': app.includes('pickMigration') && app.includes('当前仓库在应用沙箱内'),

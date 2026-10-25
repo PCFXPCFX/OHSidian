@@ -446,6 +446,63 @@ export struct NativeVideoOverlay {
     }, 120);
   }
 
+  // BUG-001: classify the first bytes of the file before handing the fd to
+  // AVPlayer. Its prepare() answer for "unsupported container" and for "this
+  // file is not a video any more" is the SAME 5400106 CONTAINER_ERR, and the
+  // old code retried it twice and then printed the raw error code. A known
+  // non-MP4 head is therefore a final answer (no retry).
+  //
+  // The text-damage test is a COUNT over the first 512 bytes, not a check of
+  // the first three: a file that went through a UTF-8 decode/encode keeps its
+  // leading `ftyp` intact (only non-ASCII bytes are replaced) and shows its
+  // first U+FFFD a few dozen bytes in - the real damaged sample had its first
+  // replacement at offset 31, right after the ftyp box, and 79.5M of them in
+  // total. Four or more EF BF BD in the head is therefore conclusive.
+  private probeContainerHead(f: fileIo.File): string {
+    try {
+      const hdr: ArrayBuffer = new ArrayBuffer(512);
+      const hb: Uint8Array = new Uint8Array(hdr);
+      const got: number = fileIo.readSync(f.fd, hdr, { offset: 0, length: 512 });
+      if (got < 4) {
+        return 'empty';
+      }
+      let replacements: number = 0;
+      for (let i: number = 0; i + 2 < got; i++) {
+        if (hb[i] === 0xEF && hb[i + 1] === 0xBF && hb[i + 2] === 0xBD) {
+          replacements++;
+        }
+      }
+      if (replacements >= 4) {
+        return 'text';
+      }
+      if (got >= 8 && this.fcc(hb, 4) === 'ftyp') {
+        return 'mp4';
+      }
+      if (hb[0] === 0x1A && hb[1] === 0x45 && hb[2] === 0xDF && hb[3] === 0xA3) {
+        return 'mkv';
+      }
+      if (hb[0] === 0x52 && hb[1] === 0x49 && hb[2] === 0x46 && hb[3] === 0x46) {
+        return 'riff';
+      }
+      if (hb[0] === 0x46 && hb[1] === 0x4C && hb[2] === 0x56) {
+        return 'flv';
+      }
+      if (hb[0] === 0x4F && hb[1] === 0x67 && hb[2] === 0x67 && hb[3] === 0x53) {
+        return 'ogg';
+      }
+      if (hb[0] === 0x47) {
+        return 'ts';
+      }
+      if (hb[0] === 0xEF && hb[1] === 0xBF && hb[2] === 0xBD) {
+        return 'text';
+      }
+      return 'unknown';
+    } catch (e) {
+      LogUtil.warn(TAG, 'container probe failed: ' + JSON.stringify(e));
+      return '';
+    }
+  }
+
   private async initPlayer(): Promise<void> {
     if (this.player !== null || this.started || !this.source || this.released) {
       return;
@@ -461,6 +518,21 @@ export struct NativeVideoOverlay {
       const f: fileIo.File = fileIo.openSync(this.source, fileIo.OpenMode.READ_ONLY);
       this.file = f;
       this.fileLength = fileIo.statSync(this.source).size;
+      // BUG-001: see probeContainerHead(). Fail fast on containers this engine
+      // cannot demux and on the "file already turned into text" case, instead
+      // of retrying twice and then printing 5400106 at the user.
+      const headKind: string = this.probeContainerHead(f);
+      LogUtil.warn(TAG, 'container probe: kind=' + headKind + ' size=' + this.fileLength +
+        ' path=' + this.source);
+      if (headKind === 'mkv' || headKind === 'riff' || headKind === 'flv' ||
+        headKind === 'ogg' || headKind === 'ts') {
+        this.fail('播放器不支持这个容器（检测到 ' + headKind + '），请转成 MP4 后重试');
+        return;
+      }
+      if (headKind === 'text') {
+        this.fail('这个文件的内容已经是文本了（文件头是 U+FFFD），可能被别的程序按文本保存过，请从备份恢复');
+        return;
+      }
       const p: media.AVPlayer = await media.createAVPlayer();
       if (this.released || token !== this.initToken) {
         try {

@@ -679,6 +679,29 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
+  // BUG-002 user switch: `{"keepSystemTitleButtons": true}` in
+  // <filesDir>/ohsidian-ui-prefs.json keeps the system window buttons even
+  // when the frame is frameless (Obsidian's 窗口边框样式 = 隐藏). OFF (default)
+  // means the invariant "no frame => no system trio" holds and only Obsidian's
+  // own title bar is drawn. The renderer's settings entry writes the file;
+  // ArkTS only reads it, and only where button visibility is decided. Changing
+  // it takes effect on the next start (same as the frame-style setting itself).
+  private keepSystemTitleButtons(): boolean {
+    try {
+      const prefsPath: string = this.context.getApplicationContext().filesDir +
+        '/ohsidian-ui-prefs.json';
+      if (!fileIo.accessSync(prefsPath)) {
+        return false;
+      }
+      const prefs: Record<string, Object> = JSON.parse(fileIo.readTextSync(prefsPath)) as
+        Record<string, Object>;
+      return prefs !== null && prefs !== undefined && prefs['keepSystemTitleButtons'] === true;
+    } catch (exception) {
+      LogUtil.warn(TAG, 'read ui prefs failed: ' + JSON.stringify(exception));
+      return false;
+    }
+  }
+
   // Read-modify-write for ohsidian-mode.json. GLOBAL fields (systemMode,
   // override, fonts, documentsDir, ...) stay top-level; WINDOW geometry
   // goes under cfg.windows[<OHOS window id>] so concurrent Obsidian windows
@@ -2691,7 +2714,17 @@ export class WebAbility extends WebBaseAbility {
         LogUtil.warn(TAG, 'Failed to set window title move enabled: ' + JSON.stringify(exception));
       }
       try {
-        mainWin.setWindowTitleButtonVisible(this.maximizable, this.minimizable, this.closable);
+        // BUG-002: on HarmonyOS this call DRAWS the buttons, it does not merely
+        // grant a capability. Passing the raw flags through was wrong because
+        // they default to true (WebBaseAbility.ets:67-69, loosened on 2026-05-15
+        // for the welcome window), so a FRAMELESS window - Obsidian's 窗口边框
+        // 样式 = 隐藏, i.e. hideTitleBar=true - got the system trio floating over
+        // the content while Obsidian drew its own: the "double window controls /
+        // covered top-right controls" report on 2in1. Presentation must follow
+        // the decor: no frame, no system buttons.
+        const buttonsVisible: boolean = !this.hideTitleBar || this.keepSystemTitleButtons();
+        mainWin.setWindowTitleButtonVisible(buttonsVisible && this.maximizable,
+          buttonsVisible && this.minimizable, buttonsVisible && this.closable);
       } catch (exception) {
         LogUtil.warn(TAG, 'Failed to set window title button visible: ' + JSON.stringify(exception));
       }
