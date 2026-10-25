@@ -3253,3 +3253,34 @@ tab.display = function(){
 ### 五、同一时段的崩溃（BUG-008 更新）
 
 用户确认：**不是每次退出都报**，这次是使用中闪退一次。已把 BUG-008 的严重度从"低"提到"中"，状态仍为 `待复现`。崩溃报告里 `CrBrowserMain` 命中 SIGTRAP、另一线程停在 `MainThread::HandleTerminateApplication → Watchdog::Stop()`，看不出与设置页改动有关；若再次出现，下一步抓 `hilog` 崩溃前 10 秒与 `faultlogger` 的同一条目。
+
+## 第 182 轮 (2026-10-25): 三档拖动能力真机对照——C1 定案（无边框路径才认 app-region）
+
+### 一、用户实测的三档差异
+
+| 档 | 系统标题条 | web 标题栏 | 标签栏空白区 |
+|----|------------|------------|--------------|
+| `native`（原生边框） | ✅ 能拖 | 不存在（被我们隐藏） | ❌ 不能拖 |
+| `hidden`（隐藏） | 无 | ✅ 能拖 | ✅ 能拖 |
+| `custom`（Obsidian 风格） | 无 | ✅ 能拖 | ✅ 能拖 |
+
+### 二、由此定案
+
+1. **引擎确实消费 `-webkit-app-region`**：`custom` 的 `.titlebar{-webkit-app-region:drag}`（`app.css:6150`）和 `.workspace-tab-header-container-inner{drag}`（`app.css:6657`）都能拖动窗口。第 179 轮"引擎很可能不实现"的二进制推断**被真机推翻**——符号被剥离，`DraggableRegion` 0 命中不能作证。
+2. **但只在无系统边框时生效**：同一套 CSS 在 `native` 档拖不动，说明引擎按"窗口有没有系统标题条"分流——有 caption 时把拖动交还 WMS。
+3. **第 178 轮的风险解除**：`hidden/custom` 收起系统标题条后依然有拖动面（web 侧 app-region），不需要 ArkTS 兜底。
+4. 第 175 轮"工具栏解除拖动区"的方向**成立**（这条原本也只是待验证）。
+
+### 三、历史对照
+
+标题条拖动这条线前后修过两次：
+
+- **第 50 轮**（`171e473`）：窗口模式下 `setWindowLayoutFullScreen(true)` 仍开着，web surface 铺满、盖在 WMS 标题条拖动热区之上 → 点击全落进 web 内容。修法是"窗口形态显式关闭 layout fullscreen"，把热区还给 WMS。
+- **第 58 轮**（`CHANGES-2026-09.md:1820-1843`）：启动时 `setWindowTitleMoveEnabled(!hideTitleBar)` 而 `hideTitleBar=true` → **拖动能力被显式关闭**，后来 caption 被重新显示却"看得见拖不动"。修法是无条件 `setWindowTitleMoveEnabled(true)`，并让它与 caption 可见性同步。
+
+本轮不再改代码：`native` 档标签栏拖不动是引擎分流规则，CSS 无法影响；用户仍可拖系统标题条，属"低优先、体验不一致"而非功能缺失。
+
+### 四、落档
+
+- `docs/PLATFORM-ADAPTATION.md`：C1 由"待定/很可能不实现"改为"定案：无边框才认 app-region"，并删掉那条已解除的派生风险。
+- `docs/BUG-BACKLOG.md` BUG-002：第 179 轮的"自绘档可能失去拖动面"标记为**已解除**。

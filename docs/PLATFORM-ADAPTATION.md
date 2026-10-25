@@ -79,13 +79,25 @@
 
 ## 第 179 轮新增的三条（比原 D1 更值得排期）
 
-### 1. C1 的方向性答案：引擎很可能**不**实现 app-region
+### 1. C1 定案：引擎**会**把 web 侧的 app-region 变成窗口拖动，但只在**无边框**路径
 
-- `WebAbility.ets:724-727` 的注释自述 "engine has no `-webkit-app-region` implementation (**verified in libelectron.so: no DraggableRegions interface**)"；
-- 子代理独立复核二进制：`DraggableRegion / draggable_regions / SetDraggableRegions` **0 命中**，`-webkit-app-region` 只有 3 处、全是 Blink 的 CSS 属性名字符串表；
-- 但字符串 0 命中 ≠ 必然没实现（符号可能被剥离），所以仍要靠实验落锤：**注入 `body,body *{-webkit-app-region:no-drag!important}` 后若仍能拖窗 ⇒ 引擎有自有热区；若立刻不能拖 ⇒ 引擎真在读 app-region。**
+第 181 轮真机三档对照（用户实测）：
 
-**派生风险（重要）**：若引擎确实不读 app-region，那么第 178 轮把 `隐藏 / Obsidian 风格` 的系统标题条收起后，**这两种档位下窗口没有任何可拖动面**。装机第一件事就是拖一下窗口；拖不动就说明这条命中，需要改用 ArkTS 侧的 `window.startMoving()` 或恢复系统标题条。
+| 档 | 系统标题条 | web 标题栏 | 标签栏空白区 |
+|----|------------|------------|--------------|
+| `native` | ✅ 能拖 | （不存在，被我们隐藏） | ❌ 不能拖 |
+| `hidden` | （无） | ✅ 能拖 | ✅ 能拖 |
+| `custom` | （无） | ✅ 能拖 | ✅ 能拖 |
+
+结论修正：
+
+- **引擎确实消费 app-region**（`custom` 的 `.titlebar{-webkit-app-region:drag}`、`.workspace-tab-header-container-inner{drag}` 都能拖），第 175 轮"工具栏 no-drag"的方向因此**是成立的**；
+- 但这条能力只在**无系统边框**时生效：`native` 档下同样的 CSS 拖不动，说明引擎的 web 拖动面按"窗口是否有系统标题条"分流（有 caption 时拖动交还 WMS）；
+- 二进制里查不到 `DraggableRegion` 符号不能证伪（符号被剥离），第 179 轮"很可能不实现"的推断**已被真机推翻**。
+
+**所以第 178 轮的风险解除**：`hidden / custom` 收起系统标题条后，窗口仍然拖得动（靠 web 侧的 app-region）。
+
+**遗留的不一致**（低优先，纯体验）：`native` 档下标签栏不能拖窗——这是引擎的分流规则，CSS 改不动；用户仍可拖系统标题条，且有 WMS 的拖动能力（第 58 轮已经确保 `setWindowTitleMoveEnabled(true)` 与标题条可见性同步）。若将来要补齐，只能走 ArkTS 侧的手势转发（风险高，暂不做）。
 
 ### 2. 触摸端双击/双指缩放在 ImageView 被**主动跳过**（确定缺陷）
 
