@@ -3691,6 +3691,19 @@ function ohsidianScheduleSettingsTab(){
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
 var OHSIDIAN_PATCH_REV="175";
+/* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
+   key "frame"), not in the vault, so the renderer has to read that file itself.
+   ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
+   answer becomes visible in diagnostics (and, later, to the ArkTS side). */
+function ohsidianFrameStyle(){
+  try{
+    var fs2=require("fs"),np=require("path"),remote=require("@electron/remote");
+    var p=np.join(remote.app.getPath("userData"),"obsidian.json");
+    var j=JSON.parse(fs2.readFileSync(p,"utf8"));
+    if(j&&typeof j.frame==="string"&&j.frame)return j.frame;
+    return "(unset)";
+  }catch(e){return "(unreadable: "+String(e&&e.message||e)+")"}
+}
 function ohsidianBuildStatusLines(){
   var L=[];
   L.push("补丁版本: "+OHSIDIAN_PATCH_REV);
@@ -3699,7 +3712,23 @@ function ohsidianBuildStatusLines(){
   else if(window.__ohsidianSettingsError)tabState="未注册（"+window.__ohsidianSettingsError+"）";
   L.push("设置栏目: "+tabState);
   L.push("工具栏拖动区修复: "+(document.getElementById("ohsidian-toolbar-hit")?"已注入":"未注入"));
-  L.push("写盘闸: "+(window.app&&window.app.vault?"随补丁加载（无独立开关）":"-"));
+  L.push("窗口边框样式(obsidian.json frame): "+ohsidianFrameStyle());
+  try{
+    var body=(document.body&&document.body.className)||"";
+    var has=function(sel){try{return document.querySelector(sel)?"有":"无"}catch(e){return "?"}};
+    L.push("布局: is-mobile="+(body.indexOf("is-mobile")>=0) +
+      " is-hidden-frameless="+(body.indexOf("is-hidden-frameless")>=0) +
+      " is-fullscreen="+(body.indexOf("is-fullscreen")>=0));
+    L.push("元素: .titlebar="+has(".titlebar")+"  .mobile-toolbar="+has(".mobile-toolbar")+
+      "  .mobile-navbar="+has(".mobile-navbar")+"  .titlebar-button-container.mod-right="+
+      has(".titlebar-button-container.mod-right"));
+  }catch(eB){}
+  try{
+    var fs2=require("fs"),np=require("path"),remote=require("@electron/remote");
+    var mp=np.join(remote.app.getPath("userData"),"ohsidian-mode.json");
+    var cfg=JSON.parse(fs2.readFileSync(mp,"utf8"));
+    L.push("引擎发布: decor="+(cfg&&cfg.windowDecor||"?")+"  insets.top="+(cfg&&cfg.insets?cfg.insets.top:"?"));
+  }catch(eM){}
   try{
     var p=ohsidianReadUiPrefs();
     L.push("隐藏模式保留三键: "+(p.keepSystemTitleButtons===true?"开":"关"));
@@ -3707,8 +3736,8 @@ function ohsidianBuildStatusLines(){
     L.push("Pandoc 路径: "+ohsidianPandocPath());
   }catch(e){}
   try{
-    L.push("平台: desktop="+(window.app&&window.app.isMobile?"mobile":"desktop")+
-      " 视口="+Math.round(window.innerWidth)+"x"+Math.round(window.innerHeight));
+    L.push("平台: app.isMobile="+((window.app&&window.app.isMobile)?"true":"false")+
+      "  视口="+Math.round(window.innerWidth)+"x"+Math.round(window.innerHeight));
   }catch(e2){}
   return L;
 }
