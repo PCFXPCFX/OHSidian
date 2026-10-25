@@ -309,6 +309,9 @@ export class WebAbility extends WebBaseAbility {
   // logs/spams on transitions.
   private frameOwnerApplied: string = '';
   private frameEnforceAt: number = 0;
+  // BUG-007: last "bar/winTop/surfaceTop" triple logged, so the safe-area
+  // numbers appear on change only (this runs on every geometry event).
+  private lastSafeTopRaw: string = '';
   // Round 154: last value successfully applied by
   // setWindowLayoutFullScreen(); a repeated call for the same value is a pure
   // WMS round-trip (device log shows the same "true" twice per touch entry).
@@ -573,7 +576,36 @@ export class WebAbility extends WebBaseAbility {
         } else if (overlapsBars) {
           const sysAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
           const navAvoid = winObj.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
-          topPx = sysAvoid.topRect.height;
+          // BUG-007 (round 178): the status-bar avoid area is measured in the
+          // WINDOW's coordinate space, but the web content lives inside the
+          // ArkUI page and may already have been pushed down by the very same
+          // bars - this device rejects setWindowLayoutFullScreen
+          // ("OnSetWindowLayoutFullScreen device not support"), so ArkUI lays
+          // the page out below the status bar. Publishing the full bar height
+          // then makes the renderer avoid it a SECOND time, which is the
+          // "顶部留白约为状态栏两倍" report.
+          // drawableRect.top is exactly how far the drawable surface is inset
+          // from the window top, so subtract it. Both terms are 0 on a device
+          // that really is edge-to-edge, which keeps the previous behaviour.
+          const prop = winObj.getWindowProperties();
+          let surfaceTop: number = 0;
+          try {
+            if (prop.drawableRect && prop.drawableRect.width > 0 &&
+              prop.drawableRect.height > 0) {
+              surfaceTop = prop.drawableRect.top;
+            }
+          } catch (drawableException) {
+            surfaceTop = 0;
+          }
+          const barTop: number = sysAvoid.topRect.height;
+          const winTop: number = prop.windowRect.top;
+          const overlapTop: number = Math.max(0, barTop - Math.max(0, winTop));
+          topPx = Math.max(0, overlapTop - surfaceTop);
+          if (this.lastSafeTopRaw !== barTop + '/' + winTop + '/' + surfaceTop) {
+            this.lastSafeTopRaw = barTop + '/' + winTop + '/' + surfaceTop;
+            LogUtil.info(TAG, 'safe-area top: bar=' + barTop + ' winTop=' + winTop +
+              ' surfaceTop=' + surfaceTop + ' => ' + topPx);
+          }
           // Gesture indicator on tablets/phones; the system nav bar (three-key
           // mode) reports through TYPE_SYSTEM instead - take whichever applies.
           bottomPx = Math.max(navAvoid.bottomRect.height, sysAvoid.bottomRect.height);

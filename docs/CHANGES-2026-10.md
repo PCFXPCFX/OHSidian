@@ -3080,3 +3080,29 @@ private ensureSystemCaption(winObj) {
 1. 自绘两档是否只剩一套键；窗口还能不能拖动/缩放。
 2. 诊断里 `安全区` / `顶部坐标` / `dpr` 三行读数，用来给留白定性。
 3. 工具栏点击是否恢复（决定 C1 的定性）。
+
+### 七、补记（2026-10-25 19:50）：留白定性为"同一份 87px 被消费两次"
+
+子代理交叉核对出一条关键的量化事实：**触屏模式的 `densityPixels` 是 2.25，不是 1.9125**（1.9125 是窗口模式的值）。87/2.25 = 38.67、63/2.25 = 28.00，与 mode 文件里的 insets 完全吻合；加上本机日志 `OnSetWindowLayoutFullScreen device not support`、`expandSafeArea` 早已删除、页面根容器无安全区处理 —— 按仓库自己的模型，ArkUI 页面是从 y=87 起步的，并没有延伸到状态栏下。
+
+于是各候选的量值立刻可分：
+
+| 机制 | 让出 | 相对状态栏 |
+|------|------|------------|
+| 单次正确避让 | 38.67 CSS | 1.00× |
+| 密度口径错（1.9125） | 45.49 CSS | 1.18× |
+| `emulate-mobile` 59px 未覆盖 | 59 CSS | 1.53× |
+| **同一份 87px 消费两次** | 77.34 CSS | **2.00×** |
+
+"整两倍"只能是最后一条：两条链路共用一个数据源、中间没有缩放系数。
+
+处置改为**几何自证**（不再依赖"是否支持全屏布局"的假设）：
+
+```ts
+const overlapTop = Math.max(0, barTop - Math.max(0, winTop));
+topPx = Math.max(0, overlapTop - prop.drawableRect.top);
+```
+
+`drawableRect.top` 就是可绘制面已经让出的高度：它为 0（设备真的 edge-to-edge）时公式退化成原行为，为 87 时发布 0，CSS 不再叠第二次。**两种假设下都安全**，且新增一条"变化即打"的日志 `safe-area top: bar=.. winTop=.. surfaceTop=.. => ..` 供下次核对。
+
+`977e352` 的 `is-mobile` 否决 body pad 保留：它堵的是另一条量级相同的路径（兜底 padding 漏进移动布局），两条防线互不替代。
