@@ -48,41 +48,64 @@
 | D3 | 缩放只认 wheel | `app.js@1727661`、`@2418740` | 图片/Canvas/图谱无法双指缩放 | 合成 pinch → scale |
 | D4 | Ctrl+滚轮字体缩放 | `app.js@3101987` | 触摸不可用（系统档已由 fontScale 补丁覆盖，用户手动缩放失效） | 设置项接 `fontScaleOverride` |
 
-## 优先适配 Top 3（第 178 轮复核后）
+## 优先适配 Top 3（第 179 轮，两轮审计后）
 
-1. **C3 分栏分隔条 1–3px → ≥12px**——纯 CSS，改动最小、几乎无回归风险。
-2. **C2 只认 `hover` 的交互**——折叠箭头等触摸端常显（`@media (hover:hover)` 共 149 块，只需挑高频的几处）。
-3. **D4 Ctrl+滚轮缩放替代**——已有 fontScale 通道，补一个设置项即可。
+1. **C3 分栏分隔条热区 1–3px → ≥12px**（88%，纯 CSS，几乎无回归）。
+2. **A3 更新链接改 `os=ohos`**（85%，一行锚点替换；影响被"更新器已禁"削弱）。
+3. **C2 折叠箭头常显**（78%，一条 CSS；前提 `hover:hover` 的读数已加进诊断）。
 
-> **A1 已移出 Top 3**：触摸模式下 Obsidian 自己就把 `hasPhysicalKeyboard` 改成了 false（`EmulateMobile` 分支），真正暴露的只剩"桌面模式 + 没接键盘"，属于可接受行为。
-> **C1 暂不定性**：取决于"引擎到底实不实现 app-region"，见文末。
+> A1/A2 已被实测代码否掉大半，D1 直接作废，B1/B3 不成立 —— 详见下表。
 
 ## 可信度评级（"改动能真正修好且不引入回归"的主观概率）
 
 | # | 条目 | 可信度 | 依据 / 扣分点 |
 |---|------|--------|----------------|
-| C3 | 分隔条加宽 | **85%** | 单条 CSS 覆盖，命中 `--divider-width`；扣分：拖拽命中区还受 `-webkit-app-region`/指针事件影响 |
-| C2 | hover 交互常显 | **75%** | CSS 覆盖可做；扣分：149 处 `hover` 媒体查询需逐处挑，漏掉的地方仍不可见 |
-| D4 | Ctrl+滚轮缩放替代 | **70%** | 已有 fontScale 通道，加设置项即可；扣分：与系统字体缩放叠加语义要定清 |
-| C1 | app-region / 拖动 | **60%** | 工具栏 `no-drag` 已改，等真机确认；若引擎实现的是"自有热区"而非 app-region，整组结论要改 |
-| C4 | 跳过 styled-scrollbars | **60%** | 一个 body 类；扣分：滚动条宽度参与布局的补偿逻辑在别处 |
-| B4 | 麦克风权限 | **55%** | 需 `abilityAccessCtrl` + 引擎侧转发；扣分：引擎录音链路是否可用未验证 |
-| B2 | 剪贴板分支 | **50%** | 取决于兼容层是否提供渲染层 `clipboard`；未实测 |
-| D2 | 中键/修饰键语义 | **40%** | 触摸设备没有中键，只能做替代入口，本质是产品设计而非修 bug |
-| D3 | 双指缩放 | **35%** | 要合成 wheel/scale 事件链，图片/Canvas/图谱三处各自实现，工作量大且易被上游改写 |
-| A2 | `isPhone` 改按窗口宽 | **30%** | 只在触摸模式下执行、且当前是 `is-tablet`；动了会牵 `canSplit/canStackTabs` 一串派生行为，收益极小 |
-| A1 | `hasPhysicalKeyboard` | **25%** | 触摸模式下 Obsidian 已自行置 false；只剩"桌面模式无键盘"，且强行置 false 会误伤带键盘的 2in1 |
-| A3 | 更新链接 | **不做** | 更新器已禁用，纯展示问题 |
-| A4 | ctime 分支 | **不做** | 影响极低 |
-| B5 | 回收站语义 | **不做** | 已有 `.trash` 替代并在文档说明 |
-| B1 | remote 兜底 | **不成立** | 整包已随 HAP，兜底对象走不到 |
-| B3 | `app.relaunch()` | **不成立** | 引擎已用 `restartApp(want)` 实现；只剩 quit 顺序的边角 |
-| D1 | 长按右键 | **不适用 / 不要改** | 长按由引擎手势派发 `contextmenu`；改条件会双触发 |
+| C3 | 分隔条热区 | **88%** | `body.is-mobile{--divider-width-hover:12px}`；扣分：pdf 侧栏复用同一变量、边缘 6px 误触 |
+| A3 | 更新链接 | **85%** | 锚点替换 `n="win32"===t?…` → `"ohos"`；扣分：上游代理白名单、升级内核时锚点失配 |
+| C2 | hover 交互常显 | **78%** | `@media (hover:none){…opacity:1}`；扣分：`opacity` 不阻断命中（是"看不见"而非"点不到"），149 块只覆盖 1 处的体验不一致 |
+| C4 | 跳过 styled-scrollbars | **72%** | 触摸模式摘类；扣分：去掉后可能换成更宽的原生滚动条，主题 CSS 依赖该类 |
+| D4 | 字号缩放入口 | **68%** | 命令/按钮 → `vault.setConfig("baseFontSize")`；扣分：需新 UI，与 fontScale 叠加 |
+| B2 | 剪贴板分支 | **62%** | 先加诊断（已加 `clipboard=…`），暂不改版本钉 |
+| D3 | 双指缩放 | **60%** | 先测 pinch 是否已转成 `wheel+ctrlKey`；必要时合成事件 |
+| B3 | 重启 | **55%** | 引擎已实现 `relaunch`，只剩 `quit()` 时序；改 `main-process.js` 的 ipcMain 包装器特判 |
+| B4 | 麦克风权限 | **50%** | 需 `abilityAccessCtrl` + 引擎 RequestPermissionCode 链路 |
+| A1 | `hasPhysicalKeyboard` | **45%** | 触摸模式已被 Obsidian 置 false；改则伤外接键盘 → **建议不改** |
+| A2 | `isPhone` | **40%** | 是视口 `matchMedia` 且只在触摸模式执行，77 处消费 → **建议不改** |
+| D2 | 中键/修饰键 | **35%** | 触摸无中键，属"新做交互"而非修 bug |
+| A4 | ctime | **25%** | 只影响 Sync 的 ctime 采纳，改了有数据风险 → **不改** |
+| D1 | 长按右键 | **15%（=不要改）** | 引擎已派发 `contextmenu`；再开 iOS 分支＝双菜单 + 800/1200ms 手势竞争 |
+| B1 | remote 兜底 | **不成立** | `@electron/remote` 整包随 HAP，且 `app.js` 有 `if(!i.remote)i.remote=n("@electron/remote")` 自愈 |
+| B5 | 回收站 | **不动** | 包装层 `.trash` + 渲染层 `OHSidianTrash` 已两层接管；改删除路径的数据风险最高 |
 
-## 待澄清：`-webkit-app-region` 到底实不实现
+## 第 179 轮新增的三条（比原 D1 更值得排期）
 
-- 代码注释写"引擎不支持"（`WebAbility.ets:684` 附近）；
-- 但真机日志里，工具栏上 5px 位移就出现 `PAN RACC` + `AppWindowAdapter#startWindowMoving(1)`，**说明按下点的样式确实影响了引擎的拖动判定**；
-- 第 175 轮据此把 `.mobile-toolbar` 改成 `no-drag`（待真机验证）。
+### 1. C1 的方向性答案：引擎很可能**不**实现 app-region
 
-两种可能：① 引擎实现了 app-region，注释过时；② 引擎有自己的"拖动热区"判定，恰好命中了这条 CSS。**下次装机先验证工具栏是否恢复点击**，那条结果同时决定 C1 的整组策略（若引擎确实实现，桌面标题栏拖动应改回依赖 app-region，而不是系统 caption）。
+- `WebAbility.ets:724-727` 的注释自述 "engine has no `-webkit-app-region` implementation (**verified in libelectron.so: no DraggableRegions interface**)"；
+- 子代理独立复核二进制：`DraggableRegion / draggable_regions / SetDraggableRegions` **0 命中**，`-webkit-app-region` 只有 3 处、全是 Blink 的 CSS 属性名字符串表；
+- 但字符串 0 命中 ≠ 必然没实现（符号可能被剥离），所以仍要靠实验落锤：**注入 `body,body *{-webkit-app-region:no-drag!important}` 后若仍能拖窗 ⇒ 引擎有自有热区；若立刻不能拖 ⇒ 引擎真在读 app-region。**
+
+**派生风险（重要）**：若引擎确实不读 app-region，那么第 178 轮把 `隐藏 / Obsidian 风格` 的系统标题条收起后，**这两种档位下窗口没有任何可拖动面**。装机第一件事就是拖一下窗口；拖不动就说明这条命中，需要改用 ArkTS 侧的 `window.startMoving()` 或恢复系统标题条。
+
+### 2. 触摸端双击/双指缩放在 ImageView 被**主动跳过**（确定缺陷）
+
+`app.js@1845253` 末尾：`a.addEventListener("dblclick", e=>{ … jv(e) || … || o.applyDoubleTapZoom(…) })`，而 `jv()` 对触摸合成的鼠标事件返回 `true`（`app.js@885633`）——所以触摸下双击缩放永远进不去。这条不依赖"引擎是否转 wheel"，可直接修。
+
+### 3. 三条"前提未证"已经变成可读数字
+
+诊断命令新增（第 179 轮）：
+
+```
+媒体查询: hover=hover|none  pointer=fine|coarse  clipboard=object|undefined
+最近右键: trusted=true|false  firesTouch=…  button=0  Ns 前
+```
+
+- `hover` 决定 C2 立不成立（文档里两条旧记录互相矛盾，从未实测）；
+- `clipboard` 决定 B2 要不要动；
+- `最近右键` 的 `trusted=true` + `firesTouch=true` 就坐实"引擎派发的 contextmenu"，D1 彻底结案。
+
+## 明确查不到的部分
+
+- 引擎派发 `contextmenu` 的代码行（符号已剥离，`HandleGestureLongPress` 等 0 命中）；
+- `reload` 后 `quit()` 的实际结果；
+- pinch 是否被转成 `wheel+ctrlKey`（建议在图片视图加一个 `wheel` capture 探针，一次两指张合即可判定）。

@@ -3106,3 +3106,47 @@ topPx = Math.max(0, overlapTop - prop.drawableRect.top);
 `drawableRect.top` 就是可绘制面已经让出的高度：它为 0（设备真的 edge-to-edge）时公式退化成原行为，为 87 时发布 0，CSS 不再叠第二次。**两种假设下都安全**，且新增一条"变化即打"的日志 `safe-area top: bar=.. winTop=.. surfaceTop=.. => ..` 供下次核对。
 
 `977e352` 的 `is-mobile` 否决 body pad 保留：它堵的是另一条量级相同的路径（兜底 padding 漏进移动布局），两条防线互不替代。
+
+## 第 179 轮 (2026-10-25): 平台清单二轮审计（15 条逐项）+ 三条前提变成可读数字
+
+### 一、审计结论的净变化
+
+| 条目 | 原判断 | 复核后 |
+|------|--------|--------|
+| **D1** 长按右键 | "没有任何右键通路" | **不成立**：Obsidian 自己的长按实现确实只有 iOS 一条，但真机菜单来自**引擎**（ArkTS 把 Pan/Pinch 手势转进引擎 → Blink 派发 DOM `contextmenu` → 桌面那套 `openFileContextMenu`）。**且不要按原建议改条件**：引擎已派发一次，再合成一次＝双菜单，还会与引擎 ~500ms 阈值打手势竞争 |
+| **A1** `hasPhysicalKeyboard` | 触摸设备被当有物理键盘 | **只在桌面模式成立**：触摸模式的 `EmulateMobile` 分支里 Obsidian 自己就写了 `hasPhysicalKeyboard=!1`；`Nf` 是 Capacitor 插件，本引擎为 null，不会覆盖 |
+| **A2** `isPhone` | 按"屏幕尺寸"判定 | 实际是**视口** `matchMedia`，且整段**只在触摸模式执行**（桌面恒 false）；77 处消费，改它风险大于收益 |
+| **B1** remote 兜底缺键 | 模块缺失则整窗崩 | **不成立**：`@electron/remote` 整包随 HAP，且 `app.js` 有 `if(!i.remote)i.remote=n("@electron/remote")` 自愈 |
+| **B3** `app.relaunch()` 无效 | 鸿蒙无重启语义 | **不成立**：`ElectronAppAdapter.relaunch()` 已用 `restartApp(want)` 实现；只剩上游 `relaunch(); quit()` 的时序边角 |
+| **A3** 更新链接 | 影响小 | 仍成立但被"更新器已禁"削弱；一行锚点可改 `os=ohos`（85%） |
+| **C3** 分隔条热区 | — | **88%**，`body.is-mobile{--divider-width-hover:12px}` 即可（注意 pdf 侧栏复用同一变量） |
+
+另：清单里 `app.js` 的字节偏移全部漂了（三组 delta 互不一致），已把文档锚点约定改成**唯一子串 + 行号**。
+
+### 二、两条新发现（比原 D1 更值得排期）
+
+1. **C1 方向性答案：引擎很可能不实现 app-region**（二进制 `DraggableRegion` 0 命中 + 代码注释自述）。派生风险：第 178 轮收起系统标题条后，`隐藏 / Obsidian 风格` 下**可能没有任何可拖动面**。已写进 `BUG-002` 的补充与 30 秒判定实验。
+2. **ImageView 的双击/双指缩放被 `jv()` 主动跳过**（`jv()` 对触摸合成的鼠标事件恒 true），这是**确定**缺陷，可直接修，不依赖"引擎是否把 pinch 转成 wheel"。
+
+### 三、诊断新增（一次解掉三个"前提未证"）
+
+```
+媒体查询: hover=hover|none  pointer=fine|coarse  clipboard=object|undefined
+最近右键: trusted=true|false  firesTouch=…  button=0  Ns 前
+```
+
+- `hover` 决定 C2 成不成立（文档里两条旧记录互相矛盾，从未实测）；
+- `clipboard` 决定 B2 要不要动；
+- `最近右键` 若是 `trusted=true` + `firesTouch=true`，即坐实"引擎派发"，D1 彻底结案。
+
+捕获逻辑是一个 `contextmenu` capture 监听，只存最近一次，不打印、不依赖 console bridge。
+
+### 四、验证与风险
+
+- `node --check` → OK；asar 重打、`verify-asar` 全绿；补丁版本 178。
+- 本轮**没有**改任何行为逻辑，只加诊断与文档，因此不引入行为回归。
+- 上一轮（双控件、顶部 insets）的改动仍未上机验证——**装机第一件事是拖一下窗口**，确认自绘档还有可拖动面。
+
+### 五、明确查不到的部分
+
+引擎派发 `contextmenu` 的代码行（符号已剥离）、`relaunch` 后 `quit()` 的实际结果、pinch 是否被转成 `wheel+ctrlKey`。这三条只能真机自证。

@@ -2754,6 +2754,21 @@ try{ohsidianPublishFrameStyle()}catch(eFs){}
 hookTrash();
 applyKeyboard();
 watchBodyStyles();
+/* Round 179: remember the last contextmenu so the diagnostic can say where it
+   came from (engine gesture vs script synthesis). One listener, no logging,
+   works even with the console bridge off. */
+try{
+  document.addEventListener("contextmenu",function(ev){
+    try{
+      window.__ohsidianCtxMenu={
+        trusted:!!ev.isTrusted,
+        touch:!!(ev.sourceCapabilities&&ev.sourceCapabilities.firesTouchEvents),
+        button:ev.button,
+        t:Date.now()
+      };
+    }catch(e0){}
+  },true);
+}catch(e1){}
 document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor();applySystemFonts();applyToolbarHitFix();applyPlatformClassFix();try{ohsidianPublishFrameStyle()}catch(eFs2){}hookTrash();applyKeyboard()});
 pollTick();
 /* Frame style can change WITHOUT a reload: Obsidian applies 窗口边框样式到 DOM
@@ -3824,7 +3839,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="177";
+var OHSIDIAN_PATCH_REV="178";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -3902,6 +3917,21 @@ function ohsidianBuildStatusLines(){
       "  want="+(wantT===null||wantT===undefined?"?":(wantT?"touch":"desktop"))+
       "  systemMode="+((cfgT&&cfgT.systemMode)||"?"));
   }catch(eT){}
+  /* Round 179: three premises that were never measured, measured once here.
+     C2 (折叠箭头只认 hover) depends on hover:hover; B2 (剪贴板分支) on whether
+     the renderer exposes electron.clipboard; D1 on whether the contextmenu we
+     receive is engine-generated (isTrusted=true) or synthesized by a script. */
+  try{
+    var mqHover="?",mqPointer="?";
+    try{mqHover=matchMedia("(hover: hover)").matches?"hover":"none"}catch(eH){}
+    try{mqPointer=matchMedia("(pointer: fine)").matches?"fine":"coarse"}catch(eP){}
+    var clipType="?";
+    try{clipType=typeof require("electron").clipboard}catch(eC){}
+    L.push("媒体查询: hover="+mqHover+"  pointer="+mqPointer+"  clipboard="+clipType);
+    var cm=window.__ohsidianCtxMenu;
+    L.push("最近右键: "+(cm?("trusted="+cm.trusted+" firesTouch="+cm.touch+
+      " button="+cm.button+" "+Math.round((Date.now()-cm.t)/1000)+"s 前"):"(还没捕获到，长按一次再看)"));
+  }catch(eMq){}
   try{
     L.push("平台: app.isMobile="+((window.app&&window.app.isMobile)?"true":"false")+
       "  视口="+Math.round(window.innerWidth)+"x"+Math.round(window.innerHeight)+
