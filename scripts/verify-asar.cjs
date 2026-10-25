@@ -99,6 +99,9 @@ try {
     // EACCES" in one click. Remove this marker together with the probe code,
     // its command and its settings button in the version after next.
     'app pandoc environment check (feature)': app.includes('ohsidianBuildPandocReport') && app.includes('ohsidianPandocPath'),
+    // BUG-005: the mobile toolbar must not be a window drag region - this
+    // engine implements -webkit-app-region and turned every tap into a move.
+    'app toolbar not a drag region': app.includes('ohsidian-toolbar-hit') && app.includes('applyToolbarHitFix'),
     // BUG-005 touch probe — TEMPORARY as well: logs what a bottom-of-screen
     // touch actually hits inside the page. Remove with the toolbar fix.
     'app touch probe (temporary)': app.includes('ohsidianInstallTouchProbe'),

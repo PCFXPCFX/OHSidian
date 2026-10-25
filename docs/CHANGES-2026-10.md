@@ -2830,3 +2830,45 @@ ode --check\ OK；repack → asar **25,952,289 B**；
 另有三条 `AppWindowAdapter#startWindowMoving(1)`，伴 `AceGesture: Pan not READY ... FID:[,0,1]`（当时两个触点），把点击判成了拖窗口。该调用既不在本仓库补丁里、也不在 `obsidian.asar` 里，暂记为独立现象。
 
 新增临时探针 `ohsidianInstallTouchProbe()`：屏幕下半部每次按下会打印命中元素链、`.mobile-toolbar` 矩形、`--keyboard-height`、`pointer-events`、`z-index`、是否落在工具栏内。**需先执行「OHSidian: 运行日志捕获 开/关」**才看得到输出；定位后移除（Pandoc 检查已转正为功能，不在此列）。
+
+## 第 175 轮 (2026-10-25): 触摸栏点不动的根因——工具栏被声明为窗口拖动区
+
+**真机日志（16:32:34–37）**
+
+- 每次点击：`TTHNI {page} → {NodeContainer} → {XComponent}`、`Consumed ... notify:1` —— 触摸确实到达网页；
+- 同一次操作里紧跟 `PAN RACC, T: NodeContainer, DIS x 5.000000, y 2.000000`，随后 `AppWindowAdapter#startWindowMoving(1)` —— 5 px 位移就把这次按下判成了"拖窗口"；
+- `AceFocus: node XComponent/secure_field` —— 落点在编辑区。
+
+**根因（Obsidian 的 CSS + 本引擎的能力，两者相撞）**
+
+Obsidian 自己的 `app.css` 里：
+
+```css
+.mobile-toolbar {
+  -webkit-app-region: drag;      /* 整条工具栏 = 窗口拖动区 */
+  position: absolute;
+  top: calc(100vh - var(--keyboard-height) - var(--mobile-toolbar-height));
+}
+```
+
+而**本引擎实现了 `-webkit-app-region`**：C++ 侧识别 pan 后回调 ArkTS 绑定 `AppWindow.StartWindowMoving`（`AppWindowAdapterBind.ets:231`）。于是手指在工具栏上只要有几像素位移，就被当作拖动窗口，**永远不会合成点击**——这正是"看得见、点不到"，与原生视频覆盖层无关。
+
+顺带一条推论：`.titlebar` 同样是 `-webkit-app-region: drag`，所以标题栏拖动本该可用；`TODO.md` 第 3 项"标题栏拖不动"的结论需要按这个新事实重新复核（可能同样是某处覆盖或触摸被吃掉，而不是引擎没有拖动能力）。
+
+**修法**
+
+注入一条样式，只关掉工具栏的拖动区：
+
+```css
+.mobile-toolbar,.mobile-toolbar *{-webkit-app-region:no-drag!important}
+```
+
+窗口拖动仍由 `.titlebar`、`.workspace-tab-header-container-inner`、`.workspace-ribbon.mod-left:before` 承担（都是独立拖动区，未改动）。样式幂等安装（`#ohsidian-toolbar-hit`），启动与 `DOMContentLoaded` 各调一次。
+
+**验证**
+
+- 触摸模式下点工具栏按钮应正常响应；
+- 同样的操作在日志里**不应再出现** `AppWindowAdapter#startWindowMoving`；
+- 触摸探针（临时的）可对照：`inToolbar=YES` 且命中元素是 `.mobile-toolbar` 时按钮生效。
+
+**风险**：无。只改一个 CSS 属性，不影响窗口模式、桌面布局与既有拖动区。若将来需要"从工具栏拖窗口"，再在 OHSidian 设置里加开关，本轮不做。

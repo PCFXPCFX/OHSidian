@@ -2730,10 +2730,11 @@ refreshSystemFontGlobals();
 applySafeArea();
 applyWindowDecor();
 applySystemFonts();
+applyToolbarHitFix();
 hookTrash();
 applyKeyboard();
 watchBodyStyles();
-document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor();applySystemFonts();hookTrash();applyKeyboard()});
+document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor();applySystemFonts();applyToolbarHitFix();hookTrash();applyKeyboard()});
 pollTick();
 /* The touch-mode drawer exposes the vault switcher as a <select> whose
    options are rendered through an engine-native popup. That popup's render
@@ -3567,6 +3568,31 @@ function ohsidianEnsureSettingsTab(){
    position differs from its layout box. This logs exactly that for touches in
    the lower part of the screen - one tap answers it.
    Needs the console bridge: run "OHSidian: 运行日志捕获 开/关" first. */
+/* BUG-005 root cause (device log + obsidian's own app.css):
+   `.mobile-toolbar { -webkit-app-region: drag }` marks the whole mobile toolbar
+   as a WINDOW DRAG REGION, and THIS engine implements app-region - its C++ side
+   calls AppWindow.StartWindowMoving the moment a pan is recognised
+   (log: "PAN RACC, T: NodeContainer, DIS x 5.000000, y 2.000000" immediately
+   followed by "AppWindowAdapter#startWindowMoving(1)"). A finger on the bar can
+   therefore never produce a click: 5 px of travel turns it into a window drag.
+   That is the entire "looks fine, does not respond" report - the native video
+   overlay was a red herring.
+   Fix: drop the drag region for the bar only. Moving the window keeps working
+   through .titlebar and the tab header, which are separate drag regions. */
+var TOOLBAR_HIT_CSS_ID="ohsidian-toolbar-hit";
+function applyToolbarHitFix(){
+  try{
+    var css=".mobile-toolbar,.mobile-toolbar *{-webkit-app-region:no-drag!important}";
+    var el=document.getElementById(TOOLBAR_HIT_CSS_ID);
+    if(!el){
+      if(!document.head)return;
+      el=document.createElement("style");
+      el.id=TOOLBAR_HIT_CSS_ID;
+      document.head.appendChild(el);
+    }
+    if(el.textContent!==css)el.textContent=css;
+  }catch(e){}
+}
 function ohsidianInstallTouchProbe(){
   try{
     if(window.__ohsidianTouchProbe)return false;
