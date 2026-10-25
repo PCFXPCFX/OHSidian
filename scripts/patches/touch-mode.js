@@ -3545,6 +3545,17 @@ function ohsidianBuildSettingsTab(){
     return (tab.containerEl||tab.navEl)?tab:null;
   }catch(e){return null}
 }
+/* The settings modal builds its search component in onOpen(), and
+   addSettingTab() touches it (refreshSearch) - registering at startup throws
+   "Cannot read properties of null (reading 'refreshSearch')" and the tab never
+   appears. So: only register once that machinery exists, which means after the
+   user opens settings at least once. */
+function ohsidianSettingsReady(){
+  try{
+    var s=window.app&&window.app.setting;
+    return !!(s&&s.searchComponent&&s.searchIndex&&s.tabContainer);
+  }catch(e){return false}
+}
 function ohsidianEnsureSettingsTab(){
   try{
     var s=window.app&&window.app.setting;
@@ -3553,6 +3564,10 @@ function ohsidianEnsureSettingsTab(){
       return false;
     }
     if(window.__ohsidianSettingsTab)return true;
+    if(!ohsidianSettingsReady()){
+      window.__ohsidianSettingsError="等待设置面板打开（searchComponent 尚未创建）";
+      return false;
+    }
     var tab=ohsidianBuildSettingsTab();
     if(!tab){
       window.__ohsidianSettingsError="无法构造 SettingTab（找不到基类）";
@@ -3569,11 +3584,9 @@ function ohsidianEnsureSettingsTab(){
     return false;
   }
 }
-/* Registration has to happen when the settings modal can accept it: its
-   container is created lazily, so a registration attempted too early throws
-   inside addSettingTab and (because we must not break startup) is swallowed.
-   Wrapping open() gives us the one moment where the container is guaranteed to
-   exist. */
+/* Registration has to happen while the settings modal is open: its container and
+   search component are created there. Wrapping open() gives us that moment, and
+   a few delayed retries cover the gap between open() and onOpen(). */
 function ohsidianHookSettingsOpen(){
   try{
     var s=window.app&&window.app.setting;
@@ -3581,7 +3594,12 @@ function ohsidianHookSettingsOpen(){
     var orig=s.open;
     s.open=function(){
       var r=orig.apply(s,arguments);
-      try{ohsidianEnsureSettingsTab()}catch(e){}
+      try{
+        var delays=[80,300,800,1600,3000];
+        for(var i=0;i<delays.length;i++){
+          (function(d){setTimeout(function(){try{ohsidianEnsureSettingsTab()}catch(e){}},d)})(delays[i]);
+        }
+      }catch(e){}
       return r;
     };
     s.__ohsidianOpenHooked=1;
@@ -3661,15 +3679,12 @@ function ohsidianInstallTouchProbe(){
   }catch(e){return false}
 }
 function ohsidianScheduleSettingsTab(){
-  var tries=0;
-  var tick=function(){
-    tries++;
-    if(ohsidianEnsureSettingsTab())return;
-    if(tries<40)setTimeout(tick,500);   /* up to 20 s: settings module comes up late */
-  };
   try{window.app.workspace.onLayoutReady(function(){ohsidianEnsureSettingsTab()})}catch(e){}
   try{ohsidianHookSettingsOpen()}catch(eH){}
-  tick();
+  /* Try once now (harmless: it just records "waiting for the settings panel"),
+     then let the open() hook do the real work. No polling ladder - the modal is
+     the only moment registration can succeed. */
+  setTimeout(function(){try{ohsidianEnsureSettingsTab()}catch(e){}},2000);
 }
 /* One-glance answer to "is the patch I am running the one we just built?".
    It reports the patch revision this file was packed with, whether the
