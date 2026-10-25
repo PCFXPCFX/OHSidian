@@ -3635,8 +3635,31 @@ function ohsidianBuildSettingsTab(){
     }
     tab.id="ohsidian";
     tab.name="OHSidian";
-    tab.display=function(){ohsidianSettingsRows(this.containerEl)};
+    tab.display=function(){
+      try{
+        var c=this.containerEl;
+        if(c){
+          /* Record what was already in here: settingTabs[0] is the *subclass*
+             for that particular page (关于/外观/...), so a borrowed class may
+             have filled this container with ITS items before we ever render.
+             That is exactly the "OHSidian 选项卡里是『关于』页面" report. */
+          window.__ohsidianSettingsPre=(c.children?c.children.length:0);
+          while(c.firstChild){c.removeChild(c.firstChild)}
+        }
+        ohsidianSettingsRows(c);
+        window.__ohsidianSettingsPost=(c&&c.children)?c.children.length:0;
+      }catch(eD){
+        window.__ohsidianSettingsError="渲染设置页失败: "+String((eD&&eD.message)||eD);
+      }
+    };
     tab.hide=function(){};
+    /* Neutralise the borrowed class's own rendering. addSettingTab() calls
+       update() before anything else; the core tabs' update() fills
+       this.containerEl with THEIR settings, so our page would open showing
+       关于 instead of ours. Keep settingItems defined because searchIndex
+       iterates it. */
+    tab.update=function(){this.settingItems=[];return this};
+    tab.getSettingDefinitions=function(){return[]};
     if(!tab.containerEl&&!tab.navEl)return null;
     window.__ohsidianSettingsTabObj=tab;
     return tab;
@@ -3864,7 +3887,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="179";
+var OHSIDIAN_PATCH_REV="180";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -3888,6 +3911,13 @@ function ohsidianBuildStatusLines(){
     tabState="未注册（"+window.__ohsidianSettingsError+"）";
   }
   L.push("设置栏目: "+tabState);
+  if(window.__ohsidianSettingsTab){
+    try{
+      var pre=window.__ohsidianSettingsPre,post=window.__ohsidianSettingsPost;
+      L.push("设置页渲染: 清空前子节点="+(pre===undefined?"(还没打开过)":pre)+
+        "  清空后="+(post===undefined?"?":post));
+    }catch(eSP){}
+  }
   if(!window.__ohsidianSettingsTab){
     try{
       var ss=window.app&&window.app.setting;

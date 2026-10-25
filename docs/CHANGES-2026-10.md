@@ -3205,3 +3205,51 @@ body.is-mobile .titlebar-button-container{display:none!important}
 ### 六、另登记 BUG-008（退出时 SIGTRAP）
 
 崩溃报告：`CrBrowserMain` SIGTRAP，另一线程停在 `MainThread::HandleTerminateApplication → Watchdog::Stop()`，页面历史 `leaves foreground` 与崩溃同一时刻，进程寿命 24 s。判读为**退出拆除阶段的 CHECK**，非运行中崩溃。已登记待复现，并列出两个待确认问题（是否每次退出都报、使用中有没有闪退）。
+
+## 第 181 轮 (2026-10-25): 设置页显示成「关于」——借用类的副作用
+
+### 一、现象
+
+真机：`设置栏目: 已注册`，左侧确实出现 OHSidian 一栏，但点进去的**内容是「关于」页**。
+
+### 二、成因
+
+第 177 轮为了拿到"真正的 SettingTab"去继承，取的是 `settingTabs[0].constructor`。问题在于：`settingTabs[0]` **不是基类 `SettingTab`，而是那一页自己的子类**。于是：
+
+1. `new Base(app, s)` 造出的实例，其 `containerEl` 已经是"关于"那一页的容器；
+2. `addSettingTab` 紧接着调用 `tab.update()`，而核心 tab 的 `update()` 正是"把本页的 setting items 渲染进 containerEl"——「关于」的内容被写进了我们的页面；
+3. 我们的 `display()` 只是往后**追加**我们自己的行，于是「关于」留在了最上面。
+
+一句话：**继承了别人的类，就继承了它的副作用**；构造时看不出来，`update()` 时才爆发。
+
+### 三、修法
+
+```js
+tab.update = function(){ this.settingItems = []; return this };   // 掐掉借用类的自渲染
+tab.display = function(){
+  var c = this.containerEl;
+  window.__ohsidianSettingsPre = c.children.length;               // 清空前计数（证据）
+  while(c.firstChild) c.removeChild(c.firstChild);                // 清空
+  ohsidianSettingsRows(c);
+  window.__ohsidianSettingsPost = c.children.length;
+};
+```
+
+`settingItems` 必须保留为数组——`searchIndex.getEntries()` 会遍历它。
+
+诊断新增一行：
+
+```
+设置页渲染: 清空前子节点=N  清空后=M
+```
+
+`清空前 ≠ 0` 就证明"借用类预渲染"这条判断成立（也顺便量了「关于」页塞了几个节点）。
+
+### 四、验证与风险
+
+- `node --check` → OK；重打 + `verify-asar` 全绿，新增标记 `app settings tab owns its container`；补丁 180。
+- 风险：清空容器会在每次进入设置页时重建 DOM，视觉上无差异（设置页本来就是整页重绘）；`update()` 变成空操作后，设置搜索索引里这一页没有可搜索项（本来就是自绘行，无法被 Obsidian 的搜索命中，与之前一致）。
+
+### 五、同一时段的崩溃（BUG-008 更新）
+
+用户确认：**不是每次退出都报**，这次是使用中闪退一次。已把 BUG-008 的严重度从"低"提到"中"，状态仍为 `待复现`。崩溃报告里 `CrBrowserMain` 命中 SIGTRAP、另一线程停在 `MainThread::HandleTerminateApplication → Watchdog::Stop()`，看不出与设置页改动有关；若再次出现，下一步抓 `hilog` 崩溃前 10 秒与 `faultlogger` 的同一条目。

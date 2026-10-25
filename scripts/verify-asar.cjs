@@ -116,6 +116,10 @@ try {
     // bootstrap still builds frameDom and body.is-frameless reserves 30px for
     // it, which stacked on top of the status-bar inset (68.67px blank).
     'app mobile layout drops the desktop titlebar': app.includes('body.is-mobile.is-frameless{padding-top:0!important}'),
+    // The borrowed tab class renders its own page into our container (the
+    // OHSidian tab opened showing 关于): update() must be neutralised and
+    // display() must clear the container first.
+    'app settings tab owns its container': app.includes('__ohsidianSettingsPre') && app.includes('this.settingItems=[];return this'),
     // Self-report command: proves which patch revision is actually running and
     // why the settings section did or did not register.
     'app build/settings status command': app.includes('ohsidianBuildStatusLines') && app.includes('ohsidian-diag-build'),
