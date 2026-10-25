@@ -302,6 +302,13 @@ export class WebAbility extends WebBaseAbility {
   // pushSafeAreaInsets() call (12x "SetWindowTitleMoveEnabled: enable:1" for
   // one PC entry in the 07:39 device log).
   private captionApplied: boolean = false;
+  // Round 178 (BUG-002): which side owns the title bar right now. The renderer
+  // publishes 窗口边框样式 a moment AFTER boot and the engine calls
+  // setUseNativeFrame(true) right after that, so the first decision can be
+  // wrong; this latch records what the 1 s watcher last enforced so it only
+  // logs/spams on transitions.
+  private frameOwnerApplied: string = '';
+  private frameEnforceAt: number = 0;
   // Round 154: last value successfully applied by
   // setWindowLayoutFullScreen(); a repeated call for the same value is a pure
   // WMS round-trip (device log shows the same "true" twice per touch entry).
@@ -652,17 +659,18 @@ export class WebAbility extends WebBaseAbility {
   // rejects the caption (this tablet answers 801), so the caller can keep
   // decor='none' and let the renderer keep its own .titlebar as drag surface.
   private ensureSystemCaption(winObj: window.Window): boolean {
+    // Round 178 (BUG-002): the frame style is checked BEFORE the latch. It used
+    // to be checked after it, and because captionApplied was already true from a
+    // boot that ran before the renderer had published 窗口边框样式, 隐藏 /
+    // Obsidian 风格 never got past the latch: the system caption stayed up next
+    // to Obsidian's own titlebar - the "two sets of window buttons" report.
+    if (this.appDrawsFrame()) {
+      this.frameEnforceAt = 0;   /* force one enforcement pass */
+      this.enforceFrameStyle();
+      return false;
+    }
     if (this.captionApplied) {
       return true;
-    }
-    // BUG-002: with 隐藏 / Obsidian 风格 the user asked for Obsidian's own bar.
-    // Obsidian creates its frameDom for both of those values, and this engine
-    // implements -webkit-app-region, so that bar carries the window controls AND
-    // drags the window. Showing the system caption here is what produced the
-    // "two sets of controls" report on device.
-    if (this.appDrawsFrame()) {
-      LogUtil.info(TAG, '[OHSidian] caption skipped: frame style draws its own bar');
-      return false;
     }
     try {
       if (this.decorVisibleLast !== true) {
@@ -691,6 +699,52 @@ export class WebAbility extends WebBaseAbility {
       LogUtil.warn(TAG, 'show system caption failed: ' + JSON.stringify(captionException));
       this.captionApplied = false;
       return false;
+    }
+  }
+
+  // Round 178 (BUG-002): keep "who owns the title bar" converged with the frame
+  // style the user picked. Called from the 1 s watcher, because:
+  //   - the renderer publishes 窗口边框样式 only after its DOM is ready, so the
+  //     boot-time decision is made without knowing it;
+  //   - the ENGINE re-shows the caption on its own (setUseNativeFrame(true)),
+  //     ~0.6 s after the window is shown, with no JS/ArkTS caller to intercept;
+  // so a one-shot decision leaves BOTH bars on screen. 隐藏 / Obsidian 风格
+  // therefore re-assert "no system caption" for as long as that style is
+  // active. Calling setWindowDecorVisible/TitleButtonVisible on an already
+  // hidden decor is a no-op in the WMS, so the throttle only protects the
+  // log and the round-trip budget, not correctness.
+  private enforceFrameStyle(): void {
+    if (!this.mainWindow) {
+      return;
+    }
+    if (!this.appDrawsFrame()) {
+      if (this.frameOwnerApplied === 'app') {
+        this.frameOwnerApplied = 'system';
+        this.captionApplied = false;
+        LogUtil.info(TAG, '[OHSidian] frame style = system: caption may come back');
+        /* re-publish decor so the renderer stops hiding its own .titlebar */
+        this.pushSafeAreaInsets();
+      }
+      return;
+    }
+    const now: number = Date.now();
+    if (this.frameEnforceAt !== 0 && now - this.frameEnforceAt < 3000) {
+      return;
+    }
+    this.frameEnforceAt = now;
+    const keep: boolean = this.keepSystemTitleButtons();
+    try {
+      this.mainWindow.setWindowDecorVisible(false);
+      this.decorVisibleLast = false;
+      this.mainWindow.setWindowTitleButtonVisible(keep, keep, keep);
+      this.captionApplied = false;
+      if (this.frameOwnerApplied !== 'app') {
+        this.frameOwnerApplied = 'app';
+        LogUtil.info(TAG, '[OHSidian] frame style = app-drawn: system caption off, buttons=' +
+          keep);
+      }
+    } catch (frameException) {
+      LogUtil.warn(TAG, 'enforce frame style failed: ' + JSON.stringify(frameException));
     }
   }
 
@@ -2708,6 +2762,9 @@ export class WebAbility extends WebBaseAbility {
         this.barWatchTimer = setInterval(() => {
           this.refreshAvailAreaCache();
           this.applySystemBarVisibility();
+          /* Round 178: the frame style file appears after boot and the engine
+             re-shows the caption by itself - converge on every tick. */
+          this.enforceFrameStyle();
         }, 1000);
       }
       if (deviceInfo.deviceType === 'tablet') {

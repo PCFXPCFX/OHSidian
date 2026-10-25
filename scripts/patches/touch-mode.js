@@ -314,6 +314,18 @@ function applySafeArea(){
     var desktopLayout=!(function(){
       try{return !!(cfg&&resolveWant(cfg))}catch(e){return false}
     })();
+    /* Round 178: the DOM is the authority on which layout is actually running.
+       The desktop fallback pad must never land on a mobile-layout page: there
+       Obsidian's own CSS already consumes --safe-area-inset-top (e.g.
+       --view-header-top-offset), so padding <body> as well avoids the status
+       bar twice - the "顶部留白变成两倍" report. Require BOTH signals to say
+       desktop; during a mode switch the page reloads anyway. */
+    var mobileLayout=false;
+    try{
+      mobileLayout=!!(document.body&&document.body.classList&&
+        document.body.classList.contains("is-mobile"));
+    }catch(eMl){}
+    if(mobileLayout)desktopLayout=false;
     /* viewportAvoidsBars is retired (round 87, B1): the engine never
        subtracts the bars anymore, so the ArkTS layer writes a constant
        false. The field is still honored so a stale true left by an older
@@ -360,7 +372,13 @@ function watchBodyStyles(){
   try{
     if(!window.MutationObserver)return;
     var mo=new MutationObserver(function(){applySafeArea()});
-    var hook=function(){var b=document.body;if(b){mo.observe(b,{attributes:true,attributeFilter:["style"]})}};
+    var hook=function(){
+      var b=document.body;
+      /* "class" too: the pad decision now depends on is-mobile, which Obsidian
+         adds during its own bootstrap - a pad applied before that must be
+         retracted without waiting for a geometry event (round 178). */
+      if(b){mo.observe(b,{attributes:true,attributeFilter:["style","class"]})}
+    };
     hook();
     document.addEventListener("DOMContentLoaded",hook);
   }catch(e){}
@@ -2738,6 +2756,11 @@ applyKeyboard();
 watchBodyStyles();
 document.addEventListener("DOMContentLoaded",function(){applySafeArea();applyWindowDecor();applySystemFonts();applyToolbarHitFix();applyPlatformClassFix();try{ohsidianPublishFrameStyle()}catch(eFs2){}hookTrash();applyKeyboard()});
 pollTick();
+/* Frame style can change WITHOUT a reload: Obsidian applies 窗口边框样式到 DOM
+   immediately (frameDom created/removed), but ArkTS only knows what we publish.
+   A 5 s re-publish gives the native side the new value without a restart, and
+   the writer only touches the file when the value actually changed. */
+try{setInterval(function(){try{ohsidianPublishFrameStyle()}catch(eFp){}},5000)}catch(eFp0){}
 /* The touch-mode drawer exposes the vault switcher as a <select> whose
    options are rendered through an engine-native popup. That popup's render
    is filtered by the engine (a blank one-row strip, size 536x61) and its
@@ -3701,8 +3724,9 @@ function ohsidianPublishFrameStyle(){
     if(prefs.frameStyle!==st){
       prefs.frameStyle=st;
       ohsidianWriteUiPrefs(prefs);
+      /* log transitions only: this runs from a 5 s poll too */
+      try{console.log("[OHSidian] frame style:",st)}catch(eL){}
     }
-    try{console.log("[OHSidian] frame style:",st)}catch(eL){}
     return st;
   }catch(e){return ""}
 }
@@ -3874,7 +3898,33 @@ function ohsidianBuildStatusLines(){
   }catch(eT){}
   try{
     L.push("平台: app.isMobile="+((window.app&&window.app.isMobile)?"true":"false")+
-      "  视口="+Math.round(window.innerWidth)+"x"+Math.round(window.innerHeight));
+      "  视口="+Math.round(window.innerWidth)+"x"+Math.round(window.innerHeight)+
+      "  dpr="+(window.devicePixelRatio||"?"));
+    /* Double-avoidance check: the desktop fallback pads <body> by the published
+       inset; the mobile layout consumes the CSS var itself. Seeing both a body
+       padding AND a mobile layout means the content avoids the status bar twice
+       - that is the "留白变两倍" report. */
+    L.push("安全区: body 内联 padding-top="+(document.body.style.paddingTop||"(无)")+
+      " data-pad="+(document.body.getAttribute("data-ohsidian-pad")||"0")+
+      " --safe-area-inset-top="+
+      (getComputedStyle(document.body).getPropertyValue("--safe-area-inset-top").trim()||"(空)"));
+    /* Which element actually starts too low? rect.top of the three candidates
+       separates "our body pad" from "Obsidian's own offset" from "the webview
+       itself is already below the status bar". */
+    try{
+      var topOf=function(sel){
+        try{
+          var el=document.querySelector(sel);
+          return el?Math.round(el.getBoundingClientRect().top):-1;
+        }catch(eT0){return -2}
+      };
+      L.push("顶部坐标: .app-container="+topOf(".app-container")+
+        " .workspace="+topOf(".workspace")+
+        " .view-header="+topOf(".view-header")+
+        " .mobile-navbar="+topOf(".mobile-navbar")+
+        " (px, -1=元素不存在)");
+    }catch(eT){}
+    L.push("body 类: "+String(document.body.className||"").slice(0,200));
   }catch(e2){}
   return L;
 }
