@@ -89,8 +89,19 @@ hvigorw assembleHap --mode module -p product=default
   `hvigor/hvigor-config.json5` 里配国内镜像(华为官方 mirror)。
 - **签名失败 `sign tool` 报错**:删除 `~/.ohos/config` 下的调试证书缓存后,
   在 Signing Configs 里重新自动生成。
+- **`hvigor WARN: Will skip sign` / 自动签名失败**:这条只是"没签名,产物是
+  unsigned HAP"(装不上、云测试也传不了)。自动签名要连 AGC 接口,常见拦路是
+  **代理配置**:Settings > Appearance & Behavior > System Settings >
+  HTTP Proxy 里若用了 PAC,SOCKS/PAC 地址要填完整 URL;国内直连一般选
+  **No proxy** 更省事。改完再回 Signing Configs 点 Apply,成功后
+  `~/.ohos/config` 会新增 `default_OHobsidian_*.p12/.cer/.p7b`,
+  `build-profile.json5` 的 `material` 会自动回填。
 - **安装到一半失败**:卸载旧的 OHsidian(com.mikannqaq.obsidian)再装,
   因为签名不一致时系统会拒绝覆盖安装(旧版数据先备份 Vault)。
 - **DevEco 版本太旧没有 API 24 的 SDK**:升级 DevEco Studio(6.1.1 起提供
   API 24),或临时把 build-profile 里的 targetSdkVersion 降回已支持的版本
   (闭源中间层按 API 22 验证过,降级后需真机回归)。
+- **云测试报"仅支持 compatibleSdkVersion 小于等于 23 的应用"**:云真机只认
+  `compatibleSdkVersion <= 23`(API 22 = `6.0.2(22)`、23 = `6.1.0(23)`、
+  24 = `6.1.1(24)`);本项目固定 `6.0.2(22)`,`targetSdkVersion` 可保留 24。
+  改完须重新构建,让 HAP 里的 `minAPIVersion` 变为 `60002022`。

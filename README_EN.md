@@ -31,7 +31,7 @@ OHsidian is an unofficial port of Obsidian to HarmonyOS. It does not reimplement
 
 This repository is a fork of [HanversionOvO/OHSidian][upstream]. It removes Huawei cloud sync, Huawei account login and AGC initialization, and fixes window layout, touch input, drag-and-drop/share, and deletion safety.
 
-`com.mikannqaq.obsidian` · 1.4.1 (versionCode 1040001) · HarmonyOS 6.1.1 (API 24) · tablets / 2-in-1
+`com.mikannqaq.obsidian` · 1.4.2 (versionCode 1040002) · HarmonyOS 6.0.2+ (compatible API 22 / target API 24) · tablets / 2-in-1
 
 ## Features
 
