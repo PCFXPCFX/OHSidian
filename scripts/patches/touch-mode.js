@@ -3478,6 +3478,15 @@ function ohsidianSettingsRows(root){
     var wrap=root.createDiv?root.createDiv("ohsidian-settings"):null;
     if(!wrap)return;
     if(wrap.createEl)wrap.createEl("h2",{text:"OHSidian"});
+    if(wrap.createEl){
+      /* Identity line: tells the user (and us) that the page that just opened is
+         OUR page, and which patch version rendered it. */
+      try{
+        var sub=wrap.createEl("div",{text:"补丁 "+OHSIDIAN_PATCH_REV+
+          " · 其余诊断在命令面板搜索「OHSidian」"});
+        if(sub)sub.style.cssText="opacity:.65;font-size:12px;margin:-6px 0 14px";
+      }catch(eSub){}
+    }
     var mkRow=function(name,desc){
       var row=wrap.createDiv?wrap.createDiv("setting-item"):null;
       if(!row)return null;
@@ -3648,6 +3657,8 @@ function ohsidianBuildSettingsTab(){
         }
         ohsidianSettingsRows(c);
         window.__ohsidianSettingsPost=(c&&c.children)?c.children.length:0;
+        window.__ohsidianSettingsRows=(c&&c.querySelectorAll)?
+          c.querySelectorAll(".setting-item").length:0;
       }catch(eD){
         window.__ohsidianSettingsError="渲染设置页失败: "+String((eD&&eD.message)||eD);
       }
@@ -3887,7 +3898,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="180";
+var OHSIDIAN_PATCH_REV="181";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -3901,122 +3912,93 @@ function ohsidianFrameStyle(){
     return "(unset)";
   }catch(e){return "(unreadable: "+String(e&&e.message||e)+")"}
 }
+/* One-glance status for a HUMAN: four short sections, one line per fact.
+   This used to dump everything (UA, body classes, element census); that is
+   unreadable on a tablet and most of it was only ever needed while chasing one
+   specific bug. Anything niche lives in 调试. Values that only matter when
+   something is broken are merged into the line they belong to. */
 function ohsidianBuildStatusLines(){
   var L=[];
-  L.push("补丁版本: "+OHSIDIAN_PATCH_REV);
-  var tabState="未注册";
+  var pad=function(s,n){
+    var w=0,i=0;
+    for(i=0;i<s.length;i++){w+=s.charCodeAt(i)>255?2:1}
+    while(w<n){s+=" ";w++}
+    return s;
+  };
+  var sec=function(t){L.push("");L.push("▍"+t)};
+  var row=function(k,v){L.push("  "+pad(k,10)+v)};
+  var has=function(sel){try{return document.querySelector(sel)?"有":"无"}catch(e){return "?"}};
+  var body=(document.body&&document.body.className)||"";
+  /* ---- header ------------------------------------------------------- */
+  var st="设置栏 ";
+  if(window.__ohsidianSettingsTab)st+="已注册";
+  else if(window.__ohsidianSettingsError)st+="未注册";
+  else st+="未尝试";
+  L.push("OHSidian 补丁 "+OHSIDIAN_PATCH_REV+"    "+st);
+  /* ---- 窗口 --------------------------------------------------------- */
+  sec("窗口");
+  var live=ohsidianReadFrameStyle(),pub="",decor="?",insTop="?";
+  try{pub=ohsidianReadUiPrefs().frameStyle||""}catch(eP){}
+  try{
+    var cfgM=readMode();
+    decor=(cfgM&&cfgM.windowDecor)||"?";
+    insTop=(cfgM&&cfgM.insets&&cfgM.insets.top!==undefined)?cfgM.insets.top:"?";
+  }catch(eM){}
+  row("边框样式",live+" · "+(ohsidianAppDrawsFrame()?"自绘标题栏":"系统标题条")+
+    " · 引擎 decor="+decor+(pub&&pub!==live?" · 已发布值不一致("+pub+")":""));
+  var topOf=function(sel){
+    try{var el=document.querySelector(sel);return el?Math.round(el.getBoundingClientRect().top):-1}catch(e){return -2}
+  };
+  row("顶部",insTop+" 安全区 · app-container "+topOf(".app-container")+
+    " · view-header "+topOf(".view-header"));
+  row("布局",(body.indexOf("is-mobile")>=0?"移动":"桌面")+
+    (body.indexOf("is-hidden-frameless")>=0?" · 无边框":" · 有边框")+
+    " · "+Math.round(window.innerWidth)+"x"+Math.round(window.innerHeight)+
+    " @"+(window.devicePixelRatio||"?"));
+  /* ---- 输入 --------------------------------------------------------- */
+  var mqHover="?",mqPointer="?",clipType="?";
+  try{mqHover=matchMedia("(hover: hover)").matches?"hover":"none"}catch(eH){}
+  try{mqPointer=matchMedia("(pointer: fine)").matches?"fine":"coarse"}catch(eP2){}
+  try{clipType=typeof require("electron").clipboard}catch(eC){}
+  sec("输入");
+  row("媒体","hover="+mqHover+" · pointer="+mqPointer+" · clipboard="+clipType);
+  var cm=window.__ohsidianCtxMenu;
+  row("最近右键",cm?("trusted="+cm.trusted+" · touch="+cm.touch+" · "+
+    Math.round((Date.now()-cm.t)/1000)+"s 前"):"未捕获（长按一次再看）");
+  row("工具栏",document.getElementById("ohsidian-toolbar-hit")?"no-drag 已注入":"未注入");
+  /* ---- 功能 --------------------------------------------------------- */
+  sec("功能");
+  var prefs={};
+  try{prefs=ohsidianReadUiPrefs()||{}}catch(ePf){}
+  row("窗口三键",(prefs.keepSystemTitleButtons===true?"保留":"不保留")+
+    " · 网页字体 "+(prefs.webviewFonts===false?"关":"开"));
+  row("Pandoc",(function(){try{return ohsidianPandocPath()}catch(e){return "?"}})());
+  /* ---- 调试 --------------------------------------------------------- */
+  sec("调试");
+  var wantT=null;
+  try{var cfgT=readMode();wantT=resolveWant(cfgT)}catch(eW){}
+  row("触屏模式","EmulateMobile "+(localStorage.getItem(KEY)?"开":"关")+" · "+
+    ((function(){try{return readMode()&&readMode().override||"auto"}catch(e){return "?"}})())+
+    " → "+(wantT===null||wantT===undefined?"?":(wantT?"触摸":"桌面")));
   if(window.__ohsidianSettingsTab){
-    tabState="已注册"+(window.__ohsidianSettingsNote?"（"+window.__ohsidianSettingsNote+"）":"");
-  }else if(window.__ohsidianSettingsError){
-    tabState="未注册（"+window.__ohsidianSettingsError+"）";
+    var navEl=window.__ohsidianSettingsTab.navEl;
+    var navInList=!!(navEl&&navEl.isConnected);
+    var pre=window.__ohsidianSettingsPre,post=window.__ohsidianSettingsRows;
+    row("设置页","清空 "+(pre===undefined?"(未打开)":pre)+" → 行 "+
+      (post===undefined?"?":post)+(navInList?" · 导航项在列表":" · 导航项不在列表"));
   }
-  L.push("设置栏目: "+tabState);
-  if(window.__ohsidianSettingsTab){
-    try{
-      var pre=window.__ohsidianSettingsPre,post=window.__ohsidianSettingsPost;
-      L.push("设置页渲染: 清空前子节点="+(pre===undefined?"(还没打开过)":pre)+
-        "  清空后="+(post===undefined?"?":post));
-    }catch(eSP){}
-  }
+  if(window.__ohsidianSettingsError)row("设置错误",window.__ohsidianSettingsError);
   if(!window.__ohsidianSettingsTab){
     try{
       var ss=window.app&&window.app.setting;
-      L.push("设置注册前置: searchComponent="+(ss&&ss.searchComponent?"有":"无")+
-        " searchIndex="+(ss&&ss.searchIndex?"有":"无")+
-        " tabContainer="+(ss&&ss.tabContainer?"有":"无")+
-        " 尝试="+(window.__ohsidianSettingsTries||0));
+      row("注册前置","searchComponent="+(ss&&ss.searchComponent?"有":"无")+
+        " · searchIndex="+(ss&&ss.searchIndex?"有":"无")+
+        " · tabContainer="+(ss&&ss.tabContainer?"有":"无")+
+        " · 尝试 "+(window.__ohsidianSettingsTries||0));
     }catch(eSS){}
   }
-  L.push("工具栏拖动区修复: "+(document.getElementById("ohsidian-toolbar-hit")?"已注入":"未注入"));
-  L.push("窗口边框样式(实时读取): "+ohsidianReadFrameStyle()+
-    "  → ArkTS 应" + (ohsidianAppDrawsFrame()?"自绘（隐藏系统标题条）":"用系统标题条"));
-  /* ArkTS can only see what we PUBLISH - if the two disagree (write failed,
-     different path), the frame fix is inert while this line still looks sane. */
-  try{
-    var pubSt=ohsidianReadUiPrefs().frameStyle;
-    L.push("已发布档位(ohsidian-ui-prefs.json): "+(pubSt||"(未写)"));
-  }catch(ePub){}
-  try{
-    var body=(document.body&&document.body.className)||"";
-    var has=function(sel){try{return document.querySelector(sel)?"有":"无"}catch(e){return "?"}};
-    L.push("布局: is-mobile="+(body.indexOf("is-mobile")>=0) +
-      " is-hidden-frameless="+(body.indexOf("is-hidden-frameless")>=0) +
-      " is-fullscreen="+(body.indexOf("is-fullscreen")>=0)+
-      " emulate-mobile="+(body.indexOf("emulate-mobile")>=0));
-    L.push("元素: .titlebar="+has(".titlebar")+"  .mobile-toolbar="+has(".mobile-toolbar")+
-      "  .mobile-navbar="+has(".mobile-navbar")+"  .titlebar-button-container.mod-right="+
-      has(".titlebar-button-container.mod-right"));
-    L.push("平台类: "+(body.indexOf("mod-linux")>=0?"mod-linux":(body.indexOf("mod-windows")>=0?"mod-windows":
-      (body.indexOf("mod-macos")>=0?"mod-macos":"(none)")))+
-      "  右侧预留(--frame-right-space)="+
-      (getComputedStyle(document.body).getPropertyValue("--frame-right-space").trim()||"(未定义)"));
-    L.push("UA: "+String(navigator.userAgent||"").slice(0,120));
-  }catch(eB){}
-  try{
-    var fs2=require("fs"),np=require("path"),remote=require("@electron/remote");
-    var mp=np.join(remote.app.getPath("userData"),"ohsidian-mode.json");
-    var cfg=JSON.parse(fs2.readFileSync(mp,"utf8"));
-    L.push("引擎发布: decor="+(cfg&&cfg.windowDecor||"?")+"  insets.top="+(cfg&&cfg.insets?cfg.insets.top:"?"));
-  }catch(eM){}
-  try{
-    var p=ohsidianReadUiPrefs();
-    L.push("隐藏模式保留三键: "+(p.keepSystemTitleButtons===true?"开":"关"));
-    L.push("嵌入网页字体: "+(p.webviewFonts===false?"关":"开"));
-    L.push("Pandoc 路径: "+ohsidianPandocPath());
-  }catch(e){}
-  try{
-    var cfgT=readMode(),wantT=null;
-    try{wantT=resolveWant(cfgT)}catch(eW){}
-    L.push("触屏模式: EmulateMobile="+(localStorage.getItem(KEY)?"开":"关")+
-      "  override="+((cfgT&&cfgT.override)||"auto")+
-      "  want="+(wantT===null||wantT===undefined?"?":(wantT?"touch":"desktop"))+
-      "  systemMode="+((cfgT&&cfgT.systemMode)||"?"));
-  }catch(eT){}
-  /* Round 179: three premises that were never measured, measured once here.
-     C2 (折叠箭头只认 hover) depends on hover:hover; B2 (剪贴板分支) on whether
-     the renderer exposes electron.clipboard; D1 on whether the contextmenu we
-     receive is engine-generated (isTrusted=true) or synthesized by a script. */
-  try{
-    var mqHover="?",mqPointer="?";
-    try{mqHover=matchMedia("(hover: hover)").matches?"hover":"none"}catch(eH){}
-    try{mqPointer=matchMedia("(pointer: fine)").matches?"fine":"coarse"}catch(eP){}
-    var clipType="?";
-    try{clipType=typeof require("electron").clipboard}catch(eC){}
-    L.push("媒体查询: hover="+mqHover+"  pointer="+mqPointer+"  clipboard="+clipType);
-    var cm=window.__ohsidianCtxMenu;
-    L.push("最近右键: "+(cm?("trusted="+cm.trusted+" firesTouch="+cm.touch+
-      " button="+cm.button+" "+Math.round((Date.now()-cm.t)/1000)+"s 前"):"(还没捕获到，长按一次再看)"));
-  }catch(eMq){}
-  try{
-    L.push("平台: app.isMobile="+((window.app&&window.app.isMobile)?"true":"false")+
-      "  视口="+Math.round(window.innerWidth)+"x"+Math.round(window.innerHeight)+
-      "  dpr="+(window.devicePixelRatio||"?"));
-    /* Double-avoidance check: the desktop fallback pads <body> by the published
-       inset; the mobile layout consumes the CSS var itself. Seeing both a body
-       padding AND a mobile layout means the content avoids the status bar twice
-       - that is the "留白变两倍" report. */
-    L.push("安全区: body 内联 padding-top="+(document.body.style.paddingTop||"(无)")+
-      " data-pad="+(document.body.getAttribute("data-ohsidian-pad")||"0")+
-      " --safe-area-inset-top="+
-      (getComputedStyle(document.body).getPropertyValue("--safe-area-inset-top").trim()||"(空)"));
-    /* Which element actually starts too low? rect.top of the three candidates
-       separates "our body pad" from "Obsidian's own offset" from "the webview
-       itself is already below the status bar". */
-    try{
-      var topOf=function(sel){
-        try{
-          var el=document.querySelector(sel);
-          return el?Math.round(el.getBoundingClientRect().top):-1;
-        }catch(eT0){return -2}
-      };
-      L.push("顶部坐标: .app-container="+topOf(".app-container")+
-        " .workspace="+topOf(".workspace")+
-        " .view-header="+topOf(".view-header")+
-        " .mobile-navbar="+topOf(".mobile-navbar")+
-        " (px, -1=元素不存在)");
-    }catch(eT){}
-    L.push("body 类: "+String(document.body.className||"").slice(0,200));
-  }catch(e2){}
+  row("元素",".titlebar "+has(".titlebar")+" · .mobile-toolbar "+has(".mobile-toolbar")+
+    " · 按钮容器 "+has(".titlebar-button-container.mod-right"));
   return L;
 }
 var install=function(app){
