@@ -1,7 +1,8 @@
 # PDF 显示性能审计（只读代码，2026-10-28）
 
 > **实施状态（同日）**：P0（墨迹 PDF 叠层不启用不挂载、可见页上限、单页重绘、页表清理、dpr≤2）
-> 与 P1（`capCanvasAreaFactor:0`）已落地，见 `docs/CHANGES-2026-10.md` 第 190 轮、`docs/STYLUS-PEN.md` v36。
+> 与 P1（高 DPI 触摸设备 `capCanvasAreaFactor:0`，PC 保持 `200`）已落地，见
+> `docs/CHANGES-2026-10.md` 第 190–191 轮、`docs/STYLUS-PEN.md` v36。
 > P2/P3 仍未做，保留为本文件后续验证项。
 > 文中 `ohsidian-ink.js` 行号为修复前（v35）位置；v36 已改动 PDF surface，定位请以函数名
 > （`createPdfSurface` / `ensurePage` / `redrawPage` / `refreshPages`）为准。
@@ -364,11 +365,19 @@ function _setupFakeWorker(){ warn("Setting up fake worker."); /* 主线程跑解
 
 ```js
 const PDF_CANVAS_SRC = 'maxCanvasPixels:16777216,';
-const PDF_CANVAS_DST = 'maxCanvasPixels:16777216,capCanvasAreaFactor:0,';
+const PDF_CANVAS_DST =
+  'maxCanvasPixels:16777216,capCanvasAreaFactor:(window.devicePixelRatio>=2&&' +
+  '((window.matchMedia&&window.matchMedia("(pointer: coarse)").matches)||' +
+  'navigator.maxTouchPoints>0)?0:200),';
 ```
 
 > 锚点唯一性已核对：当前 asar 的 `app.js` 里 `maxCanvasPixels:16777216` 出现 **1 次**
 > （另一处移动端分支写的是 `l1.maxCanvasPixels=5242880`，不会误伤）。
+
+> **落地时按设备分流**：只有 `dpr≥2` 且粗指针/有触摸点的高 DPI 触摸设备才取 `0`；
+> 鼠标/触控板为主的 PC 保持 `200`，避免横屏大窗口把 A4 页压到 82% 而损失文字清晰度。
+> 如果目标机把 `screen.avail*` 报成物理像素，`0` 会先撞 `maxCanvasPixels:16.7M`，
+> P1 失效但不回归。
 
 原理与代价（§1.2 已证 `capCanvasAreaFactor` 会回落 `AppOptions`，所以 `l1` 能改到）：
 
@@ -376,10 +385,10 @@ const PDF_CANVAS_DST = 'maxCanvasPixels:16777216,capCanvasAreaFactor:0,';
 |---|---|---|---|---|
 | `200`（现状） | 15.46 M | 2.249（原生） | 9.69 M / 38.8 MB | 最锐 |
 | `50`（温和） | 7.73 M | 2.008（89%） | 7.73 M / 30.9 MB | 几乎无感 |
-| `0`（推荐默认） | 5.15 M（一屏） | 1.639（73%） | 5.15 M / 20.6 MB | 阅读距离可接受，**窄面板几乎无损**（900 宽时 2.219 vs 2.249） |
+| `0`（高 DPI 触摸设备） | 5.15 M（一屏） | 1.639（73%） | 5.15 M / 20.6 MB | 阅读距离可接受，**窄面板几乎无损**（900 宽时 2.219 vs 2.249） |
 
 `0` 的语义很干净：**"任何一页的 canvas 不超过一屏的像素数"**——正好只在
-"整窗宽、超高页"这种最费内存的场景生效。要更保守就用 `50`。
+"整窗宽、超高页"这种最费内存的场景生效。PC 端保留 `200`；若要更保守可用 `50`。
 
 ### P2 — 抑制"宽度变化 ⇒ 重定标"的连锁
 

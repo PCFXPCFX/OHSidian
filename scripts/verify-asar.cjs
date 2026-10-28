@@ -49,8 +49,10 @@ try {
     'app ink pdf overlay bounded (P0)': app.includes('prunePages: function') &&
       app.includes('observePages: function') && app.includes('redrawPage: function') &&
       app.includes('if (!state.enabled) {'),
-    // P1: cap each pdf.js page canvas at one screen's pixels.
-    'app pdf canvas cap (P1)': app.includes('maxCanvasPixels:16777216,capCanvasAreaFactor:0,'),
+    // P1: cap each pdf.js page canvas at one screen's pixels, only on
+    // high-DPI touch devices; desktop PCs keep the upstream 200.
+    'app pdf canvas cap (P1)': app.includes(
+      'maxCanvasPixels:16777216,capCanvasAreaFactor:(window.devicePixelRatio>=2&&((window.matchMedia&&window.matchMedia("(pointer: coarse)").matches)||navigator.maxTouchPoints>0)?0:200),'),
     'app native message fanout': app.includes('ohsidian-native-message') && app.includes('__ohsidianNativeSend'),
     // Round 98r revert: the vdec-shim experiment is shelved (see
     // docs/CHANGES-2026-09.md HEVC verdict); assert the toggle is GONE.

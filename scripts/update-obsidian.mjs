@@ -331,10 +331,12 @@ async function main() {
   // PDF page canvases: Obsidian pins maxCanvasPixels=16 MiB but leaves
   // capCanvasAreaFactor at the upstream default 200 (screen pixels x3), i.e.
   // ~15.4 Mpx on this 2.249-density tablet - never a constraint for an A4
-  // page. Zero caps one page at one screen's pixels: the widest pages drop
-  // ~27% linear resolution, narrow panes are effectively unchanged.
+  // page. On high-DPI touch devices (tablet/phone, including 2-in-1s used as
+  // tablets) cap one page at one screen's pixels. Desktop PCs at normal DPI
+  // keep the upstream 200: their page canvas is small enough and full text
+  // sharpness matters more than the memory saving.
   const pdfCanvasSrc = 'maxCanvasPixels:16777216,';
-  const pdfCanvasDst = 'maxCanvasPixels:16777216,capCanvasAreaFactor:0,';
+  const pdfCanvasDst = 'maxCanvasPixels:16777216,capCanvasAreaFactor:(window.devicePixelRatio>=2&&((window.matchMedia&&window.matchMedia("(pointer: coarse)").matches)||navigator.maxTouchPoints>0)?0:200),';
   const APP_BODY_PATCHES = [
     [drawerSwitchSrc, drawerSwitchDst, 'vault drawer switch routed to openVaultChooser',
       'vault drawer switch site not found (app.js layout changed?); ' +
@@ -345,9 +347,9 @@ async function main() {
     [deleteNoteSrc, deleteNoteDst, 'delete dialog shows the OHSidian trash destination',
       'delete dialog notice site not found (app.js layout changed?); ' +
       'the delete dialog keeps the stock ".trash folder" wording'],
-    [pdfCanvasSrc, pdfCanvasDst, 'PDF page canvas capped at one screen (capCanvasAreaFactor:0)',
+    [pdfCanvasSrc, pdfCanvasDst, 'PDF page canvas capped at one screen on high-DPI touch devices',
       'PDF canvas config site not found (app.js layout changed?); ' +
-      'wide PDF pages keep the 2.249x full-resolution canvas (~39 MB/page)'],
+      'wide PDF pages keep the full-resolution canvas (~39 MB/page on the tablet)'],
   ];
   for (const [src, dst, okMsg, warnMsg] of APP_BODY_PATCHES) {
     // src FIRST: the drawer dst token ("i.app.openVaultChooser()") also exists

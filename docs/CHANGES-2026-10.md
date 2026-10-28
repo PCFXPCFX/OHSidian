@@ -3680,3 +3680,48 @@ maxCanvasPixels:16777216,  →  maxCanvasPixels:16777216,capCanvasAreaFactor:0,
 - P2（打开期 300ms 内抑制宽度变化触发的重定标、`enableDetailCanvas`）与 P3（`enableHWA` A/B）
   本轮未做；按审计建议留到真机读数之后再定。
 - P1 只压主画布；高倍缩放时上游 `enableDetailCanvas` 仍可能再建 detail canvas（P3），高倍下内存/渲染任务可能翻倍，需真机 A/B。
+
+## 第 191 轮 (2026-10-28): P1 按设备分流——平板限一屏，PC 保持原清晰度（v36 修订）
+
+**背景**：用户明确目标同时包含平板和电脑。上一轮全局 `capCanvasAreaFactor:0` 在 PC 横屏大窗口
+下也会把 A4 页压到约 82%（1080p 全宽甚至约 64%），而 PC 并不需要为平板的内存问题牺牲文字清晰度。
+
+**改法**：`scripts/update-obsidian.mjs` 的 P1 目标串改为：
+
+```js
+maxCanvasPixels:16777216,
+capCanvasAreaFactor:(window.devicePixelRatio>=2&&
+  ((window.matchMedia&&window.matchMedia("(pointer: coarse)").matches)||
+   navigator.maxTouchPoints>0)?0:200),
+```
+
+- 平板/手机（`dpr≥2` 且粗指针或有触摸点）：`0`，一页 canvas ≤ 一屏；本机 39 → 21 MB。
+- PC（鼠标/触控板，`dpr<2` 或 fine pointer 且无触摸点）：保持上游 `200`，文字清晰度不变。
+- 高 DPI 触摸 PC（`dpr≥2` 且触摸/粗指针）：按平板处理，仍取 `0`；普通非触摸 PC 不受影响。
+- 该值仍在 app.js 加载时求值；不改 pdf.js 产物，锚点唯一性不变。
+
+**条件实测**：
+
+| dpr | pointer | 触摸点 | 结果 |
+|---:|---|---:|---:|
+| 2.249 | coarse | 10 | 0 |
+| 2 | fine | 0 | 200 |
+| 2 | fine | 10 | 0 |
+| 1.5 | coarse | 10 | 200 |
+| 1 | fine | 0 | 200 |
+
+**验证**：
+
+- `update-obsidian --repatch` 成功；`verify-asar` 全绿，P1 断言改为精确匹配新条件串；
+- HAP 内 asar 复查：`capCanvasAreaFactor:(window.devicePixelRatio>=2` 与
+  `navigator.maxTouchPoints>0)?0:200)` 均在位；
+- `hvigorw assembleHap` **BUILD SUCCESSFUL in 38 s 648 ms**；
+  HAP **120,935,730 B**，2026-10-28 11:53:29，SHA-256
+  `11752EC1B5DCC837D13C6D64DF917E42CAD7DFBB4C9AECC2BF089777CB5D8CCC`。
+
+**风险**：
+
+- 平板接键盘/触控板时 `(pointer: coarse)` 可能变为 fine；`navigator.maxTouchPoints>0`
+  仍应兜住。若某引擎把两者都报 0，P1 不启用，但不会回归；P0 的叠层修复仍生效。
+- 高 DPI 触摸 PC 会按平板取 `0`，文字比 `200` 略软；这是“二合一当平板用”的取舍。
+- `screen.availWidth/Height` 若被移植层报成物理像素，`0` 会先撞 `maxCanvasPixels`，P1 失效但不回归。
