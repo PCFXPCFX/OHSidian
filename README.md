@@ -38,6 +38,7 @@ OHsidian 是 Obsidian 在 HarmonyOS 上的非官方移植。它不重写 Obsidia
 - **原版内核**：完整 Obsidian 编辑体验，兼容社区插件与主题、Markdown 预览、图谱与反向链接。
 - **多窗口**：主窗口、子窗口、嵌入窗口与浮动窗口，位置与大小持久化。
 - **平板适配**：触摸模式跟随系统切换、键盘避让、自由窗口自动钳制到屏幕内。
+- **手写笔（实验）**：华为 M-Pencil 压力墨迹、笔杆双击/轻捏、笔记与 PDF 墨迹标注，PDF 可写回真实注释；真机验收项见 [手写笔方案][stylus]。
 - **外部内容**：拖入即插入、跨应用文件自动取回、系统分享（Share Kit）直达当前笔记。
 - **删除更安全**：删除的笔记进 `文档/OHSidianTrash/`，30 天后自动清理，可随时在文件管理中恢复。
 - **深链**：支持 `obsidian://`，Remotely Save 等插件可完成浏览器 OAuth 登录。
@@ -63,6 +64,7 @@ hvigorw assembleHap
 - [平板功能演示][tablet-demo]
 - [技术架构与目录结构][architecture]
 - [功能细节与 Fork 改动][features]
+- [手写笔（华为 M-Pencil）适配方案][stylus]
 - [发布与校验值][release]
 - [开发环境搭建][dev-env]
 
@@ -84,6 +86,7 @@ hvigorw assembleHap
 [tablet-demo]: docs/tablet-demo.md
 [architecture]: docs/ARCHITECTURE.md
 [features]: docs/FEATURES.md
+[stylus]: docs/STYLUS-PEN.md
 [release]: docs/RELEASE.md
 [dev-env]: docs/DEV-ENV-SETUP.md
 [license-file]: LICENSE

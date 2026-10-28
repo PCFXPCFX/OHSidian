@@ -22,6 +22,11 @@
       {
         // Loopback IPC between the renderer and the native video overlay.
         "name": "ohos.permission.INTERNET"
+      },
+      {
+        // Barrel double-tap / squeeze feedback (docs/STYLUS-PEN.md §7.12).
+        // Normal permission; devices without a motor simply reject the call.
+        "name": "ohos.permission.VIBRATE"
       }
     ],
     "abilities": [

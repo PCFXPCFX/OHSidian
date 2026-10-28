@@ -1,0 +1,6035 @@
+/* ==========================================================================
+ * OHSidian ink layer — P1/P2 of docs/STYLUS-PEN.md
+ *
+ * This block is prepended to Obsidian's app.js by scripts/update-obsidian.mjs.
+ * It owns everything the web layer can do for the pen: capture, pressure
+ * merge, note/PDF overlay canvases, the ink document + sidecar store, undo,
+ * the toolbar and the write-back request to ArkTS.
+ *
+ * Coordinates:
+ *   markdown  "md:abs"        CSS px inside .markdown-preview-sizer (top-left origin)
+ *   pdf       "pdf:<page>"    PDF user space points (bottom-left origin)
+ *
+ * The renderer never assumes that the engine forwards pressure: if the DOM
+ * pressure is constant it asks ArkTS for the device-rate sample stream
+ * (action penSamplesOn) and matches samples by time and position.
+ * ========================================================================== */
+window.__ohsidianInkPatch = "35";
+var OHSIDIAN_INK_REV = "35";
+(function () {
+  "use strict";
+
+  var ROOT = ".obsidian/ohsidian-ink";
+  var DOCS = ROOT + "/docs";
+  var BACKUPS = ROOT + "/backups";
+  var EXPORTS = ROOT + "/exports";
+  var CSS_ID = "ohsidian-ink-css";
+  var TOOLBAR_ID = "ohsidian-ink-toolbar";
+  var MENU_ID = "ohsidian-ink-menu";
+  var CLEAR_ID = "ohsidian-ink-clear";
+  var GUARD_ID = "ohsidian-palm-guard";
+
+  var state = {
+    app: null,
+    installed: false,
+    enabled: true,
+    barMode: "compact",
+    barPos: "br",
+    barExpanded: false,
+    barTimer: 0,
+    lastBarSig: "",
+    traceCount: 0,
+    quiet: true,
+    blockEdge: true,
+    tool: "pointer",
+    lastPenTool: "pen",
+    color: "#1f1f1f",
+    hlColor: "#ffd54a",
+    colorAuto: true,
+    width: 2.4,
+    hlWidth: 16,
+    curve: "linear",
+    palm: true,
+    fingerDraw: false,
+    pressureTapPref: "auto",
+    pressureMin: 0,
+    pressureGamma: 1,
+    pressureMode: "unknown", // unknown | real | fake
+    pressureTapOn: false,
+    domPressureValues: {},
+    domPressureCount: 0,
+    pointerTypes: {},
+    coalescedMax: 0,
+    penNativeActive: false,
+    penNativeAt: 0,
+    penNativeTimer: 0,
+    lastPenActivity: 0,
+    latencyT0: 0,
+    lastLatency: 0,
+    latencyCaptured: false,
+    probeCapture: false,
+    lastPenAt: 0,
+    lastPenType: "",
+    lastPenDetail: null,
+    lastGesture: "",
+    lastGestureAt: 0,
+    gestureCount: 0,
+    surfaces: [],
+    activeLeaf: null,
+    activeSurface: null,
+    ambientSurfaceTimer: 0,
+    surfaceWaitTimer: 0,
+    surfaceWaitTries: 0,
+    awaitGesture: null,
+    blockedPointerId: null,
+    penUiSwipe: null,
+    penClickSuppressUntil: 0,
+    lastPenSeen: 0,
+    lastPenBlockLog: 0,
+    lastToolMode: null,
+    pdfProbeDone: false,
+    active: null,
+    toolbarBuilt: false,
+    menuOpen: false,
+    ipcReady: false,
+    ipcTriedAt: 0,
+    ipcSent: 0,
+    ipcRecv: 0,
+    // Time-based so a renderer reload (which resets local counters) can never
+    // fall below the ArkTS page's lastPdfSeq: the page outlives the document.
+    seq: Date.now(),
+    stylusInfo: null,
+    pdfPending: {},
+    pdfInFlight: false,
+    pdfAutoTimer: 0,
+    pdfAutoSurface: null,
+    pdfAutoDirty: false,
+    pdfAutoFail: 0,
+    pdfBackup: "",
+    offsetX: 0,
+    offsetY: 0,
+    simPressure: true,
+    driftNotified: {},
+    noSurfaceNotified: false,
+    pendingTool: null,
+    probeInstalled: false
+  };
+
+  function log() {
+    try {
+      var a = Array.prototype.slice.call(arguments);
+      a.unshift("[OHSidian ink]");
+      console.log.apply(console, a);
+    } catch (e) {}
+  }
+
+  function warn() {
+    try {
+      var a = Array.prototype.slice.call(arguments);
+      a.unshift("[OHSidian ink]");
+      console.warn.apply(console, a);
+    } catch (e) {}
+  }
+
+  function notice(msg, ms) {
+    // app.js has a top-level `Notice` binding; the window copy is a fallback
+    // for the (unlikely) case that the renderer is reloaded with a different
+    // module scope.
+    try {
+      new Notice(msg, ms || 4000);
+      return;
+    } catch (e) {}
+    try {
+      if (window.Notice) {
+        new window.Notice(msg, ms || 4000);
+        return;
+      }
+    } catch (e2) {}
+    try {
+      console.log("[OHSidian ink notice]", msg);
+    } catch (e3) {}
+  }
+
+  function clamp(v, a, b) {
+    return v < a ? a : (v > b ? b : v);
+  }
+
+  /**
+   * Quiet status: Obsidian's own feedback language is a local, low-noise hint,
+   * not a modal or a Notice per action. Routine results go to the tiny toast
+   * above the nib; only errors still use Notice.
+   */
+  var inkStatusTimer = 0;
+  function inkStatus(msg, ms) {
+    if (!state.quiet) {
+      notice(msg, ms || 2200);
+      return;
+    }
+    try {
+      var el = document.getElementById("ohsidian-ink-toast");
+      if (!el) {
+        console.log("[OHSidian ink]", msg);
+        return;
+      }
+      el.textContent = msg;
+      el.classList.add("is-visible");
+      if (inkStatusTimer) clearTimeout(inkStatusTimer);
+      inkStatusTimer = setTimeout(function () {
+        try { el.classList.remove("is-visible"); } catch (e) {}
+      }, ms || 1800);
+    } catch (e) {
+      console.log("[OHSidian ink]", msg);
+    }
+  }
+
+  function noticeError(msg, ms) {
+    notice(msg, ms || 7000);
+  }
+
+  /**
+   * Renderer -> ArkTS diagnostic line. HiLog does not capture `console.*` from
+   * the web renderer, so key UI transitions are forwarded over the existing
+   * loopback IPC and printed under the `InkUI` tag.
+   */
+  /**
+   * Tell ArkTS whether the current tool is a pen tool. ArkTS then blocks
+   * finger/palm hit-testing entirely while a pen tool is selected, so palm
+   * swipes cannot reach Obsidian at all. Selecting pointer sends hand mode.
+   */
+  function inkToolMode(tool) {
+    var isPen = tool === "pen" || tool === "highlighter" || tool === "eraser";
+    if (state.lastToolMode === isPen) return;
+    state.lastToolMode = isPen;
+    try {
+      if (typeof window.__ohsidianNativeSend === "function") {
+        var okMode = window.__ohsidianNativeSend({
+          action: "inkTool",
+          tool: isPen ? "pen" : "pointer",
+          ts: Date.now()
+        });
+        if (okMode === false) state.lastToolMode = null;
+      }
+    } catch (e) {
+      state.lastToolMode = null;
+    }
+  }
+
+  function inkTrace(event, detail) {    if (state.traceCount > 400) return;
+    state.traceCount++;
+    try {
+      if (typeof window.__ohsidianNativeSend !== "function") return;
+      window.__ohsidianNativeSend({
+        action: "inkLog",
+        event: String(event || ""),
+        detail: detail ? JSON.stringify(detail) : "",
+        ts: Date.now()
+      });
+    } catch (e) {}
+  }
+
+  function clamp01(v) {
+    if (typeof v !== "number" || v !== v) return 0;
+    return v < 0 ? 0 : (v > 1 ? 1 : v);
+  }
+
+  function nowMs() {
+    return (window.performance && performance.now) ? performance.now() : Date.now();
+  }
+
+  function uid() {
+    return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  }
+
+  function fnv(str) {
+    var h = 2166136261 >>> 0;
+    for (var i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(16);
+  }
+
+  function inkKey(rel) {
+    return fnv(rel) + "-" + rel.length.toString(36);
+  }
+
+  function hexToInt(hex) {
+    try {
+      var s = String(hex || "").replace("#", "");
+      if (s.length === 3) {
+        s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
+      }
+      if (s.length !== 6) return 0x1f1f1f;
+      return parseInt(s, 16) & 0xffffff;
+    } catch (e) {
+      return 0x1f1f1f;
+    }
+  }
+
+  function safeName(rel) {
+    var base = String(rel || "drawing").split("/").pop() || "drawing";
+    return base.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]/g, "_");
+  }
+
+  // ---------------------------------------------------------------------
+  // Theme-aware ink colour
+  // ---------------------------------------------------------------------
+  function inkParseColor(s) {
+    try {
+      var m = /rgba?\(([^)]+)\)/.exec(String(s || ""));
+      if (!m) return null;
+      var p = m[1].split(",");
+      return {
+        r: Number(p[0]) || 0,
+        g: Number(p[1]) || 0,
+        b: Number(p[2]) || 0,
+        a: p.length > 3 ? Number(p[3]) : 1
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function inkLinear(c) {
+    var v = c / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+
+  function inkBgRgb(el) {
+    var node = el;
+    var guard = 0;
+    while (node && guard < 10) {
+      try {
+        var c = inkParseColor(getComputedStyle(node).backgroundColor);
+        if (c && c.a > 0.12) return c;
+      } catch (e) {}
+      node = node.parentElement;
+      guard++;
+    }
+    try {
+      return inkParseColor(getComputedStyle(document.body).backgroundColor);
+    } catch (e2) {
+      return null;
+    }
+  }
+
+  /**
+   * Dark note/PDF background -> light ink; light background -> dark ink. The
+   * old fixed #1f1f1f was invisible on the dark theme, which is exactly what
+   * the first device test reported.
+   */
+  function inkAutoColor(surface) {
+    var el = null;
+    var rgb = null;
+    try {
+      if (surface && surface.kind === "pdf") {
+        var idx = parseInt(String(surface.currentSpace || "pdf:0").slice(4), 10) || 0;
+        var entry = surface.pages ? surface.pages[idx] : null;
+        el = entry && entry.pageEl ? entry.pageEl : surface.container;
+        if (el) {
+          var cs = getComputedStyle(el);
+          var varColor = inkParseColor((cs.getPropertyValue("--pdf-page-background") || "").trim());
+          rgb = varColor && varColor.a > 0.1 ? varColor : inkParseColor(cs.backgroundColor);
+          if (!rgb || rgb.a <= 0.1) {
+            // A PDF page is white unless the viewer explicitly themes it.
+            rgb = { r: 255, g: 255, b: 255, a: 1 };
+          }
+        }
+      } else if (surface && surface.kind === "pdfembed") {
+        el = surface.pageEl;
+        if (el) {
+          var ecs = getComputedStyle(el);
+          var evc = inkParseColor((ecs.getPropertyValue("--pdf-page-background") || "").trim());
+          rgb = evc && evc.a > 0.1 ? evc : inkParseColor(ecs.backgroundColor);
+          if (!rgb || rgb.a <= 0.1) rgb = { r: 255, g: 255, b: 255, a: 1 };
+        }
+      } else if (surface && surface.kind === "canvas") {
+        el = surface.wrapper || surface.canvas;
+        rgb = inkBgRgb(el);
+      } else if (surface) {
+        el = surface.sizer || surface.rootEl;
+        rgb = inkBgRgb(el);
+      }
+    } catch (e) {}
+    if (!rgb) rgb = inkBgRgb(el);
+    if (!rgb) return "#1f1f1f";
+    var lum = 0.2126 * inkLinear(rgb.r) + 0.7152 * inkLinear(rgb.g) + 0.0722 * inkLinear(rgb.b);
+    return lum < 0.42 ? "#e8e8e8" : "#1f1f1f";
+  }
+
+  /** Repaint strokes that were written with automatic colour (theme switch). */
+  function inkRefreshAutoColors(surface) {
+    var s = surface;
+    if (!s) return;
+    var doc = docFor(s);
+    if (!doc) return;
+    var color = inkAutoColor(s);
+    var changed = 0;
+    for (var i = 0; i < doc.strokes.length; i++) {
+      var st = doc.strokes[i];
+      if (!st.auto || st.tool === "highlighter" || st.baked) continue;
+      if (st.color !== color) {
+        st.color = color;
+        changed++;
+      }
+    }
+    if (changed) {
+      saveSoon(doc);
+      s.redraw();
+    }
+  }
+
+  function inkRecolorSpace(surface) {
+    var s = surface || state.activeSurface || activeSurfaceNow();
+    if (!s) return;
+    var doc = docFor(s);
+    if (!doc) return;
+    var space = inkSpaceOf(s, null);
+    if (!space) return;
+    var before = snapshotSpace(doc, space);
+    var color = inkAutoColor(s);
+    var changed = 0;
+    for (var i = 0; i < doc.strokes.length; i++) {
+      var st = doc.strokes[i];
+      if (st.space !== space || st.tool === "highlighter") continue;
+      if (st.color !== color) {
+        st.color = color;
+        st.auto = true;
+        changed++;
+      }
+    }
+    if (!changed) {
+      inkStatus("当前页墨色已与主题一致");
+      return;
+    }
+    doc.strokes = doc.strokes;
+    pushHistory(doc, space, before);
+    saveSoon(doc);
+    scheduleRedraw();
+    inkStatus("已按主题重新着色 " + changed + " 笔（可撤销）");  }
+
+  // ---------------------------------------------------------------------
+  // UI preferences: reuse the shared file touch-mode.js owns.
+  // ---------------------------------------------------------------------
+  function readPrefs() {
+    try {
+      if (typeof window.ohsidianReadUiPrefs === "function") return window.ohsidianReadUiPrefs() || {};
+    } catch (e) {}
+    return {};
+  }
+
+  function writePrefs(obj) {
+    try {
+      if (typeof window.ohsidianWriteUiPrefs === "function") return window.ohsidianWriteUiPrefs(obj);
+    } catch (e) {}
+    return false;
+  }
+
+  function pref(key, dflt) {
+    var p = readPrefs();
+    return p[key] === undefined ? dflt : p[key];
+  }
+
+  function setPref(key, value) {
+    var p = readPrefs();
+    p[key] = value;
+    return writePrefs(p);
+  }
+
+  function loadPrefs() {
+    // v20: handwriting mode is opt-in. Migrate existing installs once so the
+    // default is off, then respect the user's choice.
+    if (pref("inkDefaultOffMigrated", false) !== true) {
+      setPref("inkEnabled", false);
+      setPref("inkDefaultOffMigrated", true);
+    }
+    if (pref("inkDoubleTapMigrated", false) !== true) {
+      // The old default toggled eraser. Wake the toolbar instead, which is
+      // what a double-tap on the barrel is for in day-to-day writing.
+      if (pref("inkDoubleTap", "pen-eraser") === "pen-eraser") {
+        setPref("inkDoubleTap", "wake");
+      }
+      setPref("inkDoubleTapMigrated", true);
+    }
+    state.enabled = pref("inkEnabled", false) === true;
+    state.eraserPx = Number(pref("inkEraserPx", 12)) || 12;
+    if (state.eraserPx < 6) state.eraserPx = 6;
+    if (state.eraserPx > 32) state.eraserPx = 32;
+    state.barMode = pref("inkBarMode", "compact");
+    if (state.barMode !== "auto" && state.barMode !== "compact" && state.barMode !== "always") {
+      state.barMode = "compact";
+    }
+    state.barPos = pref("inkBarPos", "br") === "bl" ? "bl" : "br";
+    state.quiet = pref("inkQuiet", true) !== false;
+    state.cursorEnabled = pref("inkCursor", true) !== false;
+    state.blockEdge = pref("inkBlockEdge", true) !== false;
+    state.curve = pref("inkCurve", "linear");
+    // Pressure curve: a dead zone at the start plus a gamma exponent. Older
+    // builds only stored the preset name; migrate those once.
+    var pm = pref("inkPressureMin", null);
+    var pg = pref("inkPressureGamma", null);
+    if (pm === null || pm === undefined) {
+      if (state.curve === "soft") { state.pressureMin = 0; state.pressureGamma = 0.72; }
+      else if (state.curve === "hard") { state.pressureMin = 0.06; state.pressureGamma = 1.4; }
+      else { state.pressureMin = 0; state.pressureGamma = 1; }
+    } else {
+      state.pressureMin = clamp(Number(pm) || 0, 0, 0.6);
+      state.pressureGamma = clamp(Number(pg) || 1, 0.4, 2.6);
+    }
+    state.palm = pref("inkPalm", true) !== false;
+    state.fingerDraw = pref("inkFingerDraw", false) === true;
+    state.pressureTapPref = pref("inkPressureTap", "auto");
+    state.width = Number(pref("inkWidth", 2.4)) || 2.4;
+    state.hlWidth = Number(pref("inkHlWidth", 16)) || 16;
+    state.color = pref("inkColor", "#1f1f1f");
+    state.hlColor = pref("inkHlColor", "#ffd54a");
+    state.colorAuto = pref("inkColorAuto", true) !== false;
+    var paletteDefault = ["#1f1f1f", "#d32f2f", "#1565c0", "#2e7d32", "#f9a825"];
+    var paletteSaved = pref("inkPalette", null);
+    var palette = [];
+    if (Array.isArray(paletteSaved)) {
+      for (var pi = 0; pi < paletteSaved.length && palette.length < 5; pi++) {
+        var pc = String(paletteSaved[pi] || "");
+        if (/^#[0-9a-f]{6}$/i.test(pc)) palette.push(pc);
+      }
+    }
+    while (palette.length < 5) palette.push(paletteDefault[palette.length]);
+    state.palette = palette;
+    state.glass = pref("inkGlass", false) === true;
+    state.reduceMotion = pref("inkReduceMotion", true) !== false;
+    state.lastPenTool = pref("inkLastPenTool", "pen") === "highlighter" ? "highlighter" : "pen";
+    state.offsetX = Number(pref("inkOffsetX", 0)) || 0;
+    state.offsetY = Number(pref("inkOffsetY", 0)) || 0;
+  }
+
+  // ---------------------------------------------------------------------
+  // Ink document + sidecar store
+  // ---------------------------------------------------------------------
+  var store = {
+    cache: {},
+    loading: {},
+    timers: {},
+    saving: {},
+    pending: {},
+    undo: {},
+    redo: {}
+  };
+
+  function newDoc(target, type) {
+    return {
+      v: 1,
+      target: target,
+      type: type,
+      created: Date.now(),
+      updated: Date.now(),
+      layout: null,
+      strokes: [],
+      orphans: []
+    };
+  }
+
+  function adapter() {
+    return state.app && state.app.vault ? state.app.vault.adapter : null;
+  }
+
+  function pathFor(key) {
+    return DOCS + "/" + key + ".json";
+  }
+
+  async function ensureDirs() {
+    var ad = adapter();
+    if (!ad) return;
+    var dirs = [ROOT, DOCS, BACKUPS, EXPORTS];
+    for (var i = 0; i < dirs.length; i++) {
+      try {
+        if (!(await ad.exists(dirs[i]))) await ad.mkdir(dirs[i]);
+      } catch (e) {
+        // Exists / racing creator is fine.
+      }
+    }
+  }
+
+  function docFor(surface) {
+    if (!surface || !surface.leaf || !surface.leaf.view || !surface.leaf.view.file) return null;
+    var target = surface.leaf.view.file.path;
+    var key = inkKey(target);
+    if (store.cache[key]) return store.cache[key];
+    var doc = newDoc(target, surface.kind === "pdf" ? "pdf" :
+      (surface.kind === "canvas" ? "canvas" : "markdown"));
+    doc._loading = true;
+    store.cache[key] = doc;
+    loadDoc(key, doc);
+    return doc;
+  }
+
+  /** The stroke-space key for a surface: markdown page, PDF page, or board. */
+  function inkSpaceOf(surface, entry) {
+    if (!surface) return "md:abs";
+    if (surface.kind === "pdf") {
+      return (entry && entry.space) || surface.currentSpace || "pdf:0";
+    }
+    if (surface.kind === "canvas") return surface.space || "canvas";
+    if (surface.kind === "pdfembed") return surface.space || "pdfembed";
+    return "md:abs";
+  }
+
+  async function loadDoc(key, doc) {
+    if (store.loading[key]) return;
+    store.loading[key] = true;
+    var ad = adapter();
+    if (!ad) {
+      store.loading[key] = false;
+      doc._loading = false;
+      return;
+    }
+    try {
+      if (await ad.exists(pathFor(key))) {
+        var txt = await ad.read(pathFor(key));
+        var parsed = JSON.parse(txt);
+        if (parsed && parsed.v === 1 && Array.isArray(parsed.strokes)) {
+          doc.v = 1;
+          // Keep the current path. Trusting a copied/renamed sidecar's target
+          // would make the next save write into a different note's sidecar.
+          if (parsed.target && parsed.target !== doc.target) {
+            warn("ink sidecar target mismatch", key, parsed.target);
+            // A copied sidecar or a hash collision must not leak another
+            // note's strokes into this one.
+            parsed.strokes = [];
+            parsed.orphans = [];
+          }
+          doc.type = doc.type || parsed.type;
+          doc.created = parsed.created || doc.created;
+          doc.updated = parsed.updated || doc.updated;
+          doc.layout = parsed.layout || null;
+          if (doc.strokes && doc.strokes.length > 0) {
+            // A stroke was captured while this file was still loading. Keep
+            // the loaded strokes BELOW the fresh ones (drawing order), merge
+            // by id, and discard the now-invalid undo/redo stacks: they were
+            // captured before the old ink existed and would drop it on undo.
+            var fresh = doc.strokes.slice();
+            var merged = parsed.strokes.slice();
+            var seen = {};
+            for (var a = 0; a < merged.length; a++) seen[merged[a].id] = true;
+            for (var b = 0; b < fresh.length; b++) {
+              if (!seen[fresh[b].id]) merged.push(fresh[b]);
+            }
+            doc.strokes = merged;
+            store.undo[key] = [];
+            store.redo[key] = [];
+          } else {
+            doc.strokes = parsed.strokes;
+          }
+          doc.orphans = parsed.orphans || [];
+        } else if (parsed) {
+          warn("unsupported ink doc version", parsed.v);
+        }
+      }
+    } catch (e) {
+      warn("ink doc load failed", key, e && e.message);
+    }
+    store.loading[key] = false;
+    doc._loading = false;
+    if (doc._dirty) {
+      doc._dirty = false;
+      saveSoon(doc);
+    }
+    inkAfterDocChange(doc);
+  }
+
+  function saveSoon(doc) {
+    if (!doc) return;
+    // Never schedule the write half of a load-before-save race: an empty or
+    // partially-loaded doc must not be written over the existing sidecar.
+    if (doc._loading) {
+      doc._dirty = true;
+      return;
+    }
+    var key = inkKey(doc.target);
+    if (store.timers[key]) clearTimeout(store.timers[key]);
+    store.timers[key] = setTimeout(function () {
+      store.timers[key] = 0;
+      saveDoc(doc);
+    }, 900);
+  }
+
+  async function saveDoc(doc) {
+    if (doc && doc._loading) {
+      doc._dirty = true;
+      return false;
+    }
+    var ad = adapter();
+    if (!ad || !doc) return false;
+    var key = inkKey(doc.target);
+    if (store.saving[key]) {
+      // A previous write is still in flight. Mark a second pass instead of
+      // racing the same tmp path (which could leave a truncated sidecar).
+      store.pending[key] = true;
+      return false;
+    }
+    store.saving[key] = true;
+    try {
+      await ensureDirs();
+      doc.updated = Date.now();
+      var dest = pathFor(key);
+      var tmp = dest + ".tmp";
+      var payload = JSON.stringify({
+        v: 1,
+        target: doc.target,
+        type: doc.type,
+        created: doc.created,
+        updated: doc.updated,
+        layout: doc.layout,
+        strokes: doc.strokes,
+        orphans: doc.orphans
+      });
+      try {
+        await ad.write(tmp, payload);
+        try {
+          await ad.rename(tmp, dest);
+        } catch (eR) {
+          await ad.write(dest, payload);
+          try { await ad.remove(tmp); } catch (eRm) {}
+        }
+        return true;
+      } catch (e) {
+        warn("ink doc save failed", key, e && e.message);
+        return false;
+      }
+    } finally {
+      store.saving[key] = false;
+      if (store.pending[key]) {
+        store.pending[key] = false;
+        if (doc._loading) doc._dirty = true;
+        else saveDoc(doc);
+      }
+    }
+  }
+
+  function snapshotSpace(doc, space) {
+    // References, not deep clones. A PDF page can hold hundreds of strokes;
+    // JSON-cloning every stroke twice per pen lift was O(total points) per
+    // stroke and grew quadratically on long pages. Stroke objects are treated
+    // as immutable after commit (erase creates new ids), so references are
+    // enough for undo/redo.
+    var out = [];
+    for (var i = 0; i < doc.strokes.length; i++) {
+      if (doc.strokes[i].space === space) out.push(doc.strokes[i]);
+    }
+    return out;
+  }
+
+  function pushHistory(doc, space, before) {
+    var key = inkKey(doc.target);
+    if (!store.undo[key]) store.undo[key] = [];
+    store.undo[key].push({ space: space, before: before, after: snapshotSpace(doc, space) });
+    if (store.undo[key].length > 50) store.undo[key].shift();
+    store.redo[key] = [];
+  }
+
+  function restoreSpace(doc, space, strokes) {
+    var kept = [];
+    for (var i = 0; i < doc.strokes.length; i++) {
+      if (doc.strokes[i].space !== space) kept.push(doc.strokes[i]);
+    }
+    doc.strokes = kept.concat(strokes);
+    saveSoon(doc);
+    inkAfterDocChange(doc);
+  }
+
+  function inkUndo(surface) {
+    var s = surface || state.activeSurface || activeSurfaceNow();
+    var doc = s ? docFor(s) : null;
+    if (!doc) return false;
+    var key = inkKey(doc.target);
+    var stack = store.undo[key] || [];
+    if (!stack.length) {
+      inkStatus("没有可撤销的墨迹");
+      return false;
+    }
+    var entry = stack.pop();
+    store.redo[key] = store.redo[key] || [];
+    store.redo[key].push(entry);
+    restoreSpace(doc, entry.space, entry.before);
+    schedulePdfWrite(s);
+    return true;
+  }
+
+  function inkRedo(surface) {
+    var s = surface || state.activeSurface || activeSurfaceNow();
+    var doc = s ? docFor(s) : null;
+    if (!doc) return false;
+    var key = inkKey(doc.target);
+    var stack = store.redo[key] || [];
+    if (!stack.length) {
+      inkStatus("没有可重做的墨迹");
+      return false;
+    }
+    var entry = stack.pop();
+    store.undo[key] = store.undo[key] || [];
+    store.undo[key].push(entry);
+    restoreSpace(doc, entry.space, entry.after);
+    schedulePdfWrite(s);
+    return true;
+  }
+
+  function inkClearSpace(surface) {
+    var s = surface || state.activeSurface || activeSurfaceNow();
+    var doc = s ? docFor(s) : null;
+    if (!doc || !s) return false;
+    var space = inkSpaceOf(s, null);
+    if (!space && s.kind === "pdf") {
+      try {
+        var pn = s.viewer.currentPageNumber;
+        if (pn > 0) space = "pdf:" + (pn - 1);
+      } catch (e) {}
+    }
+    if (!space) return false;
+    var before = snapshotSpace(doc, space);
+    if (!before.length) {
+      inkStatus("本页没有墨迹");
+      return false;
+    }
+    pushHistory(doc, space, before);
+    restoreSpace(doc, space, []);
+    schedulePdfWrite(s);
+    inkStatus("已清除本页墨迹（可撤销）");
+    return true;
+  }
+
+  function inkAddStroke(surface, stroke) {
+    var doc = docFor(surface);
+    if (!doc) return false;
+    var space = stroke.space;
+    var before = snapshotSpace(doc, space);
+    doc.strokes.push(stroke);
+    if (doc._loading) doc._freshSinceLoad = (doc._freshSinceLoad || 0) + 1;
+    pushHistory(doc, space, before);
+    saveSoon(doc);
+    var appended = false;
+    try {
+      appended = !!(surface && typeof surface.appendStroke === "function" &&
+        surface.appendStroke(stroke));
+    } catch (eApp) {
+      appended = false;
+    }
+    inkAfterDocChange(doc, appended ? surface : null);
+    return true;
+  }
+
+  // ---------------------------------------------------------------------
+  // Geometry / rendering
+  // ---------------------------------------------------------------------
+  function pressureCurve(p) {
+    var v = clamp01(p);
+    var min = clamp01(state.pressureMin || 0);
+    if (v <= min) v = 0;
+    else v = clamp01((v - min) / Math.max(0.0001, 1 - min));
+    var gamma = Number(state.pressureGamma) || 1;
+    if (gamma < 0.4) gamma = 0.4;
+    if (gamma > 2.6) gamma = 2.6;
+    return Math.pow(v, gamma);
+  }
+
+  function widthFor(stroke, p) {
+    var w = stroke.width * (0.35 + 1.65 * pressureCurve(p));
+    return Math.max(0.35, w);
+  }
+
+  function smoothPoints(pts) {
+    if (pts.length < 3) return pts.slice();
+    var out = [pts[0]];
+    for (var i = 1; i < pts.length - 1; i++) {
+      var a = pts[i - 1], b = pts[i], c = pts[i + 1];
+      out.push({
+        x: (a.x + 2 * b.x + c.x) / 4,
+        y: (a.y + 2 * b.y + c.y) / 4,
+        p: (a.p + 2 * b.p + c.p) / 4
+      });
+    }
+    out.push(pts[pts.length - 1]);
+    return out;
+  }
+
+  /**
+   * Variable-width stroke as ONE simple polygon: left offsets forward, a round
+   * end cap, right offsets backward, a round start cap. A single subpath avoids
+   * the winding cancellation that produced white dots where the old per-segment
+   * quads overlapped the per-sample discs.
+   */
+  function buildStrokePath(stroke, pts, scale) {
+    var path = new Path2D();
+    var sm = smoothPoints(pts);
+    var n = sm.length;
+    if (!n) return path;
+    var hw = [];
+    for (var w = 0; w < n; w++) {
+      hw.push(Math.max(0.35, widthFor(stroke, sm[w].p) * scale) / 2);
+    }
+    if (n === 1) {
+      path.arc(sm[0].x, sm[0].y, hw[0], 0, Math.PI * 2);
+      return path;
+    }
+    var totalLen = 0;
+    for (var q = 1; q < n; q++) {
+      totalLen += Math.hypot(sm[q].x - sm[q - 1].x, sm[q].y - sm[q - 1].y);
+    }
+    if (totalLen < 0.5) {
+      path.arc(sm[0].x, sm[0].y, hw[0], 0, Math.PI * 2);
+      return path;
+    }
+    var left = [];
+    var right = [];
+    for (var i = 0; i < n; i++) {
+      var prev = sm[i > 0 ? i - 1 : 0];
+      var next = sm[i < n - 1 ? i + 1 : n - 1];
+      var dx = next.x - prev.x;
+      var dy = next.y - prev.y;
+      var len = Math.sqrt(dx * dx + dy * dy) || 1;
+      var nx = -dy / len;
+      var ny = dx / len;
+      left.push([sm[i].x + nx * hw[i], sm[i].y + ny * hw[i]]);
+      right.push([sm[i].x - nx * hw[i], sm[i].y - ny * hw[i]]);
+    }
+    var t0 = Math.atan2(sm[1].y - sm[0].y, sm[1].x - sm[0].x);
+    var t1 = Math.atan2(sm[n - 1].y - sm[n - 2].y, sm[n - 1].x - sm[n - 2].x);
+    path.moveTo(left[0][0], left[0][1]);
+    for (var a = 1; a < n; a++) path.lineTo(left[a][0], left[a][1]);
+    // End cap: left -> right around the front (decreasing angle through t1).
+    arcSample(path, sm[n - 1].x, sm[n - 1].y, hw[n - 1],
+      t1 + Math.PI / 2, t1 - Math.PI / 2);
+    for (var b = n - 1; b >= 0; b--) path.lineTo(right[b][0], right[b][1]);
+    // Start cap: right -> left around the back (decreasing through t0-pi).
+    arcSample(path, sm[0].x, sm[0].y, hw[0],
+      t0 - Math.PI / 2, t0 - 3 * Math.PI / 2);
+    path.closePath();
+    return path;
+  }
+
+  function arcSample(path, cx, cy, r, a0, a1) {
+    var span = Math.abs(a1 - a0);
+    var steps = Math.max(4, Math.ceil(span / (Math.PI / 12)));
+    for (var k = 1; k <= steps; k++) {
+      var a = a0 + (a1 - a0) * (k / steps);
+      path.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+    }
+  }
+
+  function drawStrokeOnCtx(ctx, stroke, surface) {
+    var pts = [];
+    var src = stroke.pts;
+    // Live preview decimation: a 2-second stroke can be 500+ points; redrawing
+    // all of them every frame is wasted work. Committed strokes are always
+    // drawn from the full sample list.
+    if (surface && surface.live && src.length > 260) {
+      var step = Math.ceil(src.length / 260);
+      var reduced = [];
+      for (var r = 0; r < src.length; r += step) reduced.push(src[r]);
+      if (reduced[reduced.length - 1] !== src[src.length - 1]) reduced.push(src[src.length - 1]);
+      src = reduced;
+    }
+    var raw = [];
+    for (var i = 0; i < src.length; i++) {
+      var p = src[i];
+      var xy = surface.toCanvasPoint(p[0], p[1]);
+      if (!xy) continue;
+      raw.push({ x: xy[0], y: xy[1], p: p[2] });
+    }
+    // Remove near-duplicate samples first: at a pause the pen emits many
+    // points at the same place, and their averaged normals used to fold the
+    // outline into a loop (the white square/hole artifact).
+    var pts = [];
+    for (var ri = 0; ri < raw.length; ri++) {
+      var rp = raw[ri];
+      if (!pts.length) {
+        pts.push(rp);
+        continue;
+      }
+      var lp = pts[pts.length - 1];
+      var ddx = rp.x - lp.x;
+      var ddy = rp.y - lp.y;
+      if (ddx * ddx + ddy * ddy >= 0.36) pts.push(rp);
+    }
+    if (raw.length && pts[pts.length - 1] !== raw[raw.length - 1]) {
+      pts.push(raw[raw.length - 1]);
+    }
+    if (!pts.length) return;
+    var scale = surface.widthScale ? surface.widthScale() : 1;
+    var pxMode = stroke.px === true;
+    var lineScale = pxMode ? 1 : scale;
+    // Legacy pdfembed strokes stored width in the wrong unit could draw
+    // hundreds of px wide; clamp only that fallback to a sane screen width.
+    if (!pxMode && surface.kind === "pdfembed" && stroke.width * lineScale > 64) {
+      lineScale = 64 / Math.max(0.01, stroke.width);
+    }
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = stroke.color;
+    ctx.fillStyle = stroke.color;
+    ctx.globalAlpha = stroke.tool === "highlighter" ? clamp01(stroke.opacity) : 1;
+    if (pts.length === 1) {
+      var r0 = Math.max(0.35, widthFor(stroke, pts[0].p) * lineScale) / 2;
+      ctx.beginPath();
+      ctx.arc(pts[0].x, pts[0].y, r0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+    if (stroke.tool === "highlighter") {
+      // Alpha ink must be filled once; per-segment strokes would multiply the
+      // translucent colour at every joint. The cleaned points keep the outline
+      // from folding into holes at pause points.
+      var hp = buildStrokePath(stroke, pts, lineScale);
+      ctx.fill(hp);
+    } else {
+      // Continuous width per segment (no quantisation), with the same 3-point
+      // position smoothing the old outline used. Round caps make the joins
+      // seamless, and because pen ink is opaque, overlaps are invisible.
+      pts = smoothPoints(pts);
+      for (var si = 1; si < pts.length; si++) {
+        var a = pts[si - 1];
+        var b = pts[si];
+        var w = (widthFor(stroke, a.p) + widthFor(stroke, b.p)) * 0.5 * lineScale;
+        w = Math.max(0.35, w);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.lineWidth = w;
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function sizeCanvas(cv, w, h, dpr, opts) {
+    var W = Math.max(1, Math.round(w * dpr));
+    var H = Math.max(1, Math.round(h * dpr));
+    if (cv.width !== W) cv.width = W;
+    if (cv.height !== H) cv.height = H;
+    cv.style.width = w + "px";
+    cv.style.height = h + "px";
+    // `desynchronized` lets Chromium bypass one compositor round-trip for the
+    // live ink layer; tiles keep the default (they are static).
+    var ctx = opts ? cv.getContext("2d", opts) : cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return ctx;
+  }
+
+  function ensureCanvas(parent, cls, z) {
+    var cv = parent.querySelector("canvas." + cls);
+    if (!cv) {
+      cv = document.createElement("canvas");
+      cv.className = cls;
+      cv.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;z-index:" + (z || 5);
+      parent.appendChild(cv);
+    }
+    return cv;
+  }
+
+  function removeCanvas(parent, cls) {
+    try {
+      var cv = parent.querySelector("canvas." + cls);
+      if (cv && cv.parentNode) cv.parentNode.removeChild(cv);
+    } catch (e) {}
+  }
+
+  function inkAfterDocChange(doc, skipSurface) {
+    for (var i = 0; i < state.surfaces.length; i++) {
+      var s = state.surfaces[i];
+      if (s.doc !== doc) continue;
+      if (skipSurface && s === skipSurface) continue;
+      try {
+        s.redraw();
+      } catch (e) {
+        warn("surface redraw failed", s.kind, e && e.message);
+        inkTrace("redrawFail", { kind: s.kind, error: e && e.message });
+      }
+    }
+    updateToolbarState();
+  }
+
+  // ---------------------------------------------------------------------
+  // Surfaces: markdown reading view
+  // ---------------------------------------------------------------------
+  function layoutHash(sizer) {
+    var kids = sizer.children || [];
+    var parts = [];
+    var n = Math.min(kids.length, 400);
+    for (var i = 0; i < n; i++) {
+      var k = kids[i];
+      // Never read textContent from a PDF/markdown embed: a loading or huge
+      // PDF text layer can be many megabytes and this runs on the main thread
+      // while the note is opening.
+      if (k.classList && (k.classList.contains("pdf-embed") ||
+        k.classList.contains("markdown-embed"))) {
+        parts.push("embed:" + i);
+        continue;
+      }
+      try {
+        if (k.querySelector && k.querySelector(".pdf-embed, .markdown-embed, .internal-embed")) {
+          parts.push("embed-child:" + i);
+          continue;
+        }
+      } catch (eQ) {}
+      var raw = k.textContent || "";
+      var txt = raw.slice(0, 120).replace(/\s+/g, " ");
+      parts.push((k.tagName || "?") + ":" + txt + ":" + (k.offsetTop || 0));
+    }
+    return fnv(parts.join("|")) + "-" + kids.length;
+  }
+
+  var MARKDOWN_TILE_H = 700;
+
+  /**
+   * Reading-view ink surface.
+   *
+   * Committed ink lives in content-space TILE canvases inside the sizer, so it
+   * scrolls natively with the text (no main-thread reprojection, no lag). Only
+   * tiles that actually contain ink are allocated; the current stroke uses a
+   * separate viewport-sized live canvas and is moved into the tiles on commit.
+   */
+  function createMarkdownSurface(leaf) {
+    var view = leaf.view;
+    if (!view || view.getViewType() !== "markdown") return null;
+    if (typeof view.getMode === "function" && view.getMode() !== "preview") return null;
+    var rootEl = view.containerEl ? view.containerEl.querySelector(".markdown-reading-view") : null;
+    if (!rootEl) return null;
+    var sizer = rootEl.querySelector(".markdown-preview-sizer");
+    if (!sizer) return null;
+    var rect = sizer.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return null;
+    if (getComputedStyle(sizer).display === "none") return null;
+    if (getComputedStyle(rootEl).position === "static") rootEl.style.position = "relative";
+    if (getComputedStyle(sizer).position === "static") sizer.style.position = "relative";
+    removeCanvas(rootEl, "ohsidian-ink-base");
+    removeCanvas(sizer, "ohsidian-ink-base");
+    // A clipped host keeps tile overflow from adding phantom scroll height.
+    try {
+      var oldHost = sizer.querySelector(".ohsidian-ink-tiles");
+      if (oldHost && oldHost.parentNode) oldHost.parentNode.removeChild(oldHost);
+    } catch (eOld) {}
+    var tileHost = document.createElement("div");
+    tileHost.className = "ohsidian-ink-tiles";
+    tileHost.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;" +
+      "overflow:visible;pointer-events:none;z-index:5";
+    sizer.appendChild(tileHost);
+    var live = ensureCanvas(rootEl, "ohsidian-ink-live", 6);
+    var surface = {
+      kind: "markdown",
+      leaf: leaf,
+      rootEl: rootEl,
+      sizer: sizer,
+      tileHost: tileHost,
+      live: live,
+      dpr: Math.min(window.devicePixelRatio || 1, 2),
+      w: 0,
+      h: 0,
+      tw: 0,
+      space: "md:abs",
+      doc: null,
+      rects: null,
+      tiles: {},
+      raf: 0,
+      refreshRects: function () {
+        this.ensureAttached();
+        this.rects = {
+          root: rootEl.getBoundingClientRect(),
+          sizer: sizer.getBoundingClientRect()
+        };
+        return this.rects;
+      },
+      toSpace: function (clientX, clientY) {
+        var r = this._spaceRect || sizer.getBoundingClientRect();
+        return [clientX - r.left, clientY - r.top];
+      },
+      beginStroke: function () {
+        this._spaceRect = sizer.getBoundingClientRect();
+        this.rects = null;
+      },
+      erasePreview: function (clientX, clientY, radius) {
+        // Clear the already-painted tile pixels for an instant visual eraser;
+        // the document is updated once at pen-up. This keeps erasing at display
+        // rate instead of rebuilding the entire page on every pointermove.
+        var p = this.toSpace(clientX, clientY);
+        var r = Math.max(1, radius);
+        var i0 = Math.floor((p[1] - r) / MARKDOWN_TILE_H);
+        var i1 = Math.floor((p[1] + r) / MARKDOWN_TILE_H);
+        for (var i = i0; i <= i1; i++) {
+          var t = this.tiles[i];
+          if (!t || !t.cv) continue;
+          var ctx = t.cv.getContext("2d");
+          ctx.save();
+          ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+          ctx.globalCompositeOperation = "destination-out";
+          ctx.beginPath();
+          ctx.arc(p[0], p[1] - i * MARKDOWN_TILE_H, r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      },
+      toCanvasPoint: function (x, y) {
+        var r = this.rects || this.refreshRects();
+        return [
+          x + r.sizer.left - r.root.left,
+          y + r.sizer.top - r.root.top
+        ];
+      },
+      widthScale: function () {
+        return 1;
+      },
+      contains: function (el) {
+        return !!(el && sizer.contains(el));
+      },
+      ensureAttached: function () {
+        // Obsidian can clear/replace the sizer's children while leaving the
+        // sizer itself connected. Absolute hosts are removed silently; every
+        // subsequent commit then has hostH=0 and the ink is invisible. Reattach
+        // the existing host (its tile canvases are still its children).
+        try {
+          if (this.tileHost && this.tileHost.parentNode !== sizer) sizer.appendChild(this.tileHost);
+        } catch (e1) {}
+        try {
+          if (this.live && this.live.parentNode !== rootEl) rootEl.appendChild(this.live);
+        } catch (e2) {}
+      },
+      ensureTile: function (i) {
+        this.ensureAttached();
+        var t = this.tiles[i];
+        if (t) return t;
+        var cv = document.createElement("canvas");
+        cv.className = "ohsidian-ink-tile";
+        cv.setAttribute("data-tile", String(i));
+        cv.style.cssText = "position:absolute;left:0;top:" + (i * MARKDOWN_TILE_H) +
+          "px;pointer-events:none";
+        (this.tileHost || sizer).appendChild(cv);
+        t = { i: i, cv: cv };
+        this.tiles[i] = t;
+        return t;
+      },
+      removeTile: function (i) {
+        var t = this.tiles[i];
+        if (!t) return;
+        try {
+          if (t.cv && t.cv.parentNode) t.cv.parentNode.removeChild(t.cv);
+        } catch (e) {}
+        delete this.tiles[i];
+      },
+      resize: function () {
+        this.ensureAttached();
+        var vw = window.innerWidth || 1024;
+        var vh = window.innerHeight || 768;
+        var w = Math.max(1, Math.min(rootEl.clientWidth || vw, vw));
+        var h = Math.max(1, Math.min(rootEl.clientHeight || vh, vh));
+        if (!isFinite(w) || !isFinite(h)) return;
+        var dpr = Math.min(window.devicePixelRatio || 1, 2);
+        if (w !== this.w || h !== this.h || dpr !== this.dpr || this.live.width <= 1) {
+          this.w = w;
+          this.h = h;
+          this.dpr = dpr;
+          sizeCanvas(this.live, w, h, dpr, { desynchronized: true, alpha: true });
+        }
+        this.rects = null;
+        var tw = Math.max(1, sizer.clientWidth || w);
+        this.tw = tw;
+        // Percentage height would collapse to 0 for an absolutely positioned
+        // host whose children are all absolute; pin it to the content height.
+        try {
+          // Measure the normal-flow content, never the tile host itself:
+          // scrollHeight includes the absolute host and can get stuck; a
+          // clientHeight of 0 (common for some sizer layouts) used to clip
+          // every committed stroke right after the live layer was cleared.
+          var sr = sizer.getBoundingClientRect();
+          var contentH = Math.max(1, sizer.clientHeight || 0);
+          var kids = sizer.children || [];
+          for (var ki = 0; ki < kids.length; ki++) {
+            var kid = kids[ki];
+            if (!kid || (kid.classList && kid.classList.contains("ohsidian-ink-tiles"))) continue;
+            try {
+              var kr = kid.getBoundingClientRect();
+              if (kr && kr.height > 0) {
+                var bottom = kr.bottom - sr.top;
+                if (bottom > contentH) contentH = bottom;
+              }
+            } catch (eKid) {}
+          }
+          if (contentH < 2) {
+            // Last resort: subtract the host from scrollHeight so a wrong
+            // clientHeight cannot hide all ink.
+            var hostH = this.tileHost ? (this.tileHost.offsetHeight || 0) : 0;
+            contentH = Math.max(1, (sizer.scrollHeight || 0) - hostH);
+          }
+          if (this.tileHost) this.tileHost.style.height = contentH + "px";
+        } catch (eH) {}
+        for (var key in this.tiles) {
+          if (!Object.prototype.hasOwnProperty.call(this.tiles, key)) continue;
+          var t = this.tiles[key];
+          if (t && t.cv) sizeCanvas(t.cv, tw, MARKDOWN_TILE_H, dpr);
+        }
+        this.redraw();
+      },
+      redraw: function () {
+        this.ensureAttached();
+        var doc = this.doc;
+        if (!doc) return;
+        var w = Math.max(1, sizer.clientWidth || this.w || (window.innerWidth || 1024));
+        var dpr = this.dpr;
+        var needed = {};
+        var i;
+        for (i = 0; i < doc.strokes.length; i++) {
+          var st = doc.strokes[i];
+          if (st.space !== this.space || st.baked) continue;
+          var b = st.bbox || bboxOf(st.pts);
+          if (!b) continue;
+          var t0 = Math.floor((b[1] - 12) / MARKDOWN_TILE_H);
+          var t1 = Math.floor((b[3] + 12) / MARKDOWN_TILE_H);
+          if (t0 < 0) t0 = 0;
+          for (var t = t0; t <= t1; t++) needed[t] = true;
+        }
+        var key;
+        for (key in this.tiles) {
+          if (!Object.prototype.hasOwnProperty.call(this.tiles, key)) continue;
+          if (!needed[key]) this.removeTile(key);
+        }
+        for (key in needed) {
+          if (!Object.prototype.hasOwnProperty.call(needed, key)) continue;
+          var idx = parseInt(key, 10);
+          var tile = this.ensureTile(idx);
+          var ctx = sizeCanvas(tile.cv, w, MARKDOWN_TILE_H, dpr);
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.clearRect(0, 0, tile.cv.width, tile.cv.height);
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          var tileSurface = {
+            toCanvasPoint: (function (offsetY) {
+              return function (x, y) { return [x, y - offsetY]; };
+            })(idx * MARKDOWN_TILE_H),
+            widthScale: function () { return 1; }
+          };
+          for (i = 0; i < doc.strokes.length; i++) {
+            var s2 = doc.strokes[i];
+            if (s2.space !== this.space || s2.baked) continue;
+            var bb = s2.bbox || bboxOf(s2.pts);
+            if (!bb) continue;
+            if (bb[3] < idx * MARKDOWN_TILE_H || bb[1] > (idx + 1) * MARKDOWN_TILE_H) continue;
+            drawStrokeOnCtx(ctx, s2, tileSurface);
+          }
+        }
+      },
+      scheduleRedraw: function () {
+        if (this.raf) return;
+        var self = this;
+        this.raf = requestAnimationFrame(function () {
+          self.raf = 0;
+          self.redraw();
+          var a = state.active;
+          if (a && a.kind === "stroke" && a.surface === self) self.drawLive(a.stroke);
+        });
+      },
+      drawLive: function (stroke) {
+        if (!this.rects) this.refreshRects();
+        var ctx = this.live.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.live.width, this.live.height);
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        if (stroke) drawStrokeOnCtx(ctx, stroke, this);
+      },
+      clearLive: function () {
+        var ctx = this.live.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.live.width, this.live.height);
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      },
+      rebind: function () {
+        // Obsidian can replace .markdown-reading-view / .markdown-preview-sizer
+        // without replacing the leaf (PDF embeds, theme/layout re-render).
+        // Reattach the same document/history instead of churning a new surface.
+        try {
+          var v = this.leaf && this.leaf.view;
+          if (!v || !v.containerEl) return false;
+          var nr = v.containerEl.querySelector(".markdown-reading-view");
+          if (!nr) return false;
+          var ns = nr.querySelector(".markdown-preview-sizer");
+          if (!ns || !ns.isConnected) return false;
+          if (getComputedStyle(nr).position === "static") nr.style.position = "relative";
+          if (getComputedStyle(ns).position === "static") ns.style.position = "relative";
+          try {
+            if (this.tileHost && this.tileHost.parentNode) this.tileHost.parentNode.removeChild(this.tileHost);
+          } catch (eOld) {}
+          removeCanvas(rootEl, "ohsidian-ink-live");
+          rootEl = nr;
+          sizer = ns;
+          live = ensureCanvas(rootEl, "ohsidian-ink-live", 6);
+          tileHost = document.createElement("div");
+          tileHost.className = "ohsidian-ink-tiles";
+          tileHost.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;" +
+            "overflow:visible;pointer-events:none;z-index:5";
+          sizer.appendChild(tileHost);
+          this.rootEl = rootEl;
+          this.sizer = sizer;
+          this.live = live;
+          this.tileHost = tileHost;
+          this.tiles = {};
+          this.rects = null;
+          this.w = 0;
+          this.h = 0;
+          try {
+            if (this.resizeObserver) this.resizeObserver.disconnect();
+            var self = this;
+            this.resizeObserver = new ResizeObserver(function () {
+              if (self.resizeTimer) return;
+              self.resizeTimer = setTimeout(function () {
+                self.resizeTimer = 0;
+                try { self.resize(); } catch (e) {}
+              }, 90);
+            });
+            this.resizeObserver.observe(sizer);
+            this.resizeObserver.observe(rootEl);
+          } catch (eRO) {}
+          this.resize();
+          var a = state.active;
+          if (a && a.kind === "stroke" && a.surface === this) this.drawLive(a.stroke);
+          return true;
+        } catch (e) {
+          return false;
+        }
+      },
+      unmount: function () {
+        try {
+          if (this.resizeObserver) this.resizeObserver.disconnect();
+        } catch (eRO) {}
+        if (this.resizeTimer) clearTimeout(this.resizeTimer);
+        removeCanvas(rootEl, "ohsidian-ink-live");
+        var k;
+        for (k in this.tiles) {
+          if (Object.prototype.hasOwnProperty.call(this.tiles, k)) this.removeTile(k);
+        }
+        this.tiles = {};
+        try {
+          if (this.tileHost && this.tileHost.parentNode) {
+            this.tileHost.parentNode.removeChild(this.tileHost);
+          }
+        } catch (e) {}
+      }
+    };
+    surface.doc = docFor(surface);
+    try {
+      surface.resizeObserver = new ResizeObserver(function () {
+        if (surface.resizeTimer) return;
+        surface.resizeTimer = setTimeout(function () {
+          surface.resizeTimer = 0;
+          try { surface.resize(); } catch (e) {}
+        }, 90);
+      });
+      surface.resizeObserver.observe(sizer);
+      surface.resizeObserver.observe(rootEl);
+    } catch (eRO) {}
+    surface.resize();
+    var layoutNow = {
+      width: Math.round(sizer.getBoundingClientRect().width) || 0,
+      blocks: sizer.children ? sizer.children.length : 0,
+      hash: layoutHash(sizer)
+    };
+    setTimeout(function () {
+      var doc = surface.doc;
+      if (!doc) return;
+      if (!doc.layout) {
+        doc.layout = layoutNow;
+        saveSoon(doc);
+        return;
+      }
+      if (doc.layout.hash && doc.layout.hash !== layoutNow.hash &&
+        !state.driftNotified[doc.target]) {
+        state.driftNotified[doc.target] = 1;
+        inkStatus("版面已变化：手写墨迹仍按写入时的位置显示，可能与文字错位。", 6000);
+      }
+      if (!doc.layout.hash || doc.layout.hash !== layoutNow.hash) {
+        doc.layout = layoutNow;
+        saveSoon(doc);
+      }
+    }, 1200);
+    return surface;
+  }
+
+  /* Legacy viewport-reprojection implementation: kept only as a short-lived
+     reference while the tiled surface is device-tested; never called. */
+  function createMarkdownSurfaceLegacy(leaf) {
+    var view = leaf.view;
+    if (!view || view.getViewType() !== "markdown") return null;
+    if (typeof view.getMode === "function" && view.getMode() !== "preview") return null;
+    var rootEl = view.containerEl ? view.containerEl.querySelector(".markdown-reading-view") : null;
+    if (!rootEl) return null;
+    var sizer = rootEl.querySelector(".markdown-preview-sizer");
+    if (!sizer) return null;
+    var rect = sizer.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return null;
+    if (getComputedStyle(sizer).display === "none") return null;
+    if (getComputedStyle(rootEl).position === "static") rootEl.style.position = "relative";
+    // Earlier builds put the canvas inside the sizer, which for a long note
+    // allocates a canvas as tall as the whole document. Migrate to a
+    // viewport-sized canvas anchored to the reading view; the scroll listener
+    // re-projects strokes on every scroll frame.
+    removeCanvas(sizer, "ohsidian-ink-base");
+    removeCanvas(sizer, "ohsidian-ink-live");
+    var base = ensureCanvas(rootEl, "ohsidian-ink-base", 5);
+    var live = ensureCanvas(rootEl, "ohsidian-ink-live", 6);
+    var scroller = rootEl.querySelector(".markdown-preview-view") || sizer.parentElement || rootEl;
+    var surface = {
+      kind: "markdown",
+      leaf: leaf,
+      rootEl: rootEl,
+      sizer: sizer,
+      scroller: scroller,
+      base: base,
+      live: live,
+      dpr: window.devicePixelRatio || 1,
+      w: 0,
+      h: 0,
+      space: "md:abs",
+      doc: null,
+      rects: null,
+      scrollHandler: null,
+      raf: 0,
+      refreshRects: function () {
+        this.rects = {
+          root: rootEl.getBoundingClientRect(),
+          sizer: sizer.getBoundingClientRect()
+        };
+        return this.rects;
+      },
+      toSpace: function (clientX, clientY) {
+        var r = sizer.getBoundingClientRect();
+        return [clientX - r.left, clientY - r.top];
+      },
+      toCanvasPoint: function (x, y) {
+        var r = this.rects || this.refreshRects();
+        return [
+          x + r.sizer.left - r.root.left,
+          y + r.sizer.top - r.root.top
+        ];
+      },
+      widthScale: function () {
+        return 1;
+      },
+      contains: function (el) {
+        return !!(el && sizer.contains(el));
+      },
+      resize: function () {
+        var w = Math.max(1, rootEl.clientWidth || 0);
+        var h = Math.max(1, rootEl.clientHeight || 0);
+        if (w <= 1 || h <= 1) return;
+        var dpr = window.devicePixelRatio || 1;
+        if (w === this.w && h === this.h && dpr === this.dpr && this.base.width > 0) {
+          this.redraw();
+          return;
+        }
+        this.w = w;
+        this.h = h;
+        this.dpr = dpr;
+        sizeCanvas(this.base, w, h, dpr);
+        sizeCanvas(this.live, w, h, dpr);
+        this.redraw();
+      },
+      redraw: function () {
+        this.refreshRects();
+        var ctx = this.base.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.base.width, this.base.height);
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        var doc = this.doc;
+        if (!doc) return;
+        for (var i = 0; i < doc.strokes.length; i++) {
+          var st = doc.strokes[i];
+          if (st.space !== this.space || st.baked) continue;
+          drawStrokeOnCtx(ctx, st, this);
+        }
+      },
+      scheduleRedraw: function () {
+        if (this.raf) return;
+        var self = this;
+        this.raf = requestAnimationFrame(function () {
+          self.raf = 0;
+          self.redraw();
+          var a = state.active;
+          if (a && a.kind === "stroke" && a.surface === self) self.drawLive(a.stroke);
+        });
+      },
+      bindScroll: function () {
+        if (this.scrollHandler) return;
+        var self = this;
+        this.scrollHandler = function () { self.scheduleRedraw(); };
+        try {
+          scroller.addEventListener("scroll", this.scrollHandler, { passive: true });
+        } catch (e) {
+          scroller.addEventListener("scroll", this.scrollHandler);
+        }
+      },
+      drawLive: function (stroke) {
+        this.refreshRects();
+        var ctx = this.live.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.live.width, this.live.height);
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        if (stroke) drawStrokeOnCtx(ctx, stroke, this);
+      },
+      clearLive: function () {
+        var ctx = this.live.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.live.width, this.live.height);
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      },
+      unmount: function () {
+        try {
+          if (this.scrollHandler) scroller.removeEventListener("scroll", this.scrollHandler);
+        } catch (e) {}
+        removeCanvas(rootEl, "ohsidian-ink-base");
+        removeCanvas(rootEl, "ohsidian-ink-live");
+      }
+    };
+    surface.doc = docFor(surface);
+    surface.bindScroll();
+    surface.resize();
+    // Layout drift: the note is rendered at absolute coordinates, so a reflow
+    // (font size, window width, theme) moves the text under the ink. Tell the
+    // user once per session instead of silently drifting.
+    var layoutNow = {
+      width: Math.round(sizer.getBoundingClientRect().width) || 0,
+      blocks: sizer.children ? sizer.children.length : 0,
+      hash: layoutHash(sizer)
+    };
+    setTimeout(function () {
+      var doc = surface.doc;
+      if (!doc) return;
+      if (!doc.layout) {
+        doc.layout = layoutNow;
+        saveSoon(doc);
+        return;
+      }
+      if (doc.layout.hash && doc.layout.hash !== layoutNow.hash &&
+        !state.driftNotified[doc.target]) {
+        state.driftNotified[doc.target] = 1;
+        inkStatus("版面已变化：手写墨迹仍按写入时的位置显示，可能与文字错位。", 6000);
+      }
+      if (!doc.layout.hash || doc.layout.hash !== layoutNow.hash) {
+        doc.layout = layoutNow;
+        saveSoon(doc);
+      }
+    }, 1200);
+    return surface;
+  }
+
+  // ---------------------------------------------------------------------
+  // Surfaces: PDF pages
+  // ---------------------------------------------------------------------
+  function createPdfSurface(leaf) {
+    var view = leaf.view;
+    if (!view || view.getViewType() !== "pdf") return null;
+    // Obsidian's PDF view exposes a wrapper whose inner `pdfViewer` is the
+    // pdf.js viewer; wrapper/container field names differ between versions, so
+    // probe all known locations and fall back to the leaf's DOM.
+    var wrapper = view.pdfViewer || view.viewer || view.pdfViewerComponent || null;
+    var viewer = wrapper ? (wrapper.pdfViewer || wrapper) : null;
+    var container = null;
+    try {
+      container = (wrapper && (wrapper.containerEl || wrapper.pdfContainerEl ||
+        wrapper.viewerContainerEl || wrapper.container || wrapper.viewer)) ||
+        (wrapper && wrapper.dom && (wrapper.dom.containerEl || wrapper.dom.pdfContainerEl ||
+          wrapper.dom.viewerContainerEl)) ||
+        (viewer && (viewer.container || viewer.viewer)) ||
+        (view.containerEl && (view.containerEl.querySelector(".pdf-container") ||
+          view.containerEl.querySelector(".pdf-viewer-container") || view.containerEl)) || null;
+    } catch (eC) {}
+    if (!container || !viewer || typeof viewer.getPageView !== "function") {
+      if (!state.pdfProbeDone) {
+        state.pdfProbeDone = true;
+        try {
+          var wkeys = wrapper ? Object.keys(wrapper).slice(0, 16).join(",") : "";
+          var ikeys = viewer ? Object.keys(viewer).slice(0, 16).join(",") : "";
+          inkTrace("pdfProbe", {
+            type: view.getViewType ? view.getViewType() : "",
+            hasWrapper: !!wrapper,
+            wrapperKeys: wkeys,
+            hasInner: !!(wrapper && wrapper.pdfViewer),
+            innerKeys: ikeys,
+            hasGetPageView: !!(viewer && typeof viewer.getPageView === "function"),
+            hasContainer: !!container,
+            containerClass: container && container.className ? String(container.className).slice(0, 60) : "",
+            pages: container && container.querySelectorAll ? container.querySelectorAll(".page[data-page-number]").length : -1
+          });
+        } catch (eP) {}
+      }
+      return null;
+    }
+    var surface = {
+      kind: "pdf",
+      leaf: leaf,
+      viewer: viewer,
+      container: container,
+      pages: {},
+      dpr: window.devicePixelRatio || 1,
+      doc: null,
+      currentSpace: "",
+      hooks: false,
+      containsPage: function (pageEl) {
+        return !!(pageEl && container.contains(pageEl));
+      },
+      pageOf: function (el) {
+        try {
+          return el && el.closest ? el.closest(".page[data-page-number]") : null;
+        } catch (e) {
+          return null;
+        }
+      },
+      ensurePage: function (pageEl) {
+        if (!pageEl) return null;
+        var idx = parseInt(pageEl.dataset.pageNumber, 10);
+        if (!(idx > 0)) return null;
+        var index = idx - 1;
+        var pageView = null;
+        try { pageView = this.viewer.getPageView(index); } catch (e) {}
+        if (!pageView || !pageView.viewport) return null;
+        var vp = pageView.viewport;
+        try {
+          if (getComputedStyle(pageEl).position === "static") pageEl.style.position = "relative";
+        } catch (ePos) {}
+        var cv = ensureCanvas(pageEl, "ohsidian-ink-pdf", 4);
+        var entry = this.pages[index];
+        if (!entry || entry.pageEl !== pageEl || entry.viewport !== vp) {
+          var w = Math.max(1, vp.width);
+          var h = Math.max(1, vp.height);
+          sizeCanvas(cv, w, h, this.dpr);
+          entry = {
+            index: index,
+            pageEl: pageEl,
+            cv: cv,
+            viewport: vp,
+            space: "pdf:" + index,
+            w: w,
+            h: h
+          };
+          this.pages[index] = entry;
+        }
+        return entry;
+      },
+      surfaceAt: function (el) {
+        var pageEl = this.pageOf(el);
+        if (!pageEl) return null;
+        return this.ensurePage(pageEl);
+      },
+      toSpaceOn: function (entry, clientX, clientY) {
+        var r = entry._spaceRect || entry.pageEl.getBoundingClientRect();
+        var cssX = clientX - r.left;
+        var cssY = clientY - r.top;
+        try {
+          var pt = entry.viewport.convertToPdfPoint(cssX, cssY);
+          return [pt[0], pt[1]];
+        } catch (e) {
+          return [cssX, cssY];
+        }
+      },
+      toCanvasPointOn: function (entry, x, y) {
+        try {
+          var p = entry.viewport.convertToViewportPoint(x, y);
+          return [p[0], p[1]];
+        } catch (e) {
+          return [x, y];
+        }
+      },
+      widthScaleOn: function (entry) {
+        return entry && entry.viewport ? entry.viewport.scale : 1;
+      },
+      erasePreview: function (clientX, clientY, radius, entry) {
+        if (!entry || !entry.cv) return;
+        var r = entry.pageEl.getBoundingClientRect();
+        var sx = entry.w / Math.max(1, r.width);
+        var sy = entry.h / Math.max(1, r.height);
+        var x = (clientX - r.left) * sx;
+        var y = (clientY - r.top) * sy;
+        var rr = Math.max(1, radius * ((sx + sy) / 2));
+        var ctx = entry.cv.getContext("2d");
+        ctx.save();
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        ctx.globalCompositeOperation = "destination-out";
+        ctx.beginPath();
+        ctx.arc(x, y, rr, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      },
+      redraw: function () {
+        var doc = this.doc;
+        if (!doc) return;
+        for (var key in this.pages) {
+          if (!Object.prototype.hasOwnProperty.call(this.pages, key)) continue;
+          var entry = this.pages[key];
+          if (!entry || !entry.cv || !entry.cv.isConnected) continue;
+          var ctx = entry.cv.getContext("2d");
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.clearRect(0, 0, entry.cv.width, entry.cv.height);
+          ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+          for (var i = 0; i < doc.strokes.length; i++) {
+            var st = doc.strokes[i];
+            if (st.space !== entry.space) continue;
+            if (st.baked && pref("inkPdfAfterBake", "hide") !== "keep") continue;
+            drawStrokeOnCtx(ctx, st, {
+              toCanvasPoint: (function (e) {
+                return function (x, y) { return surface.toCanvasPointOn(e, x, y); };
+              })(entry),
+              widthScale: (function (e) {
+                return function () { return surface.widthScaleOn(e); };
+              })(entry)
+            });
+          }
+        }
+      },
+      drawLive: function (entry, stroke) {
+        if (!entry) return;
+        var ctx = entry.cv.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, entry.cv.width, entry.cv.height);
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        if (stroke) {
+          drawStrokeOnCtx(ctx, stroke, {
+            toCanvasPoint: function (x, y) { return surface.toCanvasPointOn(entry, x, y); },
+            widthScale: function () { return surface.widthScaleOn(entry); }
+          });
+        }
+      },
+      clearLive: function (entry) {
+        if (entry) this.drawLive(entry, null);
+      },
+      refreshPages: function () {
+        var els = this.container.querySelectorAll(".page[data-page-number]");
+        for (var i = 0; i < els.length; i++) this.ensurePage(els[i]);
+        this.redraw();
+      },
+      attach: function () {
+        if (this.hooks) return;
+        this.hooks = true;
+        var self = this;
+        var onRendered = function (e) {
+          try {
+            var pageEl = e && e.source && e.source.div;
+            if (!pageEl) return;
+            var entry = self.ensurePage(pageEl);
+            if (entry) self.drawLive(entry, null);
+            self.redraw();
+          } catch (e2) {}
+        };
+        var onScale = function () {
+          setTimeout(function () { self.refreshPages(); }, 30);
+        };
+        this.handlers = { rendered: onRendered, scale: onScale };
+        try {
+          this.viewer.eventBus.on("pagerendered", onRendered);
+          this.viewer.eventBus.on("scalechanging", onScale);
+          this.viewer.eventBus.on("scalechanged", onScale);
+        } catch (e) {
+          warn("pdf eventBus unavailable", e && e.message);
+        }
+        setTimeout(function () { self.refreshPages(); }, 0);
+      },
+      unmount: function () {
+        try {
+          if (this.handlers) {
+            this.viewer.eventBus.off("pagerendered", this.handlers.rendered);
+            this.viewer.eventBus.off("scalechanging", this.handlers.scale);
+            this.viewer.eventBus.off("scalechanged", this.handlers.scale);
+          }
+        } catch (eOff) {}
+        for (var key in this.pages) {
+          if (!Object.prototype.hasOwnProperty.call(this.pages, key)) continue;
+          var entry = this.pages[key];
+          try {
+            if (entry && entry.cv && entry.cv.parentNode) entry.cv.parentNode.removeChild(entry.cv);
+          } catch (e) {}
+        }
+        this.pages = {};
+      }
+    };
+    surface.doc = docFor(surface);
+    surface.attach();
+    surface.refreshPages();
+    inkTrace("surface", {
+      kind: "pdf",
+      target: (leaf.view.file && leaf.view.file.path) || "",
+      pages: Object.keys(surface.pages || {}).length
+    });
+    return surface;
+  }
+
+  // ---------------------------------------------------------------------
+  // Surface registry
+  // ---------------------------------------------------------------------
+  function surfaceForLeaf(leaf) {
+    for (var i = 0; i < state.surfaces.length; i++) {
+      if (state.surfaces[i].leaf === leaf) return state.surfaces[i];
+    }
+    return null;
+  }
+
+  function removeSurface(surface) {
+    if (state.active && state.active.surface === surface) {
+      // Never leave a live stroke pointing at a detached surface; commit it to
+      // its doc first, then tear the DOM down.
+      try { forceReleaseActive(true); } catch (eR) {}
+    }
+    try { surface.unmount(); } catch (e) {}
+    var i = state.surfaces.indexOf(surface);
+    if (i >= 0) state.surfaces.splice(i, 1);
+    if (state.activeSurface === surface) {
+      state.activeSurface = null;
+      state.active = null;
+    }
+    if (!state.active) {
+      palmHide();
+      clearCursor();
+      inkWritingChrome(false);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Surfaces: Obsidian Canvas
+  // ---------------------------------------------------------------------
+  var CANVAS_TILE = 512;
+
+  function canvasScaleOf(el) {
+    try {
+      var t = getComputedStyle(el).transform;
+      if (!t || t === "none") return 1;
+      var m = /matrix\(([^)]+)\)/.exec(t);
+      if (m) {
+        var p = m[1].split(",");
+        var s = Math.sqrt((parseFloat(p[0]) || 1) * (parseFloat(p[0]) || 1) +
+          (parseFloat(p[1]) || 0) * (parseFloat(p[1]) || 0));
+        return s > 0.01 ? s : 1;
+      }
+      var m3 = /matrix3d\(([^)]+)\)/.exec(t);
+      if (m3) {
+        var q = m3[1].split(",");
+        var s3 = Math.sqrt((parseFloat(q[0]) || 1) * (parseFloat(q[0]) || 1) +
+          (parseFloat(q[1]) || 0) * (parseFloat(q[1]) || 0));
+        return s3 > 0.01 ? s3 : 1;
+      }
+    } catch (e) {}
+    return 1;
+  }
+
+  function createCanvasSurface(leaf) {
+    var view = leaf.view;
+    if (!view || view.getViewType() !== "canvas") return null;
+    var wrapper = view.containerEl ? view.containerEl.querySelector(".canvas-wrapper") : null;
+    if (!wrapper) return null;
+    var transformed = wrapper.querySelector(".canvas");
+    if (!transformed) return null;
+    var width = Math.max(1, wrapper.clientWidth || 0);
+    var height = Math.max(1, wrapper.clientHeight || 0);
+    if (width <= 1 || height <= 1) return null;
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var live = document.createElement("canvas");
+    live.className = "ohsidian-ink-canvas-live";
+    live.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;z-index:7";
+    wrapper.appendChild(live);
+    sizeCanvas(live, width, height, dpr, { desynchronized: true, alpha: true });
+    var host = document.createElement("div");
+    host.className = "ohsidian-ink-canvas-tiles";
+    host.style.cssText = "position:absolute;left:0;top:0;width:0;height:0;" +
+      "overflow:visible;pointer-events:none;z-index:9999";
+    transformed.appendChild(host);
+
+    var surface = {
+      kind: "canvas",
+      leaf: leaf,
+      view: view,
+      wrapper: wrapper,
+      canvas: transformed,
+      host: host,
+      live: live,
+      dpr: dpr,
+      scale: 1,
+      renderScale: 1,
+      w: width,
+      h: height,
+      space: "canvas",
+      doc: null,
+      tiles: {},
+      rects: null,
+      raf: 0,
+      resizeTimer: 0,
+      zoomTimer: 0,
+      zoomPoll: 0,
+      currentScale: function () {
+        var s = canvasScaleOf(this.canvas);
+        if (Math.abs(s - 1) < 0.001) {
+          var sw = canvasScaleOf(this.wrapper);
+          if (sw > 0.01) return sw;
+        }
+        return s;
+      },
+      refreshScale: function () {
+        this.scale = this.currentScale() || 1;
+        this.refreshRects();
+        return this.scale;
+      },
+      refreshRects: function () {
+        this.rects = {
+          wrapper: this.wrapper.getBoundingClientRect(),
+          canvas: this.canvas.getBoundingClientRect()
+        };
+        return this.rects;
+      },
+      toSpace: function (clientX, clientY) {
+        var r = this._spaceRect || this.canvas.getBoundingClientRect();
+        var s = this.scale || 1;
+        return [(clientX - r.left) / s, (clientY - r.top) / s];
+      },
+      beginStroke: function () {
+        this._spaceRect = this.canvas.getBoundingClientRect();
+        this.rects = null;
+      },
+      toCanvasPoint: function (x, y) {
+        var r = this.rects || this.refreshRects();
+        var s = this.scale || 1;
+        return [
+          x * s + r.canvas.left - r.wrapper.left,
+          y * s + r.canvas.top - r.wrapper.top
+        ];
+      },
+      widthScale: function () {
+        return this.scale || 1;
+      },
+      widthScaleOn: function () {
+        return this.scale || 1;
+      },
+      contains: function (el) {
+        return !!(el && this.wrapper.contains(el));
+      },
+      ensureTile: function (tx, ty) {
+        var key = tx + "," + ty;
+        var t = this.tiles[key];
+        if (t) return t;
+        var cv = document.createElement("canvas");
+        cv.className = "ohsidian-ink-canvas-tile";
+        cv.style.cssText = "position:absolute;left:" + (tx * CANVAS_TILE) + "px;top:" +
+          (ty * CANVAS_TILE) + "px;pointer-events:none";
+        this.host.appendChild(cv);
+        t = { tx: tx, ty: ty, key: key, cv: cv };
+        this.tiles[key] = t;
+        sizeCanvas(cv, CANVAS_TILE, CANVAS_TILE, this.renderScale);
+        return t;
+      },
+      removeTile: function (key) {
+        var t = this.tiles[key];
+        if (!t) return;
+        try { if (t.cv && t.cv.parentNode) t.cv.parentNode.removeChild(t.cv); } catch (e) {}
+        delete this.tiles[key];
+      },
+      erasePreview: function (clientX, clientY, radius) {
+        var p = this.toSpace(clientX, clientY);
+        var r = Math.max(1, radius / (this.scale || 1));
+        var tx0 = Math.floor((p[0] - r) / CANVAS_TILE);
+        var tx1 = Math.floor((p[0] + r) / CANVAS_TILE);
+        var ty0 = Math.floor((p[1] - r) / CANVAS_TILE);
+        var ty1 = Math.floor((p[1] + r) / CANVAS_TILE);
+        var R = this.renderScale || 1;
+        for (var tx = tx0; tx <= tx1; tx++) {
+          for (var ty = ty0; ty <= ty1; ty++) {
+            var t = this.tiles[tx + "," + ty];
+            if (!t || !t.cv) continue;
+            var ctx = t.cv.getContext("2d");
+            ctx.save();
+            ctx.setTransform(R, 0, 0, R, 0, 0);
+            ctx.globalCompositeOperation = "destination-out";
+            ctx.beginPath();
+            ctx.arc(p[0] - tx * CANVAS_TILE, p[1] - ty * CANVAS_TILE, r, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+        }
+      },
+      resize: function () {
+        var w = Math.max(1, this.wrapper.clientWidth || 0);
+        var h = Math.max(1, this.wrapper.clientHeight || 0);
+        if (w <= 1 || h <= 1) return;
+        var s = this.currentScale() || 1;
+        var dpr = Math.min(window.devicePixelRatio || 1, 2);
+        var R = Math.max(1, Math.min(4, s * dpr));
+        var changed = w !== this.w || h !== this.h || dpr !== this.dpr ||
+          Math.abs(s - this.scale) > 0.001 || Math.abs(R - this.renderScale) > 0.001;
+        this.w = w;
+        this.h = h;
+        this.dpr = dpr;
+        this.scale = s;
+        this.renderScale = R;
+        if (changed) {
+          sizeCanvas(this.live, w, h, dpr, { desynchronized: true, alpha: true });
+        }
+        var key;
+        for (key in this.tiles) {
+          if (!Object.prototype.hasOwnProperty.call(this.tiles, key)) continue;
+          var t = this.tiles[key];
+          if (t && t.cv) sizeCanvas(t.cv, CANVAS_TILE, CANVAS_TILE, R);
+        }
+        this.redraw();
+      },
+      redraw: function () {
+        var doc = this.doc;
+        if (!doc) return;
+        var R = this.renderScale || 1;
+        var needed = {};
+        var i;
+        for (i = 0; i < doc.strokes.length; i++) {
+          var st = doc.strokes[i];
+          if (st.space !== this.space || st.baked) continue;
+          var b = st.bbox || bboxOf(st.pts);
+          if (!b) continue;
+          var tx0 = Math.floor((b[0] - 12) / CANVAS_TILE);
+          var tx1 = Math.floor((b[2] + 12) / CANVAS_TILE);
+          var ty0 = Math.floor((b[1] - 12) / CANVAS_TILE);
+          var ty1 = Math.floor((b[3] + 12) / CANVAS_TILE);
+          for (var tx = tx0; tx <= tx1; tx++) {
+            for (var ty = ty0; ty <= ty1; ty++) needed[tx + "," + ty] = true;
+          }
+        }
+        var key;
+        for (key in this.tiles) {
+          if (!Object.prototype.hasOwnProperty.call(this.tiles, key)) continue;
+          if (!needed[key]) this.removeTile(key);
+        }
+        for (key in needed) {
+          if (!Object.prototype.hasOwnProperty.call(needed, key)) continue;
+          var parts = key.split(",");
+          var t = this.ensureTile(parseInt(parts[0], 10), parseInt(parts[1], 10));
+          var ctx = sizeCanvas(t.cv, CANVAS_TILE, CANVAS_TILE, R);
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.clearRect(0, 0, t.cv.width, t.cv.height);
+          ctx.setTransform(R, 0, 0, R, 0, 0);
+          var tileSurface = {
+            toCanvasPoint: (function (ox, oy) {
+              return function (x, y) { return [x - ox, y - oy]; };
+            })(t.tx * CANVAS_TILE, t.ty * CANVAS_TILE),
+            widthScale: function () { return 1; }
+          };
+          for (i = 0; i < doc.strokes.length; i++) {
+            var s2 = doc.strokes[i];
+            if (s2.space !== this.space || s2.baked) continue;
+            var bb = s2.bbox || bboxOf(s2.pts);
+            if (!bb) continue;
+            if (bb[2] < t.tx * CANVAS_TILE || bb[0] > (t.tx + 1) * CANVAS_TILE) continue;
+            if (bb[3] < t.ty * CANVAS_TILE || bb[1] > (t.ty + 1) * CANVAS_TILE) continue;
+            drawStrokeOnCtx(ctx, s2, tileSurface);
+          }
+        }
+      },
+      scheduleRedraw: function () {
+        if (this.raf) return;
+        var self = this;
+        this.raf = requestAnimationFrame(function () {
+          self.raf = 0;
+          self.redraw();
+          var a = state.active;
+          if (a && a.kind === "stroke" && a.surface === self) self.drawLive(a.stroke);
+        });
+      },
+      drawLive: function (stroke) {
+        this.refreshRects();
+        var ctx = this.live.getContext("2d", { desynchronized: true, alpha: true });
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.live.width, this.live.height);
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        if (stroke) drawStrokeOnCtx(ctx, stroke, this);
+      },
+      clearLive: function () {
+        var ctx = this.live.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.live.width, this.live.height);
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      },
+      bindZoom: function () {
+        var self = this;
+        try {
+          this.onWheel = function () {
+            if (self.zoomTimer) clearTimeout(self.zoomTimer);
+            self.zoomTimer = setTimeout(function () {
+              self.zoomTimer = 0;
+              self.resize();
+            }, 140);
+          };
+          this.wrapper.addEventListener("wheel", this.onWheel, { passive: true });
+        } catch (eW) {}
+        this.zoomPoll = setInterval(function () {
+          try {
+            if (!self.wrapper.isConnected) return;
+            var s = self.currentScale() || 1;
+            if (Math.abs(s - self.scale) > 0.002 ||
+              self.wrapper.clientWidth !== self.w || self.wrapper.clientHeight !== self.h) {
+              self.resize();
+            }
+          } catch (eP) {}
+        }, 700);
+      },
+      resizeObserver: null,
+      unmount: function () {
+        try { if (this.onWheel) this.wrapper.removeEventListener("wheel", this.onWheel); } catch (e) {}
+        if (this.zoomPoll) clearInterval(this.zoomPoll);
+        if (this.zoomTimer) clearTimeout(this.zoomTimer);
+        if (this.resizeTimer) clearTimeout(this.resizeTimer);
+        try { if (this.resizeObserver) this.resizeObserver.disconnect(); } catch (e2) {}
+        var k;
+        for (k in this.tiles) {
+          if (Object.prototype.hasOwnProperty.call(this.tiles, k)) this.removeTile(k);
+        }
+        this.tiles = {};
+        try { if (this.host && this.host.parentNode) this.host.parentNode.removeChild(this.host); } catch (e3) {}
+        try { if (this.live && this.live.parentNode) this.live.parentNode.removeChild(this.live); } catch (e4) {}
+      }
+    };
+    surface.doc = docFor(surface);
+    surface.scale = surface.currentScale() || 1;
+    surface.renderScale = Math.max(1, Math.min(4, surface.scale * dpr));
+    surface.resize();
+    surface.bindZoom();
+    try {
+      surface.resizeObserver = new ResizeObserver(function () {
+        if (surface.resizeTimer) return;
+        surface.resizeTimer = setTimeout(function () {
+          surface.resizeTimer = 0;
+          try { surface.resize(); } catch (e) {}
+        }, 90);
+      });
+      surface.resizeObserver.observe(wrapper);
+    } catch (eRO) {}
+    inkTrace("surface", {
+      kind: "canvas",
+      target: (view.file && view.file.path) || "",
+      scale: surface.scale
+    });
+    return surface;
+  }
+
+  // ---------------------------------------------------------------------
+  // Surfaces: PDF embedded inside a markdown note
+  // ---------------------------------------------------------------------
+  // An embedded PDF cannot be reached through the leaf's pdfViewer, so it is
+  // treated as a page-local ink surface with normalized coordinates. The note
+  // sidecar owns the strokes, so zooming/resizing the embed keeps the ink on
+  // the same page position; it is deliberately not written into the PDF.
+  function createPdfEmbedSurface(leaf, pageEl, pdfDom) {
+    if (!leaf || !pageEl || !pageEl.isConnected) return null;
+    var embedEl = null;
+    try { embedEl = pageEl.closest(".pdf-embed"); } catch (e0) {}
+    var rect = pageEl.getBoundingClientRect();
+    if (!(rect.width > 10) || !(rect.height > 10)) return null;
+    if (getComputedStyle(pageEl).position === "static") pageEl.style.position = "relative";
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var pageNo = parseInt(pageEl.dataset.pageNumber || "1", 10) || 1;
+    var src = "";
+    try {
+      if (embedEl) {
+        src = embedEl.getAttribute("data-src") || embedEl.getAttribute("src") || "";
+        if (!src) {
+          var link = embedEl.querySelector("a.internal-link, .internal-embed");
+          if (link) src = link.getAttribute("src") || link.getAttribute("data-href") || "";
+        }
+      }
+    } catch (e1) {}
+    if (!src) {
+      try {
+        var all = leaf.view.containerEl.querySelectorAll(".pdf-embed");
+        src = "embed" + Array.prototype.indexOf.call(all, embedEl);
+      } catch (e2) {
+        src = "embed0";
+      }
+    }
+    var overlay = null;
+    var scrollEl = null;
+    var base = null;
+    var live = null;
+    if (pdfDom) {
+      // Standalone PDF fallback: page-local canvases can end up behind the
+      // pdf.js canvas/stacking context. Use one viewport-sized overlay in the
+      // non-scrolling .pdf-container and project the page rect into it.
+      try {
+        // Put the canvas in the PDF's *scrolling content* (the page's parent,
+        // normally .pdfViewer), not in the non-scrolling .pdf-container.
+        // Then the compositor scrolls it with the page: no JS reposition per
+        // scroll frame, no one-frame lag behind the PDF.
+        overlay = pageEl.parentElement || pageEl.closest(".pdfViewer") ||
+          (pageEl.closest(".pdf-viewer-container") &&
+            pageEl.closest(".pdf-viewer-container").parentElement) ||
+          leaf.view.containerEl;
+        scrollEl = pageEl.closest(".pdf-viewer-container") || null;
+      } catch (eOv) {}
+      if (!overlay) return null;
+      try {
+        if (getComputedStyle(overlay).position === "static") overlay.style.position = "relative";
+      } catch (ePos2) {}
+      base = document.createElement("canvas");
+      base.className = "ohsidian-ink-pdfdom-base";
+      base.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;z-index:2147483000;";
+      overlay.appendChild(base);
+      live = document.createElement("canvas");
+      live.className = "ohsidian-ink-pdfdom-live";
+      live.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;z-index:2147483010;";
+      overlay.appendChild(live);
+    } else {
+      base = ensureCanvas(pageEl, "ohsidian-ink-pdfembed", 5);
+      live = ensureCanvas(pageEl, "ohsidian-ink-pdfembed-live", 6);
+    }
+    var surface = {
+      kind: "pdfembed",
+      pdfDom: !!pdfDom,
+      leaf: leaf,
+      pageEl: pageEl,
+      embedEl: embedEl,
+      overlay: overlay,
+      scrollEl: scrollEl,
+      onScroll: null,
+      space: pdfDom
+        ? ("pdfdom:" + ((leaf.view && leaf.view.file && leaf.view.file.path) || "pdf") + ":" + pageNo)
+        : ("embed:" + src + ":" + pageNo),
+      doc: null,
+      width: rect.width,
+      height: rect.height,
+      dpr: dpr,
+      sized: false,
+      base: base,
+      live: live,
+      baseReady: false,
+      origin: null,
+      refreshOrigin: function () {
+        var pr = this.pageEl.getBoundingClientRect();
+        var or = this.overlay ? this.overlay.getBoundingClientRect() : pr;
+        this.origin = {
+          prLeft: pr.left,
+          prTop: pr.top,
+          prW: Math.max(1, pr.width),
+          prH: Math.max(1, pr.height),
+          orLeft: or.left,
+          orTop: or.top
+        };
+      },
+      raf: 0,
+      resizeTimer: 0,
+      resizeObserver: null,
+      contains: function (el) {
+        return !!(el && (el === this.pageEl || this.pageEl.contains(el)));
+      },
+      toSpace: function (clientX, clientY) {
+        var r = this._spaceRect || this.pageEl.getBoundingClientRect();
+        return [(clientX - r.left) / Math.max(1, r.width), (clientY - r.top) / Math.max(1, r.height)];
+      },
+      beginStroke: function () {
+        this._spaceRect = this.pageEl.getBoundingClientRect();
+      },
+      erasePreview: function (clientX, clientY, radius) {
+        var p = this.toSpace(clientX, clientY);
+        var s = 1;
+        try {
+          var pr = this.pageEl.getBoundingClientRect();
+          s = pr.width / Math.max(1, this.width);
+        } catch (eS) {}
+        var r = Math.max(1, radius / (s > 0.01 ? s : 1));
+        var ctx = this.base.getContext("2d");
+        ctx.save();
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        ctx.globalCompositeOperation = "destination-out";
+        ctx.beginPath();
+        ctx.arc(p[0] * this.width, p[1] * this.height, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      },
+      toCanvasPoint: function (x, y) {
+        return [x * this.width, y * this.height];
+      },
+      widthScale: function () {
+        return this.width;
+      },
+      syncPosition: function () {
+        if (!this.pdfDom || !this.overlay) return;
+        try {
+          var l = 0;
+          var t = 0;
+          var cur = this.pageEl;
+          while (cur && cur !== this.overlay) {
+            l += cur.offsetLeft || 0;
+            t += cur.offsetTop || 0;
+            cur = cur.offsetParent;
+          }
+          if (cur !== this.overlay) {
+            // Different offset chain: fall back to visual rects.
+            var pr = this.pageEl.getBoundingClientRect();
+            var or = this.overlay.getBoundingClientRect();
+            l = Math.round(pr.left - or.left + (this.overlay.scrollLeft || 0));
+            t = Math.round(pr.top - or.top + (this.overlay.scrollTop || 0));
+          }
+          if (this.base) { this.base.style.left = l + "px"; this.base.style.top = t + "px"; }
+          if (this.live) { this.live.style.left = l + "px"; this.live.style.top = t + "px"; }
+        } catch (e) {}
+      },
+      redraw: function () {
+        var doc = this.doc;
+        var ctx = this.base.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.base.width, this.base.height);
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        this.baseReady = true;
+        if (!doc) return;
+        for (var i = 0; i < doc.strokes.length; i++) {
+          var st = doc.strokes[i];
+          if (st.space !== this.space || st.baked) continue;
+          drawStrokeOnCtx(ctx, st, this);
+        }
+      },
+      appendStroke: function (stroke) {
+        if (!this.baseReady || !stroke || stroke.space !== this.space) return false;
+        var ctx = this.base.getContext("2d");
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        drawStrokeOnCtx(ctx, stroke, this);
+        return true;
+      },
+      scheduleRedraw: function () {
+        if (this.raf) return;
+        var self = this;
+        this.raf = requestAnimationFrame(function () {
+          self.raf = 0;
+          self.redraw();
+          var a = state.active;
+          if (a && a.kind === "stroke" && a.surface === self) self.drawLive(a.stroke);
+        });
+      },
+      drawLive: function (stroke) {
+        var ctx = this.live.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.live.width, this.live.height);
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        if (stroke) drawStrokeOnCtx(ctx, stroke, this);
+      },
+      drawLiveIncremental: function (stroke, from) {
+        if (!stroke || !stroke.pts || stroke.pts.length < 2) return;
+        if (stroke.tool === "highlighter") {
+          this.drawLive(stroke);
+          return;
+        }
+        var ctx = this.live.getContext("2d");
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = stroke.color;
+        var scale = this.widthScale ? this.widthScale() : 1;
+        var lineScale = stroke.px ? 1 : scale;
+        var start = Math.max(1, Number(from) || 1);
+        var pts = stroke.pts;
+        for (var i = start; i < pts.length; i++) {
+          var a = pts[i - 1];
+          var b = pts[i];
+          var p0 = this.toCanvasPoint(a[0], a[1]);
+          var p1 = this.toCanvasPoint(b[0], b[1]);
+          var w = (widthFor(stroke, a[2]) + widthFor(stroke, b[2])) * 0.5 * lineScale;
+          w = Math.max(0.35, w);
+          ctx.beginPath();
+          ctx.moveTo(p0[0], p0[1]);
+          ctx.lineTo(p1[0], p1[1]);
+          ctx.lineWidth = w;
+          ctx.stroke();
+        }
+      },
+      clearLive: function () {
+        var ctx = this.live.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.live.width, this.live.height);
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      },
+      resize: function () {
+        var r = this.pageEl.getBoundingClientRect();
+        var w = Math.max(1, r.width);
+        var h = Math.max(1, r.height);
+        if (this.pdfDom) {
+          // offsetWidth is the unscaled layout size. If pdf.js implements zoom
+          // with a CSS transform on the viewer, the canvas inherits that
+          // transform; storing getBoundingClientRect() here would scale twice.
+          w = Math.max(1, this.pageEl.offsetWidth || r.width);
+          h = Math.max(1, this.pageEl.offsetHeight || r.height);
+        }
+        if (w < 10 || h < 10) return;
+        var dpr = Math.min(window.devicePixelRatio || 1, 2);
+        if (!this.sized || w !== this.width || h !== this.height ||
+          dpr !== this.dpr || this.base.width <= 1) {
+          this.sized = true;
+          this.width = w;
+          this.height = h;
+          this.dpr = dpr;
+          sizeCanvas(this.base, w, h, dpr);
+          sizeCanvas(this.live, w, h, dpr, { desynchronized: true, alpha: true });
+          this.redraw();
+        }
+        this.syncPosition();
+        var a = state.active;
+        if (a && a.kind === "stroke" && a.surface === this) {
+          this.drawLive(a.stroke);
+          a.liveDrawn = a.stroke.pts ? a.stroke.pts.length : 0;
+        }
+      },
+      unmount: function () {
+        try { if (this.resizeObserver) this.resizeObserver.disconnect(); } catch (e) {}
+        if (this.resizeTimer) clearTimeout(this.resizeTimer);
+        if (this.scrollRaf) cancelAnimationFrame(this.scrollRaf);
+        try {
+          if (this.onScroll && this.scrollEl) this.scrollEl.removeEventListener("scroll", this.onScroll);
+        } catch (eS0) {}
+        try {
+          if (this.onScroll) window.removeEventListener("scroll", this.onScroll, true);
+        } catch (eS1) {}
+        try { if (this.base.parentNode) this.base.parentNode.removeChild(this.base); } catch (e2) {}
+        try { if (this.live.parentNode) this.live.parentNode.removeChild(this.live); } catch (e3) {}
+      }
+    };
+    surface.doc = docFor(surface);
+    if (pdfDom && scrollEl) {
+      surface.onScroll = function () {
+        if (surface.scrollRaf) return;
+        surface.scrollRaf = requestAnimationFrame(function () {
+          surface.scrollRaf = 0;
+          // The canvas itself scrolls natively with the page; only the active
+          // page detection needs JS here.
+          try {
+            var hit = document.elementFromPoint((window.innerWidth || 1024) / 2,
+              (window.innerHeight || 820) / 2);
+            var pe = hit && hit.closest ? hit.closest(".page[data-page-number]") : null;
+            if (pe) {
+              var ps = pdfEmbedSurfaceFor(surface.leaf, pe, true);
+              if (ps && state.activeSurface !== ps) {
+                state.activeSurface = ps;
+                updateToolbarState();
+              }
+            }
+          } catch (eVis) {}
+        });
+      };
+      try { scrollEl.addEventListener("scroll", surface.onScroll, { passive: true }); } catch (eSc) {}
+      try { window.addEventListener("scroll", surface.onScroll, true); } catch (eSc2) {}
+    }
+    surface.resize();
+    if (pdfDom) {
+      setTimeout(function () {
+        try {
+          inkTrace("pdfdomOverlay", {
+            page: pageNo,
+            pageW: Math.round(surface.pageEl.getBoundingClientRect().width),
+            pageH: Math.round(surface.pageEl.getBoundingClientRect().height),
+            overlayW: overlay ? overlay.clientWidth : 0,
+            overlayH: overlay ? overlay.clientHeight : 0,
+            baseW: base.width,
+            baseH: base.height,
+            liveW: live.width,
+            connected: !!(base.isConnected && live.isConnected)
+          });
+        } catch (eT) {}
+      }, 0);
+    }
+    try {
+      surface.resizeObserver = new ResizeObserver(function () {
+        if (surface.resizeTimer) return;
+        surface.resizeTimer = setTimeout(function () {
+          surface.resizeTimer = 0;
+          try { surface.resize(); } catch (e) {}
+        }, 70);
+      });
+      surface.resizeObserver.observe(pageEl);
+      if (overlay) surface.resizeObserver.observe(overlay);
+    } catch (eRO) {}
+    inkTrace("surface", { kind: "pdfembed", target: src, page: pageNo, pdfDom: !!pdfDom });
+    return surface;
+  }
+
+  function pdfEmbedSurfaceFor(leaf, pageEl, pdfDom) {
+    for (var i = 0; i < state.surfaces.length; i++) {
+      var s = state.surfaces[i];
+      if (s.kind === "pdfembed" && s.pageEl === pageEl) return s;
+    }
+    var created = null;
+    try { created = createPdfEmbedSurface(leaf, pageEl, pdfDom); } catch (e) {
+      warn("pdf embed mount failed", e && e.message);
+      inkTrace("surfaceFail", { type: "pdfembed", error: e && e.message });
+    }
+    if (created) state.surfaces.push(created);
+    return created;
+  }
+
+  function inkRefreshSurfaces() {
+    var app = state.app;
+    if (!app || !app.workspace) return;
+    var leaves = [];
+    try {
+      leaves = leaves.concat(app.workspace.getLeavesOfType("markdown") || []);
+      leaves = leaves.concat(app.workspace.getLeavesOfType("pdf") || []);
+      leaves = leaves.concat(app.workspace.getLeavesOfType("canvas") || []);
+    } catch (e) {
+      return;
+    }
+    // Drop surfaces whose leaf vanished or whose DOM is disconnected.
+    for (var i = state.surfaces.length - 1; i >= 0; i--) {
+      var s = state.surfaces[i];
+      var alive = false;
+      for (var j = 0; j < leaves.length; j++) {
+        if (leaves[j] === s.leaf) { alive = true; break; }
+      }
+      if (!alive || !s.leaf.view || !s.leaf.view.containerEl || !s.leaf.view.containerEl.isConnected) {
+        removeSurface(s);
+      }
+    }
+    for (var k = 0; k < leaves.length; k++) {
+      var leaf = leaves[k];
+      var existing = surfaceForLeaf(leaf);
+      if (existing) {
+        var nowType = leaf.view ? leaf.view.getViewType() : "";
+        var nowFile = leaf.view && leaf.view.file ? leaf.view.file.path : "";
+        var stale = false;
+        if ((existing.kind === "markdown" && nowType !== "markdown") ||
+          (existing.kind === "pdf" && nowType !== "pdf") ||
+          (existing.kind === "canvas" && nowType !== "canvas")) {
+          stale = true;
+        } else if (existing.doc && existing.doc.target !== nowFile) {
+          // The leaf switched to another note/PDF in the same view.
+          stale = true;
+        } else if (existing.kind === "markdown" && leaf.view &&
+          typeof leaf.view.getMode === "function" && leaf.view.getMode() !== "preview") {
+          // Switched to editing / live preview: the overlay must not stay on.
+          stale = true;
+        } else if (existing.kind === "markdown" &&
+          (!existing.rootEl || !existing.rootEl.isConnected ||
+            !existing.sizer || !existing.sizer.isConnected)) {
+          // The reading view was re-rendered (PDF embed/layout). Reattach the
+          // same surface instead of deleting its doc/history every 500ms.
+          if (!existing.rebind || !existing.rebind()) stale = true;
+        } else if (existing.kind === "pdf" &&
+          (!existing.container || !existing.container.isConnected ||
+            (leaf.view && existing.viewer !== leaf.view.pdfViewer))) {
+          // pdf.js replaces the viewer on a document reload (our own PDF write
+          // triggers one); the old event bus and page canvases are dead.
+          stale = true;
+        } else if (existing.kind === "canvas" &&
+          (!existing.wrapper || !existing.wrapper.isConnected ||
+            !existing.canvas || !existing.canvas.isConnected ||
+            (leaf.view && leaf.view.containerEl && existing.wrapper !==
+              leaf.view.containerEl.querySelector(".canvas-wrapper")))) {
+          stale = true;
+        }
+        if (stale) {
+          removeSurface(existing);
+          existing = null;
+        }
+      }
+      if (existing) {
+        if (existing.kind === "markdown" || existing.kind === "canvas") existing.resize();
+        else if (existing.kind === "pdfembed") existing.resize();
+        else if (existing.kind === "pdf") {
+          // pdf.js may have replaced page elements during a zoom.
+          existing.refreshPages();
+        }
+        continue;
+      }
+      var created = null;
+      try {
+        var type = leaf.view ? leaf.view.getViewType() : "";
+        if (type === "markdown") created = createMarkdownSurface(leaf);
+        else if (type === "pdf") created = createPdfSurface(leaf);
+        else if (type === "canvas") created = createCanvasSurface(leaf);
+      } catch (e) {
+        warn("surface mount failed", e && e.message);
+        inkTrace("surfaceFail", { type: leaf.view ? leaf.view.getViewType() : "?", error: e && e.message });
+      }
+      if (!created && leaf.view && leaf.view.getViewType() === "pdf") {
+        // Last-resort DOM surface: if this Obsidian build does not expose the
+        // pdf.js viewer object, pages are still real DOM and can be annotated
+        // with page-normalized coordinates. It keeps the handwriting layer
+        // usable even when view.pdfViewer is absent.
+        try {
+          var pdfPages = leaf.view.containerEl.querySelectorAll(".page[data-page-number]");
+          if (pdfPages && pdfPages.length) created = pdfEmbedSurfaceFor(leaf, pdfPages[0], true);
+        } catch (ePdfDom) {}
+      }
+      if (created) {
+        if (state.surfaces.indexOf(created) < 0) state.surfaces.push(created);
+        inkTrace("surface", {
+          kind: created.kind,
+          target: created.doc ? created.doc.target : "",
+          tiles: created.tiles ? Object.keys(created.tiles).length : 0,
+          pages: created.pages ? Object.keys(created.pages).length : 0,
+          pdfDom: !!created.pdfDom
+        });
+      }
+    }
+    // Embedded-PDF page elements are recreated by Obsidian when the embed
+    // finishes loading or re-renders; drop surfaces whose page is gone.
+    for (var pe = state.surfaces.length - 1; pe >= 0; pe--) {
+      var ps = state.surfaces[pe];
+      if (ps.kind !== "pdfembed") continue;
+      if (!ps.pageEl || !ps.pageEl.isConnected) removeSurface(ps);
+    }
+    updateToolbarVisibility();
+  }
+
+  function surfaceAtEvent(target) {
+    // Embedded PDF pages inside a note take priority over the note surface.
+    for (var e = 0; e < state.surfaces.length; e++) {
+      var se = state.surfaces[e];
+      if (se.kind === "pdfembed" && se.contains(target)) return { surface: se, entry: null };
+    }
+    for (var i = 0; i < state.surfaces.length; i++) {
+      var s = state.surfaces[i];
+      if (s.kind === "markdown") {
+        if (!s.contains(target)) continue;
+        var pageEl = null;
+        try {
+          pageEl = target.closest ? target.closest(".pdf-embed .page[data-page-number], .pdf-embed .page") : null;
+        } catch (eP) {}
+        if (pageEl) {
+          var pageSurface = pdfEmbedSurfaceFor(s.leaf, pageEl);
+          if (pageSurface) return { surface: pageSurface, entry: null };
+          return null;
+        }
+        return { surface: s, entry: null };
+      } else if (s.kind === "canvas") {
+        if (s.contains(target)) return { surface: s, entry: null };
+      } else if (s.kind === "pdf") {
+        var entry = s.surfaceAt(target);
+        if (entry) return { surface: s, entry: entry };
+        try {
+          var pe = target.closest ? target.closest(".page[data-page-number]") : null;
+          if (pe) {
+            var ps = pdfEmbedSurfaceFor(s.leaf, pe, true);
+            if (ps) return { surface: ps, entry: null };
+          }
+        } catch (eP) {}
+      }
+    }
+    try {
+      var al = state.app && state.app.workspace ? state.app.workspace.activeLeaf : null;
+      if (al && al.view && al.view.getViewType && al.view.getViewType() === "pdf") {
+        var dpe = target.closest ? target.closest(".page[data-page-number]") : null;
+        if (dpe) {
+          var dps = pdfEmbedSurfaceFor(al, dpe, true);
+          if (dps) return { surface: dps, entry: null };
+        }
+      }
+    } catch (eD) {}
+    return null;
+  }
+
+  // ---------------------------------------------------------------------
+  // Pressure side-channel
+  // ---------------------------------------------------------------------
+  var pl = {
+    buf: [],
+    pending: [],
+    push: function (msg) {
+      var pts = msg && msg.pts ? msg.pts : [];
+      if (!pts.length) return;
+      var t = nowMs();
+      var w = Number(msg.w) > 0 ? Number(msg.w) : (window.innerWidth || 1);
+      var h = Number(msg.h) > 0 ? Number(msg.h) : (window.innerHeight || 1);
+      var kx = (window.innerWidth || w) / w;
+      var ky = (window.innerHeight || h) / h;
+      for (var i = 0; i < pts.length; i++) {
+        var p = pts[i];
+        if (!p || p.length < 3) continue;
+        var age = Number(p[5]) || 0;
+        this.buf.push({
+          x: p[0] * kx + state.offsetX,
+          y: p[1] * ky + state.offsetY,
+          p: clamp01(p[2]),
+          tx: Number(p[3]) || 0,
+          ty: Number(p[4]) || 0,
+          t: t - age - 1.5
+        });
+      }
+      if (this.buf.length > 900) this.buf.splice(0, this.buf.length - 600);
+      this.flushPending();
+    },
+    /**
+     * DOM samples that arrived before their ArkTS counterpart are queued and
+     * back-filled when the next IPC batch lands (the two runtimes have
+     * different scheduling order relative to Chromium's input pipeline).
+     */
+    flushPending: function () {
+      if (!this.pending.length) return;
+      var keep = [];
+      var now = nowMs();
+      var filled = false;
+      for (var i = 0; i < this.pending.length; i++) {
+        var e = this.pending[i];
+        var m = this.match(e.x, e.y, e.t);
+        if (m) {
+          var pt = e.pt;
+          if (pt) {
+            pt[2] = m.p;
+            pt[3] = m.tx;
+            pt[4] = m.ty;
+            filled = true;
+          }
+        } else if (now - e.t < 160) {
+          keep.push(e);
+        }
+      }
+      this.pending = keep;
+      if (filled) {
+        var a = state.active;
+        if (a && a.kind === "stroke") {
+          requestLiveFrame();
+        } else {
+          scheduleRedraw();
+          var s = activeSurfaceNow();
+          var d = s ? docFor(s) : null;
+          if (d) saveSoon(d);
+        }
+      }
+    },
+    queue: function (x, y, t, pt) {
+      this.pending.push({ x: x, y: y, t: t, pt: pt });
+      if (this.pending.length > 120) this.pending.splice(0, this.pending.length - 90);
+    },
+    match: function (x, y, t) {
+      var best = null;
+      var bestScore = 1e9;
+      for (var i = this.buf.length - 1; i >= 0; i--) {
+        var s = this.buf[i];
+        if (s.t < t - 80) break; // buffer is chronological
+        var dt = Math.abs(s.t - t);
+        if (dt > 60) continue;
+        var dx = s.x - x;
+        var dy = s.y - y;
+        var d = Math.sqrt(dx * dx + dy * dy);
+        if (d > 10) continue;
+        var score = dt * 0.3 + d * 2.0;
+        if (score < bestScore) {
+          bestScore = score;
+          best = s;
+        }
+      }
+      return best;
+    }
+  };
+
+  function negotiatePressure() {
+    var want = false;
+    if (state.pressureTapPref === "on") {
+      want = true;
+    } else if (state.pressureTapPref === "auto") {
+      want = state.pressureMode === "fake" ||
+        (state.pressureMode === "unknown" && state.domPressureCount > 30 &&
+          Object.keys(state.domPressureValues).length <= 2);
+    }
+    if (want !== state.pressureTapOn) {
+      var sent = sendAction({ action: "penSamplesOn", on: want });
+      if (sent) {
+        state.pressureTapOn = want;
+        log("pressure tap", want ? "enabled" : "disabled", "mode=" + state.pressureMode);
+      }
+    }
+  }
+
+  /**
+   * Only DOM pressure feeds the real/fake classification. ArkTS samples are
+   * the fallback, not evidence about the engine: counting them would make
+   * simulated values look like a pressure-capable device.
+   */
+  function observeDomPressure(p) {
+    if (typeof p !== "number" || p < 0) return;
+    var q = Math.round(clamp01(p) * 1000) / 1000;
+    state.domPressureValues[q] = (state.domPressureValues[q] || 0) + 1;
+    state.domPressureCount++;
+    // A pressure-sensitive pen produces hundreds of distinct values; keep the
+    // histogram bounded if the device reports wild floats.
+    if (state.domPressureCount > 4000) {
+      state.domPressureValues = {};
+      state.domPressureCount = 0;
+      if (state.pressureMode !== "real") state.pressureMode = "unknown";
+    }
+    if ((state.domPressureCount & 3) !== 0 && state.pressureMode !== "unknown") {
+      negotiatePressure();
+      return;
+    }
+    var keys = Object.keys(state.domPressureValues);
+    if (state.pressureMode === "unknown" && keys.length >= 4) state.pressureMode = "real";
+    if (state.pressureMode === "unknown" && state.domPressureCount >= 40 && keys.length <= 2) state.pressureMode = "fake";
+    if (state.pressureMode === "fake" && keys.length >= 6) state.pressureMode = "real";
+    negotiatePressure();
+  }
+
+  function pressureFor(surface, ev, x, y) {
+    var t = nowMs();
+    var domP = typeof ev.pressure === "number" ? ev.pressure : 0.5;
+    var forceTap = state.pressureTapPref === "on";
+    if (state.pressureMode === "real" && !forceTap) {
+      return { p: clamp01(domP), tiltX: ev.tiltX || 0, tiltY: ev.tiltY || 0, real: true };
+    }
+    // Samples are stored in viewport CSS px, so match against the event's
+    // client coordinates, not the surface-local x/y.
+    var m = pl.match(ev.clientX + state.offsetX, ev.clientY + state.offsetY, t);
+    if (m) {
+      return { p: m.p, tiltX: m.tx, tiltY: m.ty, real: true };
+    }
+    if (state.pressureMode === "real") {
+      return { p: clamp01(domP), tiltX: ev.tiltX || 0, tiltY: ev.tiltY || 0, real: true };
+    }
+    if (state.pressureMode !== "fake" && domP > 0.001 && domP !== 0.5) {
+      return { p: clamp01(domP), tiltX: ev.tiltX || 0, tiltY: ev.tiltY || 0, real: true };
+    }
+    // Simulated pressure: fast strokes get thinner.
+    var dt = Math.max(4, t - (state.lastPenAt || t));
+    var dx = x - (state.lastPenX === undefined ? x : state.lastPenX);
+    var dy = y - (state.lastPenY === undefined ? y : state.lastPenY);
+    var d = Math.sqrt(dx * dx + dy * dy);
+    var speed = d / dt;
+    var sim = clamp(1 - speed / 3.2, 0.12, 0.92);
+    return { p: sim, tiltX: 0, tiltY: 0, real: false };
+  }
+
+  // ---------------------------------------------------------------------
+  // Input capture
+  // ---------------------------------------------------------------------
+  function isExcluded(el) {
+    if (!el) return true;
+    try {
+      if (el.closest("#" + TOOLBAR_ID) || el.closest("#" + MENU_ID) ||
+        el.closest("#" + CLEAR_ID)) return true;
+      if (el.closest(".modal-container") || el.closest(".modal-bg") || el.closest(".prompt") ||
+        el.closest(".menu") || el.closest(".suggestion-container")) return true;
+      if (el.closest(".workspace-drawer") || el.closest(".pdf-sidebar-container") ||
+        el.closest(".pdf-thumbnail-view") || el.closest(".pdf-outline-view") ||
+        el.closest(".pdf-toolbar") || el.closest(".pdf-findbar")) return true;
+      if (el.closest(".status-bar") || el.closest(".view-header") ||
+        el.closest(".titlebar") || el.closest(".mobile-toolbar") ||
+        el.closest(".mobile-navbar")) return true;
+      if (el.closest(".canvas-controls") || el.closest(".canvas-card-menu") ||
+        el.closest(".canvas-menu") || el.closest(".canvas-node-menu")) return true;
+      if (el.closest("input,textarea,select")) return true;
+      return false;
+    } catch (e) {
+      return true;
+    }
+  }
+
+  function isInkChrome(el) {
+    try {
+      return !!(el && (el.closest("#" + TOOLBAR_ID) || el.closest("#" + MENU_ID) ||
+        el.closest("#" + CLEAR_ID)));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isPenEvent(ev) {
+    if (!ev) return false;
+    if (ev.pointerType === "pen") return true;
+    if (ev.pointerType === "mouse" && state.penNativeActive) return true;
+    return false;
+  }
+
+  function pointFromEvent(ev, x, y) {
+    var pr = pressureFor(null, ev, x, y);
+    return [x, y, pr.p, pr.tiltX, pr.tiltY, Math.round(nowMs() - (state.strokeT0 || nowMs()))];
+  }
+
+  function onPointerDownCapture(ev) {
+    if (!state.installed || !ev || !state.enabled) return;
+    if (isPenEvent(ev)) state.lastPenSeen = nowMs();
+    // A palm/finger landing during an active pen stroke must not scroll,
+    // select text or click anything. This replaces the old full-screen guard.
+    if (state.active && ev.pointerType === "touch") {
+      try { ev.preventDefault(); } catch (e1) {}
+      try { ev.stopPropagation(); } catch (e2) {}
+      return;
+    }
+    if (ev.button !== undefined && ev.button !== 0 && ev.button !== 5) return;
+    if (!isPenEvent(ev) && !(state.fingerDraw && ev.pointerType === "touch")) return;
+    if (state.tool === "pointer") return;
+    if (isExcluded(ev.target)) {
+      if (isPenEvent(ev) && state.tool !== "pointer") {
+        if (!isInkChrome(ev.target)) {
+          // Pen mode owns drawing only. A pen contact on Obsidian chrome
+          // (tabs/header/nav/sidebar/PDF toolbar/modal) is swallowed at the
+          // down event, so Obsidian never starts a pen swipe on it. Hand
+          // input remains the way to operate Obsidian UI.
+          state.blockedPointerId = ev.pointerId;
+          try { ev.preventDefault(); } catch (eX1) {}
+          try { ev.stopPropagation(); } catch (eX2) {}
+          try { ev.stopImmediatePropagation(); } catch (eX3) {}
+          return;
+        }
+        // Our own ink toolbar/clear slider still accepts the pen. Inputs must
+        // receive the full pointer stream (no 5px swipe cutoff), so return
+        // before arming penUiSwipe for them.
+        if (ev.target && ev.target.closest &&
+          (ev.target.closest("#" + CLEAR_ID) ||
+            ev.target.closest("input,textarea,select"))) return;
+        state.penUiSwipe = {
+          id: ev.pointerId,
+          x: ev.clientX,
+          y: ev.clientY,
+          blocked: false
+        };
+      }
+      return;
+    }
+    if (isPenEvent(ev)) inkToolMode(state.tool);
+    var hit = surfaceAtEvent(ev.target);
+    if (!hit) {
+      if (isPenEvent(ev) && state.tool !== "pointer") {
+        // A pen stroke that starts outside every ink surface must not fall
+        // through to Obsidian. Otherwise a left/right pen swipe over a margin,
+        // a loading embed or the outer gutter reaches Obsidian's own swipe
+        // handlers and opens panels/toolbars.
+        state.blockedPointerId = ev.pointerId;
+        try { ev.preventDefault(); } catch (eB1) {}
+        try { ev.stopPropagation(); } catch (eB2) {}
+        try { ev.stopImmediatePropagation(); } catch (eB3) {}
+        var v = state.app && state.app.workspace ? state.app.workspace.activeLeaf : null;
+        var vt = v && v.view && v.view.getViewType ? v.view.getViewType() : "";
+        var vm = v && v.view && v.view.getMode ? v.view.getMode() : "";
+        if (vt === "markdown" && vm !== "preview") {
+          // A pen still in its drawing tool must not be trapped in Live
+          // Preview; switch now instead of waiting for a toolbar tap.
+          if (inkRequestReadingMode(state.tool)) return;
+        }
+        if (!state.noSurfaceNotified) {
+          state.noSurfaceNotified = true;
+          inkStatus(vt === "markdown"
+            ? (vm === "preview"
+              ? "手写层准备中…请稍候再落笔"
+              : "正在切换到阅读视图，手写层准备中…")
+            : "当前视图没有手写层。", 3000);
+        }
+        if (vt === "markdown" || vt === "pdf" || vt === "canvas") inkAwaitSurface("stroke");
+      }
+      return;
+    }
+    var surface = hit.surface;
+    var entry = hit.entry || null;
+    state.blockedPointerId = null;
+    state.activeSurface = surface;
+    if (surface.kind === "pdf" && entry) surface.currentSpace = entry.space;
+    if (surface.kind === "markdown" && document.activeElement &&
+      surface.sizer && !surface.sizer.contains(document.activeElement) &&
+      document.activeElement.isContentEditable) {
+      // Editing somewhere else: do not steal the stroke.
+      return;
+    }
+    var tool = state.tool === "eraser" ? "eraser" : state.tool;
+    // The pen's tail/barrel button arrives as button 5 (or the eraser bit in
+    // `buttons`); treat it as a temporary eraser even when the pen tool is
+    // selected. This also covers devices that never expose SourceTool.RUBBER.
+    if (ev.button === 5 || ((ev.buttons || 0) & 32) !== 0) {
+      tool = "eraser";
+    }
+    if (surface.kind === "canvas") surface.refreshScale();
+    if (surface.kind === "pdf" && entry) {
+      entry._spaceRect = entry.pageEl.getBoundingClientRect();
+    }
+    if (typeof surface.beginStroke === "function") surface.beginStroke(entry);
+    var sp = surface.kind === "pdf"
+      ? surface.toSpaceOn(entry, ev.clientX, ev.clientY)
+      : surface.toSpace(ev.clientX, ev.clientY);
+    ev.preventDefault();
+    ev.stopPropagation();
+    state.strokeT0 = nowMs();
+    state.lastPenAt = state.strokeT0;
+    state.lastPenActivity = state.strokeT0;
+    state.lastPenX = sp[0];
+    state.lastPenY = sp[1];
+    state.lastPenType = ev.pointerType || "?";
+    if (tool === "eraser") {
+      var eraseDoc = docFor(surface);
+      var eraseSpace = inkSpaceOf(surface, entry);
+      state.active = {
+        kind: "erase",
+        surface: surface,
+        entry: entry,
+        space: eraseSpace,
+        doc: eraseDoc,
+        before: eraseDoc ? snapshotSpace(eraseDoc, eraseSpace) : null,
+        changed: false,
+        erasePts: [[sp[0], sp[1]]],
+        visualErased: false,
+        pointerId: ev.pointerId,
+        t0: state.strokeT0,
+        lastSampleAt: state.strokeT0
+      };
+      palmOn();
+      inkWritingChrome(true);
+      inkTrace("eraseDown", { space: eraseSpace });
+      drawCursor(ev.clientX, ev.clientY, surface, true);
+      if (typeof surface.erasePreview === "function") {
+        surface.erasePreview(ev.clientX, ev.clientY, Number(state.eraserPx) || 12, entry);
+        state.active.visualErased = true;
+      } else {
+        eraseAt(surface, entry, sp[0], sp[1], state.active);
+      }
+      return;
+    }
+    var autoColor = state.colorAuto && tool !== "highlighter";
+    var baseWidth = tool === "highlighter" ? state.hlWidth : state.width;
+    var widthScale = surface.kind === "pdf"
+      ? (surface.widthScaleOn(entry) || 1)
+      : ((surface.kind === "canvas" || surface.kind === "pdfembed")
+        ? (surface.widthScale() || 1) : 1);
+    var pxWidth = surface.kind === "pdfembed";
+    var stroke = {
+      id: uid(),
+      space: inkSpaceOf(surface, entry),
+      tool: tool,
+      color: tool === "highlighter" ? state.hlColor : (autoColor ? inkAutoColor(surface) : state.color),
+      auto: autoColor,
+      width: pxWidth ? baseWidth : baseWidth / (widthScale || 1),
+      px: pxWidth,
+      screenWidth: pxWidth ? baseWidth : 0,
+      opacity: tool === "highlighter" ? 0.38 : 1,
+      device: ev.pointerType === "pen" ? "pen" : (ev.pointerType || "?"),
+      pts: [],
+      bbox: null,
+      baked: false
+    };
+    var pr = pressureFor(surface, ev, sp[0], sp[1]);
+    stroke.pts.push([sp[0], sp[1], pr.p, pr.tiltX, pr.tiltY, 0]);
+    if (!pr.real && state.pressureMode !== "real") {
+      pl.queue(ev.clientX + state.offsetX, ev.clientY + state.offsetY, nowMs(),
+        stroke.pts[stroke.pts.length - 1]);
+    }
+    state.active = {
+      kind: "stroke",
+      surface: surface,
+      entry: entry,
+      stroke: stroke,
+      pointerId: ev.pointerId,
+      t0: state.strokeT0,
+      lastSampleAt: state.strokeT0,
+      dirty: true
+    };
+    state.latencyT0 = nowMs();
+    state.latencyCaptured = false;
+    state.penSamplesThisStroke = 0;
+    try {
+      if (ev.target && ev.target.setPointerCapture) ev.target.setPointerCapture(ev.pointerId);
+    } catch (e) {}
+    palmOn();
+    inkWritingChrome(true);
+    inkTrace("strokeDown", { tool: tool, space: stroke.space, device: stroke.device });
+    if (surface.kind === "markdown" || surface.kind === "canvas" || surface.kind === "pdfembed") surface.drawLive(stroke);
+    else surface.drawLive(entry, stroke);
+    state.active.liveDrawn = stroke.pts.length;
+    requestLiveFrame();
+  }
+
+  function onPointerMoveCapture(ev) {
+    if (!state.enabled) {
+      if (state.active) forceReleaseActive(true);
+      return;
+    }
+    if (ev.pointerType === "pen") state.lastPenSeen = nowMs();
+    var ps = state.penUiSwipe;
+    if (ps && ev.pointerId === ps.id && !state.active) {
+      var pdx = ev.clientX - ps.x;
+      var pdy = ev.clientY - ps.y;
+      if (!ps.blocked && pdx * pdx + pdy * pdy > 25) {
+        ps.blocked = true;
+        state.blockedPointerId = ev.pointerId;
+      }
+      if (ps.blocked) {
+        try { ev.preventDefault(); } catch (eS1) {}
+        try { ev.stopPropagation(); } catch (eS2) {}
+        try { ev.stopImmediatePropagation(); } catch (eS3) {}
+      }
+      return;
+    }
+    if (state.blockedPointerId !== null && ev.pointerId === state.blockedPointerId) {
+      try { ev.preventDefault(); } catch (eB1) {}
+      try { ev.stopPropagation(); } catch (eB2) {}
+      try { ev.stopImmediatePropagation(); } catch (eB3) {}
+      return;
+    }
+    var a = state.active;
+    if (!a) return;
+    if (ev.pointerId !== a.pointerId) return;
+    state.lastPenActivity = nowMs();
+    a.lastSampleAt = state.lastPenActivity;
+    if (ev.preventDefault) ev.preventDefault();
+    if (ev.stopPropagation) ev.stopPropagation();
+    if (a.kind === "erase") {
+      var sp = a.surface.kind === "pdf"
+        ? a.surface.toSpaceOn(a.entry, ev.clientX, ev.clientY)
+        : a.surface.toSpace(ev.clientX, ev.clientY);
+      drawCursor(ev.clientX, ev.clientY, a.surface, true);
+      if (a.erasePts && typeof a.surface.erasePreview === "function") {
+        a.erasePts.push([sp[0], sp[1]]);
+        a.surface.erasePreview(ev.clientX, ev.clientY, Number(state.eraserPx) || 12, a.entry);
+        a.visualErased = true;
+      } else {
+        eraseAt(a.surface, a.entry, sp[0], sp[1], a);
+      }
+      return;
+    }
+    var list = [ev];
+    try {
+      if (typeof ev.getCoalescedEvents === "function") {
+        var co = ev.getCoalescedEvents();
+        if (co && co.length) list = co;
+      }
+    } catch (e) {}
+    for (var i = 0; i < list.length; i++) {
+      var e2 = list[i];
+      var sp2 = a.surface.kind === "pdf"
+        ? a.surface.toSpaceOn(a.entry, e2.clientX, e2.clientY)
+        : a.surface.toSpace(e2.clientX, e2.clientY);
+      var pr = pressureFor(a.surface, e2, sp2[0], sp2[1]);
+      a.stroke.pts.push([sp2[0], sp2[1], pr.p, pr.tiltX, pr.tiltY,
+        Math.round(nowMs() - a.t0)]);
+      if (!pr.real && state.pressureMode !== "real") {
+        pl.queue(e2.clientX + state.offsetX, e2.clientY + state.offsetY, nowMs(),
+          a.stroke.pts[a.stroke.pts.length - 1]);
+      }
+      state.lastPenX = sp2[0];
+      state.lastPenY = sp2[1];
+      state.lastPenAt = nowMs();
+      a.dirty = true;
+    }
+    requestLiveFrame();
+  }
+
+  function onPointerUpCapture(ev) {
+    if (!state.enabled) {
+      if (state.active) forceReleaseActive(true);
+      return;
+    }
+    if (ev.pointerType === "pen") state.lastPenSeen = nowMs();
+    var ps = state.penUiSwipe;
+    if (ps && ev.pointerId === ps.id) {
+      if (ps.blocked) {
+        state.penClickSuppressUntil = Date.now() + 450;
+        try { ev.preventDefault(); } catch (eS1) {}
+        try { ev.stopPropagation(); } catch (eS2) {}
+        try { ev.stopImmediatePropagation(); } catch (eS3) {}
+      }
+      state.penUiSwipe = null;
+      if (state.blockedPointerId === ev.pointerId) state.blockedPointerId = null;
+      return;
+    }
+    if (state.blockedPointerId !== null && ev.pointerId === state.blockedPointerId) {
+      state.penClickSuppressUntil = Date.now() + 450;
+      try { ev.preventDefault(); } catch (eB1) {}
+      try { ev.stopPropagation(); } catch (eB2) {}
+      try { ev.stopImmediatePropagation(); } catch (eB3) {}
+      state.blockedPointerId = null;
+      return;
+    }
+    var a = state.active;
+    if (!a) return;
+    // A pen-up can arrive with a different pointerId than the down (the
+    // engine occasionally reports the tail end as a mouse event). Never leave
+    // the guard/stroke armed because of that.
+    if (ev.pointerId !== a.pointerId && ev.pointerType !== "pen" && !state.penNativeActive) return;
+    state.lastPenActivity = nowMs();
+    if (ev.preventDefault) ev.preventDefault();
+    if (ev.stopPropagation) ev.stopPropagation();
+    state.active = null;
+    if (a.kind === "erase") clearCursor(true);
+    palmOffSoon();
+    inkWritingChrome(false);
+    inkTrace("strokeUp", {
+      kind: a.kind,
+      tool: a.stroke ? a.stroke.tool : "erase",
+      points: a.stroke && a.stroke.pts ? a.stroke.pts.length : 0
+    });
+    if (a.kind === "erase") {
+      // The visible holes were cleared directly on the base canvas while the
+      // pen moved. Apply the path to the document once, at pen-up, then repaint
+      // once. This removes the per-move full-page redraw that made erasing
+      // feel like 1–2 fps.
+      if (a.erasePts && a.erasePts.length &&
+        typeof a.surface.erasePreview === "function") {
+        for (var ei = 0; ei < a.erasePts.length; ei++) {
+          eraseAt(a.surface, a.entry, a.erasePts[ei][0], a.erasePts[ei][1], a);
+        }
+      }
+      if (a.changed && a.doc && a.before) {
+        pushHistory(a.doc, a.space, a.before);
+        saveSoon(a.doc);
+      }
+      if (a.changed || a.visualErased) {
+        if (a.surface && typeof a.surface.scheduleRedraw === "function") a.surface.scheduleRedraw();
+        else if (a.surface && typeof a.surface.redraw === "function") a.surface.redraw();
+        updateToolbarState();
+      }
+      if (a.changed && a.space && (a.space.indexOf("pdf:") === 0 ||
+        a.space.indexOf("pdfdom:") === 0)) {
+        schedulePdfWrite(a.surface);
+      }
+      return;
+    }
+    var stroke = a.stroke;
+    if (!stroke.pts.length) return;
+    stroke.bbox = bboxOf(stroke.pts);
+    finishStroke(a.surface, a.entry, stroke);
+  }
+
+  function finishStroke(surface, entry, stroke) {
+    // Do NOT clear the live canvas first: it is a desynchronized layer and its
+    // clear can be presented one frame before the tile canvas update, which
+    // reads as a flash. Draw the committed stroke into the tiles first, then
+    // clear the live layer after one painted frame.
+    negotiatePressure();
+    if (inkAddStroke(surface, stroke)) {
+      clearLiveAfterPaint(surface, entry);
+      inkTrace("commit", {
+        kind: surface.kind,
+        space: stroke.space,
+        points: stroke.pts ? stroke.pts.length : 0,
+        color: stroke.color,
+        width: stroke.width,
+        tiles: surface.tiles ? Object.keys(surface.tiles).length : 0,
+        hostH: surface.tileHost ? (surface.tileHost.offsetHeight || 0) : 0
+      });
+      if (stroke.space && (stroke.space.indexOf("pdf:") === 0 ||
+        stroke.space.indexOf("pdfdom:") === 0)) {
+        schedulePdfWrite(surface);
+      }
+    } else if (surface.kind === "markdown" || surface.kind === "canvas" || surface.kind === "pdfembed") {
+      surface.clearLive();
+    } else {
+      surface.clearLive(entry);
+    }
+  }
+
+  function clearLiveAfterPaint(surface, entry) {
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        if (state.active && state.active.surface === surface) return;
+        try {
+          if (surface.kind === "markdown" || surface.kind === "canvas" || surface.kind === "pdfembed") surface.clearLive();
+          else surface.clearLive(entry);
+        } catch (e) {}
+      });
+    });
+  }
+
+  function bboxOf(pts) {
+    var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (var i = 0; i < pts.length; i++) {
+      x0 = Math.min(x0, pts[i][0]);
+      y0 = Math.min(y0, pts[i][1]);
+      x1 = Math.max(x1, pts[i][0]);
+      y1 = Math.max(y1, pts[i][1]);
+    }
+    return [x0, y0, x1, y1];
+  }
+
+  var liveFrame = 0;
+  function requestLiveFrame() {
+    if (liveFrame) return;
+    liveFrame = requestAnimationFrame(function () {
+      liveFrame = 0;
+      var a = state.active;
+      if (!a || a.kind !== "stroke") return;
+      if (state.latencyT0 && !state.latencyCaptured) {
+        state.lastLatency = nowMs() - state.latencyT0;
+        state.latencyCaptured = true;
+      }
+      if (a.surface.drawLiveIncremental && a.liveDrawn) {
+        a.surface.drawLiveIncremental(a.stroke, a.liveDrawn);
+        a.liveDrawn = a.stroke.pts ? a.stroke.pts.length : 0;
+      } else if (a.surface.kind === "markdown" || a.surface.kind === "canvas" || a.surface.kind === "pdfembed") {
+        a.surface.drawLive(a.stroke);
+        a.liveDrawn = a.stroke.pts ? a.stroke.pts.length : 0;
+      } else {
+        a.surface.drawLive(a.entry, a.stroke);
+        a.liveDrawn = a.stroke.pts ? a.stroke.pts.length : 0;
+      }
+    });
+  }
+
+  function scheduleRedraw() {
+    for (var i = 0; i < state.surfaces.length; i++) {
+      try { state.surfaces[i].redraw(); } catch (e) {}
+    }
+    updateToolbarState();
+  }
+
+  // Eraser: remove touched parts of strokes on one space, split into runs.
+  // History is recorded by the caller once per eraser stroke, not per move.
+  function eraseAt(surface, entry, x, y, active) {
+    var doc = docFor(surface);
+    if (!doc) return;
+    var space = inkSpaceOf(surface, entry);
+    var eraserScale = surface.kind === "pdf"
+      ? (surface.widthScaleOn(entry) || 1)
+      : ((surface.kind === "canvas" || surface.kind === "pdfembed")
+        ? (surface.widthScale() || 1) : 1);
+    var eraserPx = Number(state.eraserPx) || 12;
+    var r = eraserPx / (eraserScale || 1);
+    var r2 = r * r;
+    var changed = false;
+    var out = [];
+    for (var i = 0; i < doc.strokes.length; i++) {
+      var st = doc.strokes[i];
+      if (st.space !== space) {
+        out.push(st);
+        continue;
+      }
+      var bb = st.bbox;
+      if (bb && (x < bb[0] - r || x > bb[2] + r ||
+        y < bb[1] - r || y > bb[3] + r)) {
+        out.push(st);
+        continue;
+      }
+      var runs = [];
+      var run = [];
+      for (var j = 0; j < st.pts.length; j++) {
+        var p = st.pts[j];
+        var dx = p[0] - x, dy = p[1] - y;
+        var hit = (dx * dx + dy * dy) <= r2;
+        if (hit) {
+          if (run.length >= 2) runs.push(run);
+          run = [];
+        } else {
+          run.push(p);
+        }
+      }
+      if (run.length >= 2) runs.push(run);
+      if (runs.length === 1 && runs[0].length === st.pts.length) {
+        out.push(st);
+        continue;
+      }
+      changed = true;
+      for (var k = 0; k < runs.length; k++) {
+        var ns = {};
+        for (var sk in st) {
+          if (Object.prototype.hasOwnProperty.call(st, sk)) ns[sk] = st[sk];
+        }
+        ns.id = uid();
+        ns.pts = runs[k];
+        ns.bbox = bboxOf(ns.pts);
+        out.push(ns);
+      }
+    }
+    if (!changed) return;
+    doc.strokes = out;
+    if (active) active.changed = true;
+  }
+
+  // Palm rejection: a full-screen guard exists only while the pen is down.
+  var palmTimer = 0;
+  var palmWatchdog = 0;
+
+  function palmHide() {
+    if (palmTimer) {
+      clearTimeout(palmTimer);
+      palmTimer = 0;
+    }
+    if (palmWatchdog) {
+      clearInterval(palmWatchdog);
+      palmWatchdog = 0;
+    }
+    try {
+      // Older builds used a full-screen guard div; remove any left behind so
+      // an upgrade can never keep the touchscreen covered.
+      var el = document.getElementById(GUARD_ID);
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    } catch (e) {}
+  }
+
+  /**
+   * Last-resort recovery: a lost pointerup/cancel (id mismatch, pen lifted
+   * outside the window, engine reporting mouse-up) must never leave the guard
+   * on screen - that looks like "the touchscreen stopped working".
+   */
+  function forceReleaseActive(quiet) {
+    var a = state.active;
+    state.active = null;
+    state.penNativeActive = false;
+    try {
+      if (a) {
+        if (a.kind === "stroke" && a.stroke) {
+          a.stroke.bbox = bboxOf(a.stroke.pts);
+          finishStroke(a.surface, a.entry, a.stroke);
+        } else if (a.kind === "erase" && a.changed && a.doc && a.before) {
+          pushHistory(a.doc, a.space, a.before);
+          saveSoon(a.doc);
+        } else if (a.kind === "erase" && a.erasePts && a.surface &&
+          typeof a.surface.erasePreview === "function") {
+          for (var efi = 0; efi < a.erasePts.length; efi++) {
+            eraseAt(a.surface, a.entry, a.erasePts[efi][0], a.erasePts[efi][1], a);
+          }
+          if (a.changed && a.doc && a.before) {
+            pushHistory(a.doc, a.space, a.before);
+            saveSoon(a.doc);
+          }
+        }
+        if (a.surface) {
+          if (a.surface.kind === "markdown" || a.surface.kind === "canvas" || a.surface.kind === "pdfembed") a.surface.clearLive();
+          else a.surface.clearLive(a.entry);
+        }
+      }
+    } catch (e) {
+      warn("force release failed", e && e.message);
+    }
+    palmHide();
+    inkWritingChrome(false);
+    scheduleRedraw();
+    if (!quiet) inkStatus("手写笔状态已自动复位");
+  }
+
+  function palmWatchdogTick() {
+    if (!state.active) {
+      palmHide();
+      return;
+    }
+    var last = state.active.lastSampleAt || state.lastPenActivity || 0;
+    if (nowMs() - last > 2600) {
+      forceReleaseActive(false);
+    }
+  }
+
+  function palmOn() {
+    if (!state.palm) return;
+    state.lastPenActivity = nowMs();
+    // Palm rejection is done from the window capture listeners (touchstart /
+    // pointerdown are stopped while a pen stroke is active). Do NOT create a
+    // full-screen guard div: a lost pen-up used to leave it covering the UI,
+    // which looked like a dead touchscreen.
+    try {
+      var old = document.getElementById(GUARD_ID);
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+    } catch (e) {}
+    if (palmTimer) clearTimeout(palmTimer);
+    if (palmWatchdog) clearInterval(palmWatchdog);
+    palmWatchdog = setInterval(palmWatchdogTick, 600);
+  }
+
+  function palmOffSoon() {
+    if (palmTimer) clearTimeout(palmTimer);
+    palmTimer = setTimeout(function () {
+      palmTimer = 0;
+      palmHide();
+    }, 140);
+  }
+
+  // ---------------------------------------------------------------------
+  // Pen hover cursor (a quiet ring, not a permanent overlay)
+  // ---------------------------------------------------------------------
+  var cursorEl = null;
+
+  function cursorCanvas() {
+    if (cursorEl) return cursorEl;
+    cursorEl = document.createElement("canvas");
+    cursorEl.id = "ohsidian-ink-cursor";
+    cursorEl.style.cssText = "position:fixed;left:0;top:0;width:64px;height:64px;" +
+      "pointer-events:none;z-index:25;opacity:0;transition:opacity .08s linear";
+    document.body.appendChild(cursorEl);
+    return cursorEl;
+  }
+
+  function clearCursor(force) {
+    if (!cursorEl) return;
+    if (!force && state.active && state.active.kind === "erase") return;
+    try {
+      var ctx = cursorEl.getContext("2d");
+      ctx.clearRect(0, 0, cursorEl.width, cursorEl.height);
+      cursorEl.style.opacity = "0";
+    } catch (e) {}
+  }
+
+  function drawCursor(x, y, surface, forceEraser) {
+    var isErase = forceEraser === true || state.tool === "eraser";
+    if (!state.enabled || !state.cursorEnabled || state.tool === "pointer" ||
+      (state.active && state.active.kind !== "erase" && !forceEraser)) {
+      clearCursor();
+      return;
+    }
+    try {
+      var cv = cursorCanvas();
+      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      var size = 72;
+      var px = Math.round(size * dpr);
+      if (cv.width !== px || cv.height !== px) {
+        cv.width = px;
+        cv.height = px;
+      }
+      var ctx = cv.getContext("2d", { desynchronized: true });
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, size, size);
+      var color = isErase ? "#888" : (state.tool === "highlighter"
+        ? state.hlColor
+        : (state.colorAuto ? inkAutoColor(surface) : state.color));
+      var r = isErase ? (Number(state.eraserPx) || 12) :
+        (state.tool === "highlighter" ? Math.min(16, Math.max(6, state.hlWidth / 2)) :
+          Math.min(12, Math.max(4, state.width)));
+      var c = size / 2;
+      ctx.beginPath();
+      ctx.arc(c, c, r, 0, Math.PI * 2);
+      if (isErase) {
+        ctx.fillStyle = "rgba(128,128,128,.14)";
+        ctx.fill();
+      }
+      ctx.lineWidth = isErase ? 1.4 : 1.3;
+      ctx.strokeStyle = isErase ? "rgba(120,120,120,.95)" : color;
+      ctx.globalAlpha = isErase ? 0.9 : 0.8;
+      ctx.stroke();
+      if (!isErase) {
+        ctx.beginPath();
+        ctx.arc(c, c, 1, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.9;
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      cv.style.left = Math.round(x - size / 2) + "px";
+      cv.style.top = Math.round(y - size / 2) + "px";
+      cv.style.opacity = "0.9";
+    } catch (e) {
+      clearCursor();
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Edge-swipe guard
+  // ---------------------------------------------------------------------
+  var edgeTouch = null;
+
+  function penInputGuardActive() {
+    return !!(state.enabled && state.tool !== "pointer" &&
+      (state.active || state.penNativeActive || nowMs() - state.lastPenSeen < 1200));
+  }
+
+  /**
+   * A pen can arrive as compatibility touch/mouse events in addition to
+   * pointer events. Obsidian's mobile swipe handlers listen on those channels,
+   * so blocking only pointerdown still allowed a pen swipe to open panels.
+   * During pen activity both channels are swallowed; after 1.2s of no pen they
+   * are left alone for the hand.
+   */
+  function onPenCompatibilityBlock(ev) {
+    if (!penInputGuardActive()) return;
+    if (isInkChrome(ev.target)) return;
+    try { ev.preventDefault(); } catch (e1) {}
+    try { ev.stopPropagation(); } catch (e2) {}
+    try { ev.stopImmediatePropagation(); } catch (e3) {}
+    if (Date.now() - state.lastPenBlockLog > 900) {
+      state.lastPenBlockLog = Date.now();
+      try {
+        var t = ev.target || {};
+        inkTrace("penCompatBlocked", {
+          type: ev.type,
+          tag: t.tagName || "",
+          cls: t.className ? String(t.className).slice(0, 48) : ""
+        });
+      } catch (e4) {}
+    }
+  }
+
+  function onEdgeTouchStart(ev) {
+    if (!state.enabled || !state.blockEdge) return;
+    if (state.tool === "pointer" && !state.active && !state.penNativeActive) return;
+    if (isExcluded(ev.target)) return;
+    try {
+      var t = ev.touches && ev.touches[0];
+      if (!t) return;
+      var w = window.innerWidth || 0;
+      var edge = 48;
+      if (t.clientX > edge && t.clientX < w - edge) return;
+      edgeTouch = { x: t.clientX, y: t.clientY, id: t.identifier, blocked: false };
+    } catch (e) {}
+  }
+
+  function onEdgeTouchMove(ev) {
+    if (!edgeTouch) return;
+    if (!state.enabled || !state.blockEdge) {
+      edgeTouch = null;
+      return;
+    }
+    try {
+      var t = null;
+      var list = ev.touches || [];
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].identifier === edgeTouch.id) { t = list[i]; break; }
+      }
+      if (!t) t = list[0];
+      if (!t) return;
+      var dx = t.clientX - edgeTouch.x;
+      var dy = t.clientY - edgeTouch.y;
+      if (!edgeTouch.blocked) {
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+        if (Math.abs(dx) > Math.abs(dy)) edgeTouch.blocked = true;
+        else { edgeTouch = null; return; }
+      }
+      // Horizontal edge swipe while a pen tool is active: Obsidian's mobile
+      // sidebar gestures listen on document/body; our window capture runs
+      // first, so this keeps the stroke from waking the side panels.
+      try { ev.preventDefault(); } catch (e1) {}
+      try { ev.stopPropagation(); } catch (e2) {}
+      try { ev.stopImmediatePropagation(); } catch (e3) {}
+    } catch (e) {}
+  }
+
+  /**
+   * Pen events are not touch events, so the touch guard above cannot stop a
+   * pointer-driven sidebar gesture. Block pen starts/moves in the edge strip
+   * while a drawing tool is active; once a stroke is active the normal ink
+   * capture owns the event.
+   */
+  function onPenEdgePointer(ev) {
+    if (!state.enabled || !state.blockEdge || !ev) return;
+    if (ev.pointerType !== "pen" && ev.pointerType !== "touch") return;
+    if (state.active) return;
+    if (state.tool === "pointer" && !state.penNativeActive) return;
+    if (isExcluded(ev.target)) return;
+    var w = window.innerWidth || 0;
+    if (ev.clientX > 48 && ev.clientX < w - 48) return;
+    try { ev.preventDefault(); } catch (e1) {}
+    try { ev.stopPropagation(); } catch (e2) {}
+    try { ev.stopImmediatePropagation(); } catch (e3) {}
+  }
+
+  function onEdgeTouchEnd(ev) {    if (edgeTouch && edgeTouch.blocked) {
+      try { ev.preventDefault(); } catch (e1) {}
+      try { ev.stopPropagation(); } catch (e2) {}
+      try { ev.stopImmediatePropagation(); } catch (e3) {}
+    }
+    edgeTouch = null;
+  }
+
+  function onCursorMove(ev) {
+    if (!state.enabled || !ev) {
+      clearCursor();
+      return;
+    }
+    if (ev.pointerType !== "pen" || ev.buttons !== 0 || state.active) {
+      if (state.active && state.active.kind === "erase") return;
+      clearCursor();
+      return;
+    }
+    if (isExcluded(ev.target)) {
+      clearCursor();
+      return;
+    }
+    if (state.tool === "pointer") {
+      clearCursor();
+      return;
+    }
+    // Hover can arrive at 120Hz; the ring only needs ~60fps. This also avoids
+    // running surfaceAtEvent for every hover sample (power/CPU on tablets).
+    var cursorNow = Date.now();
+    if (cursorNow - (state.lastCursorMoveAt || 0) < 16) return;
+    state.lastCursorMoveAt = cursorNow;
+    var hit = surfaceAtEvent(ev.target);
+    if (!hit) {
+      clearCursor();
+      return;
+    }
+    drawCursor(ev.clientX, ev.clientY, hit.surface);
+  }
+
+  // ---------------------------------------------------------------------
+  // IPC with ArkTS (loopback socket owned by touch-mode.js)
+  // ---------------------------------------------------------------------
+  function sendAction(obj) {
+    try {
+      if (typeof window.__ohsidianNativeSend === "function") {
+        var ok = window.__ohsidianNativeSend(obj);
+        if (ok) {
+          state.ipcSent++;
+          state.ipcReady = true;
+        }
+        return ok;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function ensureIpc() {
+    if (window.__ohsidianNativeIpcReady === false) {
+      state.ipcReady = false;
+    }
+    if (state.ipcReady) return true;
+    if (window.__ohsidianNativeIpcReady) {
+      state.ipcReady = true;
+      return true;
+    }
+    var t = Date.now();
+    if (t - state.ipcTriedAt < 2000) return false;
+    state.ipcTriedAt = t;
+    try {
+      if (typeof window.__ohsidianNativeEnsure === "function") {
+        window.__ohsidianNativeEnsure();
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function onNativeMessage(msg) {
+    if (!msg) return;
+    state.ipcRecv++;
+    // Any line proves the socket is alive; do not wait for stylusInfo (which
+    // can be sent before this listener is attached on a fast boot).
+    state.ipcReady = true;
+    if (msg.event === "stylus") {
+      state.gestureCount++;
+      state.lastGesture = msg.kind;
+      state.lastGestureAt = Date.now();
+      handleGesture(msg.kind);
+      return;
+    }
+    if (msg.event === "stylusInfo") {
+      state.stylusInfo = {
+        supported: !!msg.supported,
+        subscribed: !!msg.subscribed,
+        error: msg.error || "",
+        pdf: !!msg.pdf
+      };
+      state.ipcReady = true;
+      negotiatePressure();
+      return;
+    }
+    if (msg.event === "penSamples") {
+      pl.push(msg);
+      return;
+    }
+    if (msg.event === "penActive") {
+      state.penNativeActive = !!msg.active;
+      state.penNativeAt = Date.now();
+      state.lastPenActivity = nowMs();
+      if (state.penNativeTimer) clearTimeout(state.penNativeTimer);
+      if (msg.active) {
+        // ArkTS sends 'up' as well, but a lost line must not leave the pen
+        // marked active forever: decay after one second of silence.
+        state.penNativeTimer = setTimeout(function () {
+          state.penNativeActive = false;
+          state.penNativeTimer = 0;
+        }, 1000);
+      }
+      return;
+    }
+    if (msg.event === "pdfInkResult") {
+      resolvePdfResult(msg);
+      return;
+    }
+  }
+
+  function handleGesture(kind) {
+    try {
+      if (document.hasFocus && !document.hasFocus()) return;
+    } catch (e) {}
+    if (!state.enabled) return;
+    inkTrace("gesture", { kind: kind, tool: state.tool });
+    // No overlay (typically Live Preview): a pen gesture is an explicit request
+    // to write, so switch to reading view and enter pen mode.
+    if (!activeSurfaceNow()) {
+      if (inkEnterReadingMode()) {
+        inkStatus(kind === "squeeze" ? "已切换到阅读视图：打开手写工具条" : "已切换到阅读视图：可以开始手写", 3200);
+        inkAfterEnterReadingMode(kind);
+        return;
+      }
+    }
+    var dbl = pref("inkDoubleTap", "wake");
+    var sq = pref("inkSqueeze", "palette");
+    if (kind === "doubleTap") {
+      if (dbl === "none") return;
+      if (!ensureInkTarget()) return;
+      var wasHidden = !barActuallyVisible();
+      if (wasHidden) {
+        expandToolbar();
+        if (state.tool === "pointer") setTool(state.lastPenTool || "pen");
+        inkStatus("手写工具条已唤醒");
+      }
+      if (dbl === "wake") {
+        if (!wasHidden) expandToolbar();
+        return;
+      }
+      if (dbl === "undo") { inkUndo(); return; }
+      if (dbl === "palette") { togglePalette(); return; }
+      // Optional legacy behavior; not the default anymore.
+      if (state.tool === "pen") { setTool("eraser"); inkStatus("橡皮"); }
+      else if (state.tool === "eraser") { setTool("pen"); inkStatus("笔"); }
+      else { setTool("pen"); inkStatus("笔"); }
+      return;
+    }
+    if (kind === "squeeze") {
+      if (sq === "none") return;
+      if (sq === "undo") { if (ensureInkTarget()) inkUndo(); return; }
+      if (sq === "pen-eraser") {
+        if (state.tool === "eraser") { setTool("pen"); inkStatus("笔"); }
+        else { setTool("eraser"); inkStatus("橡皮"); }
+        return;
+      }
+      if (ensureInkTarget()) togglePalette();
+    }
+  }
+
+  function inkAwaitSurface(source) {
+    if (state.surfaceWaitTimer) return;
+    state.surfaceWaitTries = 0;
+    state.surfaceWaitTimer = setInterval(function () {
+      if (!state.enabled) {
+        clearInterval(state.surfaceWaitTimer);
+        state.surfaceWaitTimer = 0;
+        return;
+      }
+      state.surfaceWaitTries++;
+      try { inkRefreshSurfaces(); } catch (e) {}
+      var surface = activeSurfaceNow();
+      if (surface) {
+        clearInterval(state.surfaceWaitTimer);
+        state.surfaceWaitTimer = 0;
+        try { buildToolbar(); } catch (eB) {}
+        // Only an explicit wake gesture opens the bar. A stray pen stroke on
+        // an area with no surface must not make controls pop up later.
+        if (source === "gesture" || source === "reading") expandToolbar();
+        var gesture = state.awaitGesture;
+        state.awaitGesture = null;
+        var tool = state.pendingTool || state.lastPenTool || "pen";
+        state.pendingTool = null;
+        if (gesture === "squeeze") togglePalette();
+        else setTool(tool);
+        return;
+      }
+      if (state.surfaceWaitTries >= 12) {
+        clearInterval(state.surfaceWaitTimer);
+        state.surfaceWaitTimer = 0;
+        inkStatus("手写层仍不可用：请确认笔记在阅读视图后重试", 4000);
+        inkTrace("surfaceWaitTimeout", { source: source || "" });
+      }
+    }, 250);
+  }
+
+  function ensureInkTarget() {
+    var surface = activeSurfaceNow();
+    if (!surface) {
+      inkStatus("手写层准备中…", 1500);
+      inkAwaitSurface("gesture");
+      return false;
+    }
+    if (!state.toolbarBuilt) buildToolbar();
+    return true;
+  }
+
+  /**
+   * A barrel gesture in Live Preview/editing means "I want to write": switch
+   * the current markdown leaf to reading view instead of only complaining.
+   * The plan deliberately does not overlay the CodeMirror source view.
+   */
+  function inkEnterReadingMode() {
+    try {
+      var app = state.app;
+      var leaf = app && app.workspace ? app.workspace.activeLeaf : null;
+      var view = leaf && leaf.view;
+      if (!view || view.getViewType() !== "markdown") return false;
+      if (typeof view.getMode === "function" && view.getMode() === "preview") return true;
+      if (typeof view.setState === "function") {
+        var st = typeof view.getState === "function" ? view.getState() : {};
+        st.mode = "preview";
+        view.setState(st, { history: false });
+        return true;
+      }
+      if (app.commands && app.commands.executeCommandById) {
+        return !!app.commands.executeCommandById("markdown:toggle-preview");
+      }
+    } catch (e) {
+      warn("enter reading mode failed", e && e.message);
+    }
+    return false;
+  }
+
+  function inkAfterEnterReadingMode(gestureKind) {
+    setTimeout(function () {
+      try {
+        inkRefreshSurfaces();
+        buildToolbar();
+      } catch (e) {}
+      state.awaitGesture = gestureKind || null;
+      // Do not give up after one 380ms shot: the reading view can mount later
+      // (large note, first layout, split view). Poll until it is ready.
+      inkAwaitSurface(gestureKind || "reading");
+    }, 160);
+  }
+
+  /** Switch to reading view, then apply the tool the user asked for. */
+  function inkRequestReadingMode(tool) {
+    state.pendingTool = tool || "pen";
+    if (!inkEnterReadingMode()) {
+      state.pendingTool = null;
+      inkStatus("当前笔记无法切换到阅读视图；请手动切换后重试。");      return false;
+    }
+    inkStatus("已切换到阅读视图，手写层准备中…", 3000);
+    inkAfterEnterReadingMode("pen");
+    return true;
+  }
+
+  function activeSurfaceForLeaf(leaf) {
+    for (var i = 0; i < state.surfaces.length; i++) {
+      if (state.surfaces[i].leaf === leaf) return state.surfaces[i];
+    }
+    return null;
+  }
+
+  function activeSurfaceNow() {
+    var app = state.app;
+    var leaf = app && app.workspace ? app.workspace.activeLeaf : null;
+    if (leaf) {
+      var s = activeSurfaceForLeaf(leaf);
+      return s || null;
+    }
+    // Only when there is no active leaf at all (boot, popout teardown) fall
+    // back to the first mounted surface.
+    return state.surfaces.length ? state.surfaces[0] : null;
+  }
+
+  /** The active leaf is a markdown note (reading or editing). */
+  function activeMarkdownLeaf() {
+    var app = state.app;
+    var leaf = app && app.workspace ? app.workspace.activeLeaf : null;
+    if (!leaf || !leaf.view || typeof leaf.view.getViewType !== "function") return null;
+    return leaf.view.getViewType() === "markdown" ? leaf : null;
+  }
+
+  /** Any view that can host ink, including Canvas/PDF before a surface exists. */
+  function activeInkLeaf() {
+    var app = state.app;
+    var leaf = app && app.workspace ? app.workspace.activeLeaf : null;
+    if (!leaf || !leaf.view || typeof leaf.view.getViewType !== "function") return null;
+    var t = leaf.view.getViewType();
+    return (t === "markdown" || t === "pdf" || t === "canvas") ? leaf : null;
+  }
+
+  // ---------------------------------------------------------------------
+  // PDF write-back
+  // ---------------------------------------------------------------------
+  function resolvePdfResult(msg) {
+    var pending = state.pdfPending[msg.seq];
+    if (!pending) return;
+    delete state.pdfPending[msg.seq];
+    if (pending.timer) clearTimeout(pending.timer);
+    try {
+      pending.resolve(msg);
+    } catch (e) {}
+  }
+
+  function pdfWritePage(rel, abs, vaultRoot, page, strokes, mode, replace, removeIds) {
+    return new Promise(function (resolve) {
+      if (!ensureIpc()) {
+        resolve({ ok: false, error: "IPC 未连接" });
+        return;
+      }
+      var seq = state.seq++;
+      state.pdfPending[seq] = {
+        resolve: resolve,
+        timer: setTimeout(function () {
+          if (state.pdfPending[seq]) {
+            delete state.pdfPending[seq];
+            resolve({ ok: false, error: "写入超时" });
+          }
+        }, 20000)
+      };
+      var ok = sendAction({
+        action: "pdfInk",
+        seq: seq,
+        rel: rel,
+        vaultRoot: vaultRoot,
+        path: abs,
+        page: page,
+        inkMode: mode || "vector",
+        replace: replace === true,
+        removeIds: removeIds || [],
+        strokes: strokes
+      });
+      if (!ok) {
+        delete state.pdfPending[seq];
+        resolve({ ok: false, error: "IPC 发送失败" });
+      }
+    });
+  }
+
+  async function inkWritePdf(surface, auto, pageOverride) {
+    var s = surface || state.activeSurface || activeSurfaceNow();
+    var isPdf = s && s.kind === "pdf";
+    var isDom = s && s.kind === "pdfembed" && s.pdfDom;
+    if (!s || (!isPdf && !isDom)) {
+      if (!auto) inkStatus("请先打开一个 PDF");
+      return;
+    }
+    if (state.pdfInFlight) {
+      state.pdfAutoDirty = true;
+      return;
+    }
+    var file = s.leaf && s.leaf.view ? s.leaf.view.file : null;
+    if (!file) return;
+    var ad = adapter();
+    if (!ad || typeof ad.getFullPath !== "function") return;
+    var abs = "";
+    var vaultRoot = "";
+    try { abs = ad.getFullPath(file.path); } catch (e) { abs = ""; }
+    try {
+      if (typeof ad.getBasePath === "function") vaultRoot = ad.getBasePath();
+      else vaultRoot = ad.getFullPath("");
+    } catch (e2) { vaultRoot = ""; }
+    if (!abs || !vaultRoot) return;
+    var page = -1;
+    var space = "";
+    if (isPdf) {
+      var cur = -1;
+      try {
+        if (s.currentSpace && s.currentSpace.indexOf("pdf:") === 0) {
+          cur = parseInt(s.currentSpace.slice(4), 10);
+        }
+      } catch (eCur) {}
+      if (!(cur >= 0) && s.viewer && s.viewer.currentPageNumber > 0) {
+        cur = s.viewer.currentPageNumber - 1;
+      }
+      if (!(cur >= 0) && typeof pageOverride === "number") cur = pageOverride;
+      page = cur;
+      space = "pdf:" + page;
+    } else {
+      page = parseInt(s.pageEl.dataset.pageNumber || "1", 10) - 1;
+      space = s.space;
+    }
+    if (!(page >= 0)) return;
+    var doc = docFor(s);
+    if (!doc || doc._loading) return;
+    var list = [];
+    var removeIds = [];
+    var totalPts = 0;
+    for (var i = 0; i < doc.strokes.length; i++) {
+      var st = doc.strokes[i];
+      if (st.space !== space) continue;
+      if (st.id) removeIds.push(st.id);
+      // Include baked strokes too: replace mode removes the old annotations,
+      // so skipping them here would delete ink that is still in the sidecar.
+      list.push(st);
+      totalPts += st.pts ? st.pts.length : 0;
+    }
+    if (totalPts > 12000 || list.length > 400) {
+      if (!auto) inkStatus("本页墨迹过多，直接写入会超出单条 IPC 限制；请分页或清除后再试", 5000);
+      return;
+    }
+    var payload = [];
+    for (var j = 0; j < list.length; j++) {
+      var st2 = list[j];
+      var pts = [];
+      for (var k = 0; k < st2.pts.length; k++) pts.push([st2.pts[k][0], st2.pts[k][1]]);
+      payload.push({
+        id: st2.id,
+        pts: pts,
+        color: hexToInt(st2.color),
+        width: st2.width,
+        opacity: st2.opacity
+      });
+    }
+    state.pdfInFlight = true;
+    state.pdfAutoDirty = false;
+    try {
+      var res = await pdfWritePage(file.path, abs, vaultRoot, page,
+        payload, isDom ? "normalized" : "vector", true, removeIds);
+      if (!res || !res.ok) {
+        if (!auto) notice("写入 PDF 失败：" + ((res && res.error) || "未知错误"), 7000);
+        else {
+          state.pdfAutoFail = (state.pdfAutoFail || 0) + 1;
+          if (state.pdfAutoFail <= 2) inkStatus("PDF 自动写入失败：" + ((res && res.error) || "未知错误"), 4500);
+        }
+        return;
+      }
+      state.pdfAutoFail = 0;
+      if (res.backup) state.pdfBackup = res.backup;
+      for (var q = 0; q < list.length; q++) list[q].written = true;
+      await saveDoc(doc);
+      if (!auto) inkStatus("已写入 PDF 第 " + (page + 1) + " 页；原始文件已备份", 4500);
+      else inkStatus("已直接写入 PDF 第 " + (page + 1) + " 页（原文件已备份）", 1800);
+    } catch (eW) {
+      if (!auto) notice("写入 PDF 异常：" + ((eW && eW.message) || eW), 6000);
+    } finally {
+      state.pdfInFlight = false;
+      if (state.pdfAutoDirty) {
+        state.pdfAutoDirty = false;
+        schedulePdfWrite(s);
+      }
+    }
+  }
+
+  function schedulePdfWrite(surface) {
+    var autoOn = pref("inkPdfAuto", true);
+    if (autoOn === false || autoOn === "0" || autoOn === "false") return;
+    if (!surface) return;
+    var isPdf = surface.kind === "pdf";
+    var isDom = surface.kind === "pdfembed" && surface.pdfDom;
+    if (!isPdf && !isDom) return;
+    var prevSurface = state.pdfAutoSurface;
+    if (prevSurface && prevSurface !== surface && state.pdfAutoTimer) {
+      clearTimeout(state.pdfAutoTimer);
+      state.pdfAutoTimer = 0;
+      var prevOk = prevSurface.kind === "pdfembed"
+        ? !!(prevSurface.pageEl && prevSurface.pageEl.isConnected)
+        : !!(prevSurface.leaf && prevSurface.leaf.view);
+      if (prevOk) inkWritePdf(prevSurface, true);
+    }
+    state.pdfAutoSurface = surface;
+    if (state.pdfAutoTimer) clearTimeout(state.pdfAutoTimer);
+    state.pdfAutoTimer = setTimeout(function () {
+      state.pdfAutoTimer = 0;
+      var s2 = state.pdfAutoSurface;
+      if (!s2) return;
+      if (s2.kind === "pdfembed" && (!s2.pageEl || !s2.pageEl.isConnected)) return;
+      if (s2.kind === "pdf" && (!s2.leaf || !s2.leaf.view || !s2.leaf.view.containerEl.isConnected)) return;
+      if (state.active) {
+        schedulePdfWrite(s2);
+        return;
+      }
+      inkWritePdf(s2, true);
+    }, 3000);
+  }
+
+  function flushPdfWrite() {
+    var autoOn = pref("inkPdfAuto", true);
+    if (autoOn === false || autoOn === "0" || autoOn === "false") return;
+    if (state.pdfAutoTimer) {
+      clearTimeout(state.pdfAutoTimer);
+      state.pdfAutoTimer = 0;
+    }
+    var s = state.pdfAutoSurface;
+    if (!s) return;
+    if (s.kind === "pdfembed" && (!s.pageEl || !s.pageEl.isConnected)) return;
+    if (s.kind === "pdf" && (!s.leaf || !s.leaf.view)) return;
+    inkWritePdf(s, true);
+  }
+
+  function inkRestorePdf(surface) {
+    var s = surface || state.activeSurface || activeSurfaceNow();
+    if (!s || (s.kind !== "pdf" && !(s.kind === "pdfembed" && s.pdfDom))) {
+      inkStatus("请先打开一个 PDF");
+      return;
+    }
+    if (state.pdfInFlight) {
+      inkStatus("正在写入 PDF，请稍后再恢复");
+      return;
+    }
+    if (state.pdfAutoTimer) {
+      clearTimeout(state.pdfAutoTimer);
+      state.pdfAutoTimer = 0;
+    }
+    state.pdfAutoDirty = false;
+    state.pdfAutoSurface = null;
+    var file = s.leaf && s.leaf.view ? s.leaf.view.file : null;
+    var ad = adapter();
+    if (!file || !ad) return;
+    var abs = "";
+    var root = "";
+    try { abs = ad.getFullPath(file.path); } catch (e) {}
+    try { root = typeof ad.getBasePath === "function" ? ad.getBasePath() : ad.getFullPath(""); } catch (e2) {}
+    if (!abs || !root) return;
+    var seq = state.seq++;
+    state.pdfPending[seq] = {
+      resolve: function (msg) {
+        if (msg.ok) {
+          inkStatus("已恢复 PDF 原始备份", 4000);
+          try {
+            if (s.leaf.view && typeof s.leaf.view.loadFile === "function") {
+              var r = s.leaf.view.loadFile(s.leaf.view.file);
+              if (r && typeof r.catch === "function") r.catch(function () {});
+            }
+          } catch (eR) {}
+        } else {
+          notice("恢复失败：" + (msg.error || "未知错误"), 6000);
+        }
+      },
+      timer: setTimeout(function () {
+        if (state.pdfPending[seq]) {
+          delete state.pdfPending[seq];
+          notice("恢复超时", 5000);
+        }
+      }, 20000)
+    };
+    var ok = sendAction({
+      action: "pdfInkRestore",
+      seq: seq,
+      rel: file.path,
+      vaultRoot: root,
+      path: abs
+    });
+    if (!ok) {
+      delete state.pdfPending[seq];
+      notice("恢复 IPC 发送失败", 5000);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // SVG export
+  // ---------------------------------------------------------------------
+  function svgPathFor(stroke, surfaceInfo) {
+    var pts = [];
+    for (var i = 0; i < stroke.pts.length; i++) {
+      var p = stroke.pts[i];
+      var xy = surfaceInfo.toCanvas(p[0], p[1]);
+      if (xy) pts.push({ x: xy[0], y: xy[1], p: p[2] });
+    }
+    if (!pts.length) return "";
+    var sm = smoothPoints(pts);
+    var d = "";
+    var scale = surfaceInfo.scale || 1;
+    if (sm.length === 1) {
+      var r = Math.max(0.35, widthFor(stroke, sm[0].p) * scale) / 2;
+      return "M" + (sm[0].x - r) + " " + sm[0].y + "a" + r + " " + r + " 0 1 0 " + (2 * r) + " 0a" + r + " " + r + " 0 1 0 " + (-2 * r) + " 0";
+    }
+    for (var j = 0; j < sm.length - 1; j++) {
+      var p0 = sm[j], p1 = sm[j + 1];
+      var dx = p1.x - p0.x, dy = p1.y - p0.y;
+      var len = Math.sqrt(dx * dx + dy * dy);
+      if (len < 0.0001) continue;
+      var nx = -dy / len, ny = dx / len;
+      var w0 = Math.max(0.35, widthFor(stroke, p0.p) * scale) / 2;
+      var w1 = Math.max(0.35, widthFor(stroke, p1.p) * scale) / 2;
+      d += "M" + (p0.x + nx * w0) + " " + (p0.y + ny * w0) +
+        "L" + (p1.x + nx * w1) + " " + (p1.y + ny * w1) +
+        "L" + (p1.x - nx * w1) + " " + (p1.y - ny * w1) +
+        "L" + (p0.x - nx * w0) + " " + (p0.y - ny * w0) + "Z";
+    }
+    for (var k = 0; k < sm.length; k++) {
+      var rr = Math.max(0.35, widthFor(stroke, sm[k].p) * scale) / 2;
+      d += "M" + (sm[k].x - rr) + " " + sm[k].y +
+        "a" + rr + " " + rr + " 0 1 0 " + (2 * rr) + " 0a" + rr + " " + rr + " 0 1 0 " + (-2 * rr) + " 0";
+    }
+    return d;
+  }
+
+  async function inkExportSvg(surface) {
+    var s = surface || activeSurfaceNow();
+    if (!s) {
+      inkStatus("当前视图没有手写层");
+      return;
+    }
+    var doc = docFor(s);
+    if (!doc) return;
+    var ad = adapter();
+    if (!ad) return;
+    await ensureDirs();
+    var file = s.leaf.view.file;
+    var base = safeName(file.path);
+    var parts = [];
+    var width = 0, height = 0;
+    if (s.kind === "markdown") {
+      var r = s.sizer.getBoundingClientRect();
+      width = s.sizer.scrollWidth || r.width;
+      height = s.sizer.scrollHeight || r.height;
+      for (var i = 0; i < doc.strokes.length; i++) {
+        var st = doc.strokes[i];
+        if (st.space !== "md:abs") continue;
+        var d = svgPathFor(st, { toCanvas: function (x, y) { return [x, y]; }, scale: 1 });
+        if (d) parts.push('<path d="' + d + '" fill="' + st.color + '" fill-opacity="' + (st.tool === "highlighter" ? st.opacity : 1) + '"/>');
+      }
+    } else if (s.kind === "canvas") {
+      inkStatus("Canvas 墨迹随 .canvas 侧车保存；暂不支持导出 SVG");
+      return;
+    } else if (s.kind === "pdfembed") {
+      inkStatus("内嵌 PDF 墨迹随笔记侧车保存；暂不支持导出 SVG");
+      return;
+    } else {
+      var pageIdx = parseInt((s.currentSpace || "pdf:0").slice(4), 10) || 0;
+      var entry = s.pages[pageIdx];
+      if (!entry) {
+        inkStatus("请先翻到要导出的页");
+        return;
+      }
+      width = entry.w;
+      height = entry.h;
+      for (var j = 0; j < doc.strokes.length; j++) {
+        var st2 = doc.strokes[j];
+        if (st2.space !== entry.space) continue;
+        var d2 = svgPathFor(st2, {
+          toCanvas: function (e, vp) {
+            return function (x, y) {
+              try {
+                var p = vp.convertToViewportPoint(x, y);
+                return [p[0], p[1]];
+              } catch (err) {
+                return [x, y];
+              }
+            };
+          }(entry, entry.viewport),
+          scale: entry.viewport.scale || 1
+        });
+        if (d2) parts.push('<path d="' + d2 + '" fill="' + st2.color + '" fill-opacity="' + (st2.tool === "highlighter" ? st2.opacity : 1) + '"/>');
+      }
+    }
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + Math.round(width) + '" height="' +
+      Math.round(height) + '" viewBox="0 0 ' + width + " " + height + '">' + parts.join("") + "</svg>";
+    var dest = EXPORTS + "/" + base + "-" + Date.now().toString(36) + ".svg";
+    try {
+      await ad.write(dest + ".tmp", svg);
+      await ad.rename(dest + ".tmp", dest);
+      inkStatus("已导出 " + dest, 5000);
+    } catch (e) {
+      notice("导出失败：" + (e && e.message));
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Toolbar
+  // ---------------------------------------------------------------------
+  function injectCss() {
+    if (document.getElementById(CSS_ID)) return;
+    var css = [
+      // Quiet by default: a single muted nib at the page edge; the tool bar
+      // only exists while the user asked for it.
+      "#" + TOOLBAR_ID + "{position:fixed;right:14px;bottom:calc(var(--keyboard-height,0px) + var(--safe-area-inset-bottom,0px) + 64px);" +
+        "z-index:60;display:flex;align-items:flex-end;flex-direction:row-reverse;gap:8px;pointer-events:none;" +
+        "font-size:14px;user-select:none;touch-action:none;transition:opacity .12s ease}",
+      "#" + TOOLBAR_ID + "[data-pos=bl]{left:14px;right:auto;flex-direction:row}",
+      "#" + TOOLBAR_ID + ".is-hidden{display:none}",
+      "#" + TOOLBAR_ID + ".is-writing{opacity:0;pointer-events:none}",
+      "#" + TOOLBAR_ID + ".ohsidian-ink-mobile{bottom:calc(var(--keyboard-height,0px) + var(--safe-area-inset-bottom,0px) + 68px)}",
+      "#" + TOOLBAR_ID + " .ohsidian-ink-nib{pointer-events:auto;width:44px;height:44px;padding:0;border-radius:50%;" +
+        "border:1px solid var(--background-modifier-border);background:var(--background-secondary);" +
+        "color:var(--text-muted);opacity:.72;font-size:20px;line-height:42px;cursor:pointer;box-shadow:var(--shadow-s,0 1px 3px rgba(0,0,0,.12));" +
+        "display:flex;align-items:center;justify-content:center;transition:opacity .15s ease,color .15s ease}",
+      "#" + TOOLBAR_ID + " .ohsidian-ink-nib:hover{opacity:1;color:var(--text-normal)}",
+      "#" + TOOLBAR_ID + " .ohsidian-ink-nib svg{width:22px;height:22px}",
+      "#" + TOOLBAR_ID + " .ohsidian-ink-bar{pointer-events:auto;display:flex;align-items:center;gap:3px;" +
+        "padding:5px 7px;border-radius:999px;background:var(--background-secondary);" +
+        "border:1px solid var(--background-modifier-border);box-shadow:var(--shadow-s,0 1px 3px rgba(0,0,0,.12));opacity:.97;" +
+        "max-width:calc(100vw - 76px);overflow-x:auto;touch-action:pan-x;scrollbar-width:none}",
+      "#" + TOOLBAR_ID + ".is-collapsed .ohsidian-ink-bar{display:none}",
+      "#" + TOOLBAR_ID + " button{min-width:40px;height:40px;padding:0;border:0;border-radius:20px;" +
+        "background:transparent;color:var(--text-muted);cursor:pointer;font-size:19px;line-height:40px;" +
+        "display:inline-flex;align-items:center;justify-content:center}",
+      "#" + TOOLBAR_ID + " button svg{width:21px;height:21px}",
+      "#" + TOOLBAR_ID + " button:hover{color:var(--text-normal);background:var(--background-modifier-hover)}",
+      "#" + TOOLBAR_ID + " button.is-active{color:var(--interactive-accent);box-shadow:inset 0 0 0 1.5px var(--interactive-accent)}",
+      "#" + TOOLBAR_ID + " .ink-sep{width:1px;height:22px;background:var(--background-modifier-border);margin:0 3px;flex:none}",
+      "#" + TOOLBAR_ID + " .ink-swatch{width:24px;height:24px;border-radius:12px;border:1px solid var(--background-modifier-border);cursor:pointer;flex:none}",
+      "#" + TOOLBAR_ID + " .ink-swatch.is-active{box-shadow:0 0 0 2.5px var(--interactive-accent)}",
+      "#" + TOOLBAR_ID + " input[type=range]{width:84px;height:26px;flex:none}",
+      "#" + TOOLBAR_ID + " .ink-badge{font-size:11px;color:var(--text-faint);padding:0 5px;max-width:84px;" +
+        "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:none}",
+      "#ohsidian-ink-toast{position:absolute;right:0;bottom:52px;max-width:280px;padding:5px 10px;border-radius:7px;" +
+        "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
+        "color:var(--text-muted);font-size:12px;line-height:18px;opacity:0;transform:translateY(2px);" +
+        "transition:opacity .12s ease,transform .12s ease;pointer-events:none;white-space:nowrap;" +
+        "overflow:hidden;text-overflow:ellipsis}",
+      "#" + TOOLBAR_ID + "[data-pos=bl] #ohsidian-ink-toast{right:auto;left:0}",
+      "#ohsidian-ink-toast.is-visible{opacity:.96;transform:none}",
+      "#" + CLEAR_ID + "{position:fixed;right:14px;bottom:calc(var(--keyboard-height,0px) + var(--safe-area-inset-bottom,0px) + 124px);" +
+        "z-index:70;display:none;width:228px;padding:10px 12px 9px;border-radius:11px;" +
+        "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
+        "box-shadow:var(--shadow-s,0 2px 10px rgba(0,0,0,.16));color:var(--text-normal)}",
+      "#" + CLEAR_ID + "[data-pos=bl]{left:14px;right:auto}",
+      "#" + CLEAR_ID + " .ink-clear-title{font-size:12px;line-height:17px;color:var(--text-muted);margin-bottom:5px}",
+      "#" + CLEAR_ID + " .ink-clear-track{position:relative;width:100%;height:26px;margin:2px 0 0;border-radius:13px;" +
+        "background:var(--background-modifier-border);overflow:hidden;touch-action:none}",
+      "#" + CLEAR_ID + " .ink-clear-fill{position:absolute;left:0;top:0;bottom:0;width:0%;" +
+        "background:var(--interactive-accent);opacity:.35;pointer-events:none}",
+      "#" + CLEAR_ID + " .ink-clear-thumb{position:absolute;left:0;top:2px;width:22px;height:22px;margin-left:-11px;" +
+        "border-radius:50%;background:var(--interactive-accent);box-shadow:0 1px 3px rgba(0,0,0,.2);pointer-events:none}",
+      "#" + CLEAR_ID + " .ink-clear-hint{font-size:11px;line-height:16px;color:var(--text-faint);margin-top:3px}",
+      "#" + MENU_ID + "{position:fixed;right:14px;bottom:calc(var(--keyboard-height,0px) + 124px);z-index:65;" +
+        "display:none;flex-direction:column;min-width:210px;padding:6px;border-radius:11px;" +
+        "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
+        "box-shadow:var(--shadow-s,0 2px 10px rgba(0,0,0,.16))}",
+      "#" + MENU_ID + "[data-pos=bl]{left:14px;right:auto}",
+      "#" + MENU_ID + ".ohsidian-ink-mobile{bottom:calc(var(--keyboard-height,0px) + 124px)}",
+      "#" + MENU_ID + ".is-open{display:flex}",
+      "#" + MENU_ID + " button{min-height:42px;text-align:left;padding:9px 11px;border:0;border-radius:8px;background:transparent;" +
+        "color:var(--text-normal);cursor:pointer;font-size:14px;line-height:22px}",
+      "#" + MENU_ID + " button:hover{background:var(--background-modifier-hover)}",
+      "canvas.ohsidian-ink-base,canvas.ohsidian-ink-live{position:absolute;left:0;top:0;pointer-events:none}",
+      "canvas.ohsidian-ink-base{z-index:5}canvas.ohsidian-ink-live{z-index:6}",
+      "canvas.ohsidian-ink-pdf{position:absolute;left:0;top:0;pointer-events:none;z-index:4}",
+      "#" + TOOLBAR_ID + " .ohsidian-ink-nib,#" + TOOLBAR_ID + " .ohsidian-ink-bar," +
+        "#" + TOOLBAR_ID + " button,#" + TOOLBAR_ID + " .ink-swatch{touch-action:none}",
+      "body.ohsidian-ink-pen{cursor:crosshair}",
+      "#" + TOOLBAR_ID + ".is-glass .ohsidian-ink-bar,#" + TOOLBAR_ID + ".is-glass .ohsidian-ink-nib," +
+        "#" + MENU_ID + ".is-glass,#" + CLEAR_ID + ".is-glass{" +
+        "background:color-mix(in srgb,var(--background-secondary) 72%,transparent);" +
+        "backdrop-filter:blur(18px) saturate(1.25);-webkit-backdrop-filter:blur(18px) saturate(1.25)}",
+      "body.ohsidian-ink-reduce-motion #" + TOOLBAR_ID + " *,body.ohsidian-ink-reduce-motion #" + MENU_ID + " *," +
+        "body.ohsidian-ink-reduce-motion #" + CLEAR_ID + " *{transition:none!important;animation:none!important}"
+    ].join("\n");
+    var el = document.createElement("style");
+    el.id = CSS_ID;
+    el.textContent = css;
+    (document.head || document.documentElement).appendChild(el);
+  }
+
+  function toolbarEl() {
+    return document.getElementById(TOOLBAR_ID);
+  }
+
+  function inkIcon(name) {
+    var paths = {
+      pointer: '<path d="M4 3l7.5 17 2.2-6.3L20 11.5 4 3z"/>',
+      pen: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/>',
+      highlighter: '<path d="M9 11l-5 5v4h4l5-5"/><path d="M14 4l6 6-4 4-6-6 4-4z"/>',
+      eraser: '<path d="M7 21h13"/><path d="M5 15l6-6 5 5-6 6H6l-1-5z"/>',
+      undo: '<path d="M9 14l-4-4 4-4"/><path d="M5 10h9a5 5 0 010 10h-3"/>',
+      redo: '<path d="M15 14l4-4-4-4"/><path d="M19 10h-9a5 5 0 000 10h3"/>',
+      more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
+      collapse: '<path d="M9 18l6-6-6-6"/>',
+      nib: '<path d="M12 2l5 9-5 11-5-11 5-9z"/><path d="M12 9v6"/>'
+    };
+    var body = paths[name] || paths.pen;
+    return '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + body + '</svg>';
+  }
+
+  /**
+   * Long-press without breaking the normal click. The element's click handler
+   * must check `el._inkLongPress` and skip the action after a long press.
+   */
+  function inkBindLongPress(el, fn, delay) {
+    var timer = 0;
+    var sx = 0;
+    var sy = 0;
+    var stop = function () {
+      if (timer) {
+        clearTimeout(timer);
+        timer = 0;
+      }
+    };
+    el.addEventListener("pointerdown", function (e) {
+      el._inkLongPress = false;
+      sx = e.clientX;
+      sy = e.clientY;
+      stop();
+      timer = setTimeout(function () {
+        timer = 0;
+        el._inkLongPress = true;
+        try { fn(e); } catch (e1) {}
+      }, delay || 560);
+    }, true);
+    el.addEventListener("pointermove", function (e) {
+      if (!timer) return;
+      var dx = e.clientX - sx;
+      var dy = e.clientY - sy;
+      if (dx * dx + dy * dy > 100) stop();
+    }, true);
+    var cancel = function () { stop(); };
+    el.addEventListener("pointerup", cancel, true);
+    el.addEventListener("pointercancel", cancel, true);
+    el.addEventListener("pointerleave", cancel, true);
+  }
+
+  function inkBindTap(el, fn) {
+    var last = 0;
+    el.addEventListener("pointerdown", function (e) {
+      el._inkDown = true;
+      el._inkMoved = false;
+      el._inkX = e.clientX;
+      el._inkY = e.clientY;
+      try { e.stopPropagation(); } catch (e1) {}
+    }, true);
+    el.addEventListener("pointermove", function (e) {
+      if (!el._inkDown) return;
+      var dx = e.clientX - (el._inkX || 0);
+      var dy = e.clientY - (el._inkY || 0);
+      if (dx * dx + dy * dy > 64) {
+        el._inkMoved = true;
+        // Suppress the synthetic click that follows a drag that started on a
+        // control. Without this, a horizontal pen stroke starting on the nib
+        // or toolbar toggled the control instead of doing nothing.
+        last = Date.now();
+      }
+    }, true);
+    el.addEventListener("pointerup", function (e) {
+      if (!el._inkDown) return;
+      el._inkDown = false;
+      if (el._inkMoved) {
+        el._inkMoved = false;
+        last = Date.now();
+        return;
+      }
+      el._inkMoved = false;
+      if (e.pointerType === "mouse") return;
+      // Pen/touch: do not wait for the synthetic click. On the HarmonyOS
+      // web engine a pen tap can occasionally lose the click when the DOM
+      // changes between down and up; firing on pointerup makes the control
+      // deterministic, and the click below is suppressed.
+      last = Date.now();
+      try { e.preventDefault(); } catch (e1) {}
+      try { fn(e); } catch (e2) {}
+    }, true);
+    el.addEventListener("pointercancel", function () {
+      el._inkDown = false;
+      el._inkMoved = false;
+    }, true);
+    el.addEventListener("click", function (e) {
+      if (Date.now() - last < 600) return;
+      try { e.preventDefault(); e.stopPropagation(); } catch (e1) {}
+      try { fn(e); } catch (e2) {}
+    });
+  }
+
+  function clearPanelEl() {
+    var el = document.getElementById(CLEAR_ID);
+    if (el) return el;
+    el = document.createElement("div");
+    el.id = CLEAR_ID;
+    el.innerHTML =
+      '<div class="ink-clear-title">滑动清除本页墨迹</div>' +
+      '<div class="ink-clear-track" role="slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="滑动清除本页">' +
+      '<div class="ink-clear-fill"></div><div class="ink-clear-thumb"></div></div>' +
+      '<div class="ink-clear-hint">向右滑到底并松手</div>';
+    document.body.appendChild(el);
+    var track = el.querySelector(".ink-clear-track");
+    var fill = el.querySelector(".ink-clear-fill");
+    var thumb = el.querySelector(".ink-clear-thumb");
+    var dragging = false;
+    var raf = 0;
+    var pendingX = 0;
+    var apply = function () {
+      raf = 0;
+      var r = track.getBoundingClientRect();
+      var pct = Math.max(0, Math.min(1, (pendingX - r.left) / Math.max(1, r.width)));
+      el._pct = pct;
+      if (fill) fill.style.width = (pct * 100) + "%";
+      if (thumb) thumb.style.left = (pct * 100) + "%";
+      track.setAttribute("aria-valuenow", String(Math.round(pct * 100)));
+      if (el._cleared) return;
+      var hint = el.querySelector(".ink-clear-hint");
+      if (pct >= 0.9) {
+        el._cleared = true;
+        if (hint) hint.textContent = "已清除本页";
+        var s = state.activeSurface || activeSurfaceNow();
+        if (s && inkClearSpace(s)) inkStatus("已清除本页墨迹");
+        else if (hint) hint.textContent = "当前没有可清除的墨迹";
+        setTimeout(hideClearPanel, 520);
+      } else if (hint) {
+        hint.textContent = pct > 0 ? "继续向右滑到底" : "向右滑到底并松手";
+      }
+    };
+    var schedule = function (x) {
+      pendingX = x;
+      if (!raf) raf = requestAnimationFrame(apply);
+    };
+    track.addEventListener("pointerdown", function (e) {
+      if (el._cleared) return;
+      dragging = true;
+      try { track.setPointerCapture(e.pointerId); } catch (e1) {}
+      schedule(e.clientX);
+      try { e.preventDefault(); e.stopPropagation(); } catch (e2) {}
+    }, true);
+    track.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      schedule(e.clientX);
+      try { e.preventDefault(); e.stopPropagation(); } catch (e1) {}
+    }, true);
+    var endDrag = function (e) {
+      if (!dragging) return;
+      dragging = false;
+      try { track.releasePointerCapture(e.pointerId); } catch (e1) {}
+      schedule(e.clientX);
+    };
+    track.addEventListener("pointerup", endDrag, true);
+    track.addEventListener("pointercancel", function (e) {
+      dragging = false;
+      try { track.releasePointerCapture(e.pointerId); } catch (e1) {}
+    }, true);
+    window.addEventListener("pointerdown", function (e) {
+      var p = document.getElementById(CLEAR_ID);
+      if (!p || p.style.display === "none") return;
+      if (Date.now() - (p._openedAt || 0) < 150) return;
+      if (e.target && (e.target.closest("#" + CLEAR_ID) ||
+        e.target.closest("#" + TOOLBAR_ID))) return;
+      hideClearPanel();
+    }, true);
+    return el;
+  }
+
+  function showClearPanel() {
+    var el = clearPanelEl();
+    var hint = el.querySelector(".ink-clear-hint");
+    var fill = el.querySelector(".ink-clear-fill");
+    var thumb = el.querySelector(".ink-clear-thumb");
+    var track = el.querySelector(".ink-clear-track");
+    el._cleared = false;
+    el._pct = 0;
+    el._openedAt = Date.now();
+    el.style.display = "block";
+    applyUiEffects();
+    // Anchor the popover to the eraser button instead of the far corner.
+    try {
+      var btn = document.querySelector("#" + TOOLBAR_ID + " button[data-act=eraser]");
+      if (btn) {
+        var br = btn.getBoundingClientRect();
+        var pw = el.offsetWidth || 228;
+        var ph = el.offsetHeight || 92;
+        var left = Math.max(8, Math.min(br.left + br.width / 2 - pw / 2,
+          (window.innerWidth || 1024) - pw - 8));
+        var top = br.top - ph - 10;
+        if (top < 8) top = br.bottom + 10;
+        el.style.left = Math.round(left) + "px";
+        el.style.top = Math.round(top) + "px";
+        el.style.right = "auto";
+        el.style.bottom = "auto";
+      }
+    } catch (ePos) {}
+    if (fill) fill.style.width = "0%";
+    if (thumb) thumb.style.left = "0%";
+    if (track) track.setAttribute("aria-valuenow", "0");
+    if (hint) hint.textContent = "向右滑到底并松手";
+    inkStatus("长按/双击橡皮：滑到底清除本页", 2200);
+  }
+
+  function hideClearPanel() {
+    var el = document.getElementById(CLEAR_ID);
+    if (el) el.style.display = "none";
+  }
+
+  function buildToolbar() {
+    if (state.toolbarBuilt) return;
+    state.toolbarBuilt = true;
+    injectCss();
+    var root = document.createElement("div");
+    root.id = TOOLBAR_ID;
+    root.setAttribute("data-pos", state.barPos);
+    root.classList.add("is-collapsed");
+    root.classList.add("is-hidden");
+    var mobileChrome = false;
+    try {
+      mobileChrome = document.body.classList.contains("is-mobile") ||
+        document.body.classList.contains("is-tablet");
+    } catch (eMobile) {}
+    if (mobileChrome) root.classList.add("ohsidian-ink-mobile");
+    // Nib: the only permanent visual event. Quiet, muted, at the page edge.
+    var nib = document.createElement("button");
+    nib.type = "button";
+    nib.className = "ohsidian-ink-nib";
+    nib.setAttribute("data-act", "nib");
+    nib.setAttribute("aria-label", "手写工具");
+    nib.setAttribute("aria-expanded", "false");
+    nib.title = "手写";
+    nib.innerHTML = inkIcon("nib");
+    inkBindTap(nib, function () { onToolbarAction("nib"); });
+    var bar = document.createElement("div");
+    bar.className = "ohsidian-ink-bar";
+    var mkBtn = function (act, label, title, cls) {
+      var b = document.createElement("button");
+      var lastEraserClick = 0;
+      b.setAttribute("data-act", act);
+      b.innerHTML = inkIcon(act);
+      b.title = title || label;
+      b.setAttribute("aria-label", title || label);
+      if (cls) b.className = cls;
+      b.addEventListener("pointerdown", function (e) {
+        // Do NOT preventDefault: on some touch stacks that suppresses the
+        // following click and the toolbar goes dead. The window capture
+        // already ignores toolbar targets, so stopping propagation is enough.
+        try { e.stopPropagation(); } catch (e1) {}
+      }, true);
+      b.addEventListener("click", function (e) {
+        try { e.preventDefault(); e.stopPropagation(); } catch (e1) {}
+        if (b._inkLongPress) {
+          b._inkLongPress = false;
+          return;
+        }
+        if (act === "eraser") {
+          var nowClick = Date.now();
+          if (nowClick - lastEraserClick < 340 && nowClick - lastEraserClick > 0) {
+            lastEraserClick = 0;
+            showClearPanel();
+            return;
+          }
+          lastEraserClick = nowClick;
+        }
+        onToolbarAction(act);
+      });
+      if (act === "eraser") inkBindLongPress(b, showClearPanel);
+      return b;
+    };
+    bar.appendChild(mkBtn("pointer", "↖", "指针（选择文字/PDF 高亮）"));
+    bar.appendChild(mkBtn("pen", "✎", "笔"));
+    bar.appendChild(mkBtn("highlighter", "▤", "高亮笔"));
+    bar.appendChild(mkBtn("eraser", "⌫", "橡皮（整笔/局部）"));
+    bar.appendChild(mkBtn("undo", "↶", "撤销墨迹"));
+    bar.appendChild(mkBtn("redo", "↷", "重做墨迹"));
+    var sep = document.createElement("div");
+    sep.className = "ink-sep";
+    bar.appendChild(sep);
+    // Auto colour: follows the note/PDF background (dark theme -> light ink).
+    var autoSw = document.createElement("div");
+    autoSw.className = "ink-swatch ink-swatch-auto";
+    autoSw.title = "自动跟随主题（钢笔）";
+    autoSw.setAttribute("role", "button");
+    autoSw.setAttribute("aria-label", autoSw.title);
+    autoSw.style.background = "linear-gradient(135deg,#1f1f1f 0 50%,#e8e8e8 50% 100%)";
+    inkBindTap(autoSw, function () {
+      state.colorAuto = true;
+      setPref("inkColorAuto", true);
+      updateToolbarState();
+    });
+    bar.appendChild(autoSw);
+    var colors = (state.palette && state.palette.length)
+      ? state.palette.slice()
+      : ["#1f1f1f", "#d32f2f", "#1565c0", "#2e7d32", "#f9a825"];
+    var applySwatch = function (c) {
+      if (state.tool === "highlighter") {
+        state.hlColor = c;
+        setPref("inkHlColor", c);
+      } else {
+        state.color = c;
+        state.colorAuto = false;
+        setPref("inkColor", c);
+        setPref("inkColorAuto", false);
+      }
+      updateToolbarState();
+    };
+    for (var i = 0; i < colors.length; i++) {
+      (function (c) {
+        var sw = document.createElement("div");
+        sw.className = "ink-swatch";
+        sw.setAttribute("data-color", c);
+        sw.setAttribute("role", "button");
+        sw.setAttribute("aria-label", "颜色 " + c);
+        sw.style.background = c;
+        sw.title = c;
+        inkBindTap(sw, function () { applySwatch(c); });
+        bar.appendChild(sw);
+      })(colors[i]);
+    }
+    // Custom colour: opens the platform colour picker. Applies to the tool in
+    // use (pen or highlighter), so the same control covers both.
+    var customInput = document.createElement("input");
+    customInput.type = "color";
+    customInput.style.cssText = "position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0";
+    var customSw = document.createElement("div");
+    customSw.className = "ink-swatch ink-swatch-custom";
+    customSw.title = "自定义颜色";
+    customSw.style.background = "conic-gradient(#e53935,#fdd835,#43a047,#1e88e5,#8e24aa,#e53935)";
+    inkBindTap(customSw, function () {
+      customInput.value = state.tool === "highlighter" ? state.hlColor : state.color;
+      try { customInput.click(); } catch (e2) { notice("当前系统不支持颜色选择器，请在设置中填写颜色"); }
+    });
+    var applyCustom = function () {
+      var c = customInput.value;
+      if (!c) return;
+      applySwatch(c);
+    };
+    customInput.addEventListener("input", applyCustom);
+    customInput.addEventListener("change", applyCustom);
+    document.body.appendChild(customInput);
+    bar.appendChild(customSw);
+    var widthInput = document.createElement("input");
+    widthInput.type = "range";
+    widthInput.min = "1";
+    widthInput.max = "12";
+    widthInput.step = "0.2";
+    widthInput.title = "笔宽";
+    widthInput.addEventListener("pointerdown", function (e) { e.stopPropagation(); }, true);
+    widthInput.addEventListener("input", function () {
+      var v = Number(widthInput.value) || 2.4;
+      if (state.tool === "highlighter") {
+        state.hlWidth = v;
+        setPref("inkHlWidth", v);
+      } else {
+        state.width = v;
+        setPref("inkWidth", v);
+      }
+    });
+    bar.appendChild(widthInput);
+    bar.appendChild(mkBtn("more", "⋯", "更多：写入 PDF / 导出 / 清空"));
+    bar.appendChild(mkBtn("collapse", "»", "收起"));
+    var toast = document.createElement("span");
+    toast.id = "ohsidian-ink-toast";
+    root.appendChild(nib);
+    root.appendChild(bar);
+    root.appendChild(toast);
+    document.body.appendChild(root);
+    inkTrace("toolbarBuilt", { pos: state.barPos, mode: state.barMode });
+
+    var menu = document.createElement("div");
+    menu.id = MENU_ID;
+    menu.setAttribute("data-pos", state.barPos);
+    if (mobileChrome) menu.classList.add("ohsidian-ink-mobile");
+    var menuItems = [
+      ["pdf-write", "写入 PDF（真实注释）"],
+      ["export", "导出本页 SVG"],
+      ["recolor", "按主题重新着色本页"],
+      ["clear", "清空本页墨迹"],
+      ["diag", "手写笔诊断"],
+      ["settings", "OHSidian 设置 → 手写笔"]
+    ];
+    for (var m = 0; m < menuItems.length; m++) {
+      (function (it) {
+        var b = document.createElement("button");
+        b.setAttribute("data-act", it[0]);
+        b.textContent = it[1];
+        inkBindTap(b, function () {
+          closeMenu();
+          onToolbarAction(it[0]);
+        });
+        menu.appendChild(b);
+      })(menuItems[m]);
+    }
+    document.body.appendChild(menu);
+    applyUiEffects();
+  }
+
+  function applyUiEffects() {
+    try {
+      var root = toolbarEl();
+      var menu = document.getElementById(MENU_ID);
+      var clear = document.getElementById(CLEAR_ID);
+      if (root) root.classList.toggle("is-glass", !!state.glass);
+      if (menu) menu.classList.toggle("is-glass", !!state.glass);
+      if (clear) clear.classList.toggle("is-glass", !!state.glass);
+      document.body.classList.toggle("ohsidian-ink-reduce-motion", !!state.reduceMotion);
+    } catch (e) {}
+  }
+
+  function rebuildToolbar() {
+    try {
+      var old = toolbarEl();
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+      var oldMenu = document.getElementById(MENU_ID);
+      if (oldMenu && oldMenu.parentNode) oldMenu.parentNode.removeChild(oldMenu);
+      state.toolbarBuilt = false;
+      buildToolbar();
+      if (state.barExpanded) expandToolbar();
+      updateToolbarState();
+      updateToolbarVisibility();
+      applyUiEffects();
+    } catch (e) {
+      warn("toolbar rebuild failed", e && e.message);
+    }
+  }
+
+  function barActuallyVisible() {
+    var root = toolbarEl();
+    if (!root) return false;
+    if (root.classList.contains("is-hidden") || root.classList.contains("is-writing")) return false;
+    if (root.classList.contains("is-collapsed")) return false;
+    var bar = root.querySelector(".ohsidian-ink-bar");
+    if (!bar) return false;
+    try {
+      var cs = getComputedStyle(bar);
+      if (cs.display === "none" || cs.visibility === "hidden" || Number(cs.opacity) === 0) return false;
+      var r = bar.getBoundingClientRect();
+      return r.width > 1 && r.height > 1;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function onToolbarAction(act) {
+    if (act === "nib") {
+      if (barActuallyVisible()) {
+        collapseToolbar();
+        inkTrace("nib", { expanded: false, tool: state.tool });
+        return;
+      }
+      // Trust actual visibility, not the barExpanded flag: after a lost
+      // pointerup or a z-index change the flag can be stale, and the old code
+      // made the first nib tap collapse an already-invisible bar.
+      expandToolbar();
+      // A nib tap means "write": pick the last pen tool. In Live Preview this
+      // also switches to reading view through setTool().
+      setTool(state.lastPenTool || "pen");
+      inkTrace("nib", { expanded: true, tool: state.tool, surface: !!activeSurfaceNow() });
+      return;
+    }
+    if (act === "pointer" || act === "pen" || act === "highlighter" || act === "eraser") {
+      setTool(act);
+      if (state.barExpanded) scheduleBarHide();
+      return;
+    }
+    if (act === "undo") { inkUndo(); scheduleBarHide(); return; }
+    if (act === "redo") { inkRedo(); scheduleBarHide(); return; }
+    if (act === "more") { toggleMenu(); return; }
+    if (act === "collapse") { collapseToolbar(); return; }
+    if (act === "pdf-write") { inkWritePdf(); return; }
+    if (act === "export") { inkExportSvg(); return; }
+    if (act === "recolor") { inkRecolorSpace(); return; }
+    if (act === "clear") { inkClearSpace(); return; }
+    if (act === "diag") { showDiagnostics(); return; }
+    if (act === "settings") {
+      try {
+        state.app.setting.open();
+        state.app.setting.openTabById("ohsidian");
+      } catch (e) {}
+    }
+  }
+
+  function setTool(tool) {
+    if (!state.enabled) {
+      inkStatus("手写笔功能已在设置中关闭");
+      return;
+    }
+    if (tool !== "pointer" && !activeSurfaceNow()) {
+      // Canvas/PDF can mount slightly after the leaf becomes active; retry
+      // before falling through to the "no layer" path.
+      try { inkRefreshSurfaces(); } catch (eRefresh) {}
+    }
+    // In Live Preview/editing there is no overlay to draw on. Selecting a pen
+    // tool is an explicit "I want to write", so switch to reading view first.
+    if (tool !== "pointer" && !activeSurfaceNow()) {
+      var leaf = state.app && state.app.workspace ? state.app.workspace.activeLeaf : null;
+      var v = leaf && leaf.view;
+      var editing = v && v.getViewType && v.getViewType() === "markdown" &&
+        v.getMode && v.getMode() !== "preview";
+      if (editing && inkRequestReadingMode(tool)) {
+        inkTrace("setToolPending", { tool: tool, view: "editing" });
+        return;
+      }
+    }
+    state.tool = tool;
+    inkToolMode(tool);
+    if (tool !== "pointer" && !activeSurfaceNow()) {
+      state.pendingTool = tool;
+      inkStatus("手写层准备中…", 1800);
+      inkAwaitSurface("setTool");
+    }
+    if (tool === "pen" || tool === "highlighter") {
+      state.lastPenTool = tool;
+      setPref("inkLastPenTool", tool);
+    }
+    if (tool === "pointer") {
+      if (state.active) forceReleaseActive(true);
+      palmHide();
+      clearCursor();
+      document.body.classList.remove("ohsidian-ink-pen");
+    } else {
+      document.body.classList.add("ohsidian-ink-pen");
+    }
+    updateToolbarState();
+    inkTrace("setTool", { tool: tool, surface: !!activeSurfaceNow() });
+  }
+
+  function updateToolbarState() {
+    var bar = toolbarEl();
+    if (!bar) return;
+    var btns = bar.querySelectorAll("button[data-act]");
+    for (var i = 0; i < btns.length; i++) {
+      var b = btns[i];
+      var act = b.getAttribute("data-act");
+      var on = (act === state.tool) || (act === "more" && state.menuOpen);
+      if (on) b.classList.add("is-active");
+      else b.classList.remove("is-active");
+    }
+    var sws = bar.querySelectorAll(".ink-swatch");
+    var activeColor = state.tool === "highlighter" ? state.hlColor : state.color;
+    var activeAuto = state.tool !== "highlighter" && state.colorAuto;
+    var fixedList = ["#1f1f1f", "#d32f2f", "#1565c0", "#2e7d32", "#f9a825"];
+    for (var j = 0; j < sws.length; j++) {
+      var sw = sws[j];
+      var isAuto = sw.classList && sw.classList.contains("ink-swatch-auto");
+      var isCustom = sw.classList && sw.classList.contains("ink-swatch-custom");
+      var fixed = sw.getAttribute("data-color");
+      var active = false;
+      if (isAuto) active = activeAuto;
+      else if (isCustom) active = !activeAuto && fixedList.indexOf(activeColor) < 0;
+      else active = !activeAuto && fixed === activeColor;
+      if (active) sw.classList.add("is-active");
+      else sw.classList.remove("is-active");
+    }
+    var range = bar.querySelector("input[type=range]");
+    if (range) {
+      if (state.tool === "highlighter") {
+        range.max = "32";
+        if (document.activeElement !== range) range.value = String(state.hlWidth);
+      } else {
+        range.max = "12";
+        if (document.activeElement !== range) range.value = String(state.width);
+      }
+    }
+    var surface = state.activeSurface;
+    if (!surface || (state.activeLeaf && surface.leaf !== state.activeLeaf)) {
+      surface = activeSurfaceNow();
+    }
+    var badge = bar.querySelector(".ink-badge");
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "ink-badge";
+      var barBox = bar.querySelector(".ohsidian-ink-bar") || bar;
+      barBox.appendChild(badge);
+    }
+    if (surface && surface.kind === "pdf") {
+      var pg = null;
+      try {
+        if (surface.viewer && surface.viewer.currentPageNumber) pg = surface.viewer.currentPageNumber - 1;
+      } catch (e) {}
+      if (pg === null) {
+        if (surface.currentSpace) pg = parseInt(surface.currentSpace.slice(4), 10);
+        else {
+          var keys = Object.keys(surface.pages);
+          pg = keys.length ? parseInt(keys[0], 10) : 0;
+        }
+      }
+      if (pg === null || isNaN(pg)) pg = 0;
+      badge.textContent = "PDF p." + (pg + 1);
+    } else if (surface && surface.kind === "canvas") {
+      badge.textContent = "Canvas";
+    } else if (surface && surface.kind === "pdfembed") {
+      var pno = 1;
+      try { pno = parseInt(surface.pageEl.dataset.pageNumber || "1", 10) || 1; } catch (eP) {}
+      badge.textContent = (surface.pdfDom ? "PDF p." : "内嵌 PDF p.") + pno;
+    } else if (surface) {
+      badge.textContent = "笔记";
+    } else if (activeMarkdownLeaf()) {
+      // Visible affordance in Live Preview; tapping pen switches to reading.
+      badge.textContent = "阅读视图";
+    } else {
+      badge.textContent = "";
+    }
+    updateToolbarVisibility();
+  }
+
+  function updateToolbarVisibility() {
+    var root = toolbarEl();
+    if (!root) return;
+    root.setAttribute("data-pos", state.barPos);
+    try {
+      if (document.body.classList.contains("is-mobile") ||
+        document.body.classList.contains("is-tablet")) {
+        root.classList.add("ohsidian-ink-mobile");
+      }
+    } catch (eMob) {}
+    if (!state.enabled) {
+      root.classList.add("is-hidden");
+      root.classList.add("is-collapsed");
+      return;
+    }
+    var surface = activeSurfaceNow();
+    var show = !!surface || !!activeInkLeaf();
+    root.classList.toggle("is-hidden", !show);
+    var sig = (show ? "1" : "0") + (state.barExpanded ? "1" : "0") + state.barMode;
+    if (sig !== state.lastBarSig) {
+      state.lastBarSig = sig;
+      inkTrace("toolbar", {
+        show: show, expanded: state.barExpanded, mode: state.barMode,
+        surface: !!surface, editing: !!activeMarkdownLeaf()      });
+    }
+    if (!show) {
+      collapseToolbar();
+      return;
+    }
+    if (state.barMode === "always") {
+      expandToolbar(true);
+    } else if (!state.barExpanded) {
+      root.classList.add("is-collapsed");
+    }
+  }
+
+  function clearBarTimer() {
+    if (state.barTimer) {
+      clearTimeout(state.barTimer);
+      state.barTimer = 0;
+    }
+  }
+
+  function scheduleBarHide() {
+    clearBarTimer();
+    if (state.barMode !== "auto") return;
+    state.barTimer = setTimeout(function () {
+      state.barTimer = 0;
+      collapseToolbar();
+    }, 8000);
+  }
+
+  function collapseToolbar() {
+    var root = toolbarEl();
+    if (!root) return;
+    state.barExpanded = false;
+    root.classList.add("is-collapsed");
+    var nib = root.querySelector(".ohsidian-ink-nib");
+    if (nib) nib.setAttribute("aria-expanded", "false");
+    clearBarTimer();
+    // Close the menu without calling updateToolbarState(): that path leads
+    // back into updateToolbarVisibility() and would recurse when the current
+    // view has no ink surface.
+    var menu = document.getElementById(MENU_ID);
+    if (menu) menu.classList.remove("is-open");
+    state.menuOpen = false;
+  }
+
+  function expandToolbar(noTimer) {
+    var root = toolbarEl();
+    if (!root) return;
+    state.barExpanded = true;
+    root.classList.remove("is-collapsed");
+    root.classList.remove("is-hidden");
+    var nib = root.querySelector(".ohsidian-ink-nib");
+    if (nib) nib.setAttribute("aria-expanded", "true");
+    if (noTimer || state.barMode === "always") clearBarTimer();
+    else scheduleBarHide();
+  }
+
+  function toggleMenu() {
+    var menu = document.getElementById(MENU_ID);
+    if (!menu) return;
+    state.menuOpen = !state.menuOpen;
+    menu.classList.toggle("is-open", state.menuOpen);
+    if (state.menuOpen) scheduleBarHide();
+    updateToolbarState();
+  }
+
+  function closeMenu() {
+    var menu = document.getElementById(MENU_ID);
+    if (menu) menu.classList.remove("is-open");
+    state.menuOpen = false;
+    updateToolbarState();
+  }
+
+  function togglePalette() {
+    buildToolbar();
+    var root = toolbarEl();
+    if (!root) return;
+    root.classList.remove("is-hidden");
+    expandToolbar();
+    inkStatus("手写工具");
+  }
+
+  /** Hide the chrome while the pen is on the page; restore it on lift. */
+  function inkWritingChrome(on) {
+    var root = toolbarEl();
+    if (!root) return;
+    if (state.barMode === "always") {
+      root.classList.remove("is-writing");
+      return;
+    }
+    if (on) {
+      clearBarTimer();
+      root.classList.add("is-writing");
+    } else {
+      root.classList.remove("is-writing");
+      // Compact mode used to keep the bar open after a stroke, so any swipe
+      // that produced a quick stroke made the controls pop back. After writing
+      // (or a swipe mistaken for one) everything returns to the quiet nib.
+      if (state.barMode !== "always") collapseToolbar();
+    }
+  }
+
+  function showDiagnostics() {
+    var lines = diagnosticLines();
+    try {
+      if (typeof window.ohsidianShowReportModal === "function") {
+        window.ohsidianShowReportModal("OHSidian 诊断: 手写笔", lines);
+        return;
+      }
+    } catch (e) {}
+    notice(lines.join("\n"), 9000);
+    try { console.log(lines.join("\n")); } catch (e2) {}
+  }
+
+  function diagnosticLines() {
+    var pt = Object.keys(state.pointerTypes || {}).map(function (k) {
+      return k + "×" + state.pointerTypes[k];
+    }).join(" ");
+    var pvals = Object.keys(state.domPressureValues).length;
+    var age = state.lastPenAt ? Math.round(nowMs() - state.lastPenAt) + "ms" : "-";
+    var gAge = state.lastGestureAt ? Math.round(Date.now() - state.lastGestureAt) + "ms" : "-";
+    var surface = activeSurfaceNow();
+    var doc = surface ? docFor(surface) : null;
+    var pending = 0;
+    if (doc && surface.kind === "pdf") {
+      for (var i = 0; i < doc.strokes.length; i++) {
+        if (!doc.strokes[i].baked && String(doc.strokes[i].space).indexOf("pdf:") === 0) pending++;
+      }
+    }
+    var info = state.stylusInfo;
+    var svc = info ? (info.subscribed ? "已订阅" : (info.supported ? "支持未订阅" : "不支持")) : "未知";
+    if (info && info.error) svc += "(" + String(info.error).slice(0, 40) + ")";
+    var pdfKit = info ? (info.pdf ? "可用" : "不可用") : "未知";
+    var d = state.lastPenDetail;
+    var detail = d
+      ? "type=" + d.type + " p=" + Number(d.p).toFixed(3) + " tilt=" + Math.round(d.tx) + "," + Math.round(d.ty) +
+        " button=" + d.button + "/" + d.buttons + " wh=" + Number(d.w).toFixed(1) + "," + Number(d.h).toFixed(1)
+      : "未捕获";
+    var leafNow = state.app && state.app.workspace ? state.app.workspace.activeLeaf : null;
+    var viewNow = leafNow && leafNow.view;
+    var viewInfo = (viewNow && viewNow.getViewType ? viewNow.getViewType() : "?") +
+      ":" + (viewNow && viewNow.getMode ? viewNow.getMode() : "");
+    var barNow = toolbarEl();
+    var barInfo = !barNow ? "未建" :
+      (barNow.classList && barNow.classList.contains("is-hidden") ? "隐藏" : "显示");
+    return [
+      "  " + "手写笔".padEnd(8) + "v" + OHSIDIAN_INK_REV + " 点=" + (pt || "?") + " · 压力档=" + pvals +
+        " · 模式=" + state.pressureMode + " · 旁路=" + (state.pressureTapOn ? "开" : "关") +
+        " · 首帧=" + Math.round(state.lastLatency) + "ms · 合帧=" + state.coalescedMax,
+      "  " + "视图".padEnd(9) + viewInfo + " · 工具条=" + barInfo + " · 手写层=" +
+        (surface ? surface.kind : "无"),
+      "  " + "最近笔".padEnd(9) + detail,
+      "  " + "系统".padEnd(10) + "笔服务=" + svc + " · PDFKit=" + pdfKit,
+      "  " + "手势".padEnd(10) + "最近=" + (state.lastGesture || "无") + "(" + gAge + ") · 共 " +
+        state.gestureCount + " 次",
+      "  " + "墨迹".padEnd(10) + "层=" + (surface ? surface.kind : "无") +
+        " · 笔数=" + (doc ? doc.strokes.length : 0) + " · 未写回=" + pending,
+      "  " + "IPC".padEnd(11) + (state.ipcReady ? "已连接" : "未连接") +
+        " · 收 " + state.ipcRecv + " / 发 " + state.ipcSent +
+        " · 最近笔事件 " + age
+    ];
+  }
+
+  // ---------------------------------------------------------------------
+  // Settings hook (consumed by touch-mode.js' settings page)
+  // ---------------------------------------------------------------------
+  function selectEl(ctl, options, value, onChange) {
+    var sel = document.createElement("select");
+    sel.style.cssText = "min-width:140px;background:var(--background-modifier-form-field);" +
+      "color:var(--text-normal);border:1px solid var(--background-modifier-border);border-radius:6px;padding:3px 6px";
+    for (var i = 0; i < options.length; i++) {
+      var o = document.createElement("option");
+      o.value = options[i][0];
+      o.textContent = options[i][1];
+      if (options[i][0] === value) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.addEventListener("change", function () { onChange(sel.value); });
+    ctl.appendChild(sel);
+  }
+
+  window.__ohsidianInkHooks = {
+    buildSettings: function (ctx) {
+      try {
+        var g = ctx.newGroup("功能");
+        ctx.toggleEl(ctx.itemEl(g, "手写笔模式",
+          "默认关闭。打开后才显示笔尖/工具条并拦截笔输入；关闭后 OHSidian 完全回到普通 Obsidian。", true),
+          pref("inkEnabled", false) === true,
+          function (on) {
+            state.enabled = !!on;
+            setPref("inkEnabled", !!on);
+            if (!on) {
+              state.tool = "pointer";
+              state.barExpanded = false;
+              state.lastPenSeen = 0;
+              state.penUiSwipe = null;
+              state.blockedPointerId = null;
+              state.lastToolMode = null;
+              if (state.pdfAutoTimer) { clearTimeout(state.pdfAutoTimer); state.pdfAutoTimer = 0; }
+              inkToolMode("pointer");
+              forceReleaseActive(true);
+              palmHide();
+              clearCursor();
+              try { document.body.classList.remove("ohsidian-ink-pen"); } catch (e) {}
+            }
+            updateToolbarState();
+            updateToolbarVisibility();
+            inkRefreshSurfaces();
+          });
+        var barCtl = ctx.itemEl(g, "工具条显示",
+          "紧凑：点开后保持，直到再点笔尖；自动：点开后 8 秒收起；常驻：始终展开。");
+        selectEl(barCtl, [
+          ["compact", "紧凑（默认：点开保持）"],
+          ["auto", "自动（点开后 8 秒收起）"],
+          ["always", "常驻展开"]
+        ], pref("inkBarMode", "compact"), function (v) {
+          state.barMode = v;
+          setPref("inkBarMode", v);
+          if (v === "always") expandToolbar(true);
+          else if (!state.barExpanded) collapseToolbar();
+          updateToolbarState();
+        });
+        var posCtl = ctx.itemEl(g, "工具条位置",
+          "右下或左下。左手书写建议左下，避免手腕遮挡笔尖落点。");
+        selectEl(posCtl, [
+          ["br", "右下（默认）"],
+          ["bl", "左下"]
+        ], pref("inkBarPos", "br"), function (v) {
+          state.barPos = v;
+          setPref("inkBarPos", v);
+          var root = toolbarEl();
+          if (root) root.setAttribute("data-pos", v);
+          var menu = document.getElementById(MENU_ID);
+          if (menu) menu.setAttribute("data-pos", v);
+        });
+        ctx.toggleEl(ctx.itemEl(g, "安静反馈",
+          "常规操作只在笔尖上方显示一行很淡的提示，不弹 Notice；关闭后恢复系统通知。", true),
+          pref("inkQuiet", true) !== false,
+          function (on) { state.quiet = !!on; setPref("inkQuiet", !!on); });
+        var effects = ctx.newGroup("界面效果");
+        ctx.toggleEl(ctx.itemEl(effects, "毛玻璃工具条",
+          "半透明 + backdrop-filter 模糊。视觉更好，但会增加 GPU/耗电；平板建议关闭。", true),
+          pref("inkGlass", false) === true,
+          function (on) {
+            state.glass = !!on;
+            setPref("inkGlass", !!on);
+            applyUiEffects();
+          });
+        ctx.toggleEl(ctx.itemEl(effects, "减少动画",
+          "关闭工具条淡入/位移动画，降低持续重绘和功耗（默认开启）。", true),
+          pref("inkReduceMotion", true) !== false,
+          function (on) {
+            state.reduceMotion = !!on;
+            setPref("inkReduceMotion", !!on);
+            applyUiEffects();
+          });
+        ctx.toggleEl(ctx.itemEl(g, "笔尖光标",
+          "笔悬停时显示一个细圆环（橡皮为擦除半径），落笔后自动消失。", true),
+          pref("inkCursor", true) !== false,
+          function (on) {
+            state.cursorEnabled = !!on;
+            setPref("inkCursor", !!on);
+            if (!on) clearCursor();
+          });
+        ctx.toggleEl(ctx.itemEl(g, "书写时屏蔽边缘手势",
+          "选中笔/高亮/橡皮时，拦截从左右边缘开始的横向滑动，避免唤出 Obsidian 侧边栏；指针模式不受影响。", true),
+          pref("inkBlockEdge", true) !== false,
+          function (on) {
+            state.blockEdge = !!on;
+            setPref("inkBlockEdge", !!on);
+            if (!on) edgeTouch = null;
+          });
+
+        var input = ctx.newGroup("输入与手势");
+        ctx.toggleEl(ctx.itemEl(input, "掌托过滤",
+          "笔按下时拦截手掌与手指的触摸，避免书写时滚动或选中文字。", true),
+          pref("inkPalm", true) !== false,
+          function (on) { state.palm = !!on; setPref("inkPalm", !!on); });
+        ctx.toggleEl(ctx.itemEl(input, "允许手指绘制",
+          "关闭时手指只用于滚动/缩放；打开后手指也会留下墨迹（不推荐）。", true),
+          pref("inkFingerDraw", false) === true,
+          function (on) { state.fingerDraw = !!on; setPref("inkFingerDraw", !!on); });
+        var ersCtl = ctx.itemEl(input, "橡皮半径",
+          "屏幕上的擦除范围（圆环）。长按工具条橡皮按钮会出现“滑到底清除本页”的滑块。");
+        var ersInput = document.createElement("input");
+        ersInput.type = "range";
+        ersInput.min = "6";
+        ersInput.max = "32";
+        ersInput.step = "1";
+        ersInput.value = String(Number(pref("inkEraserPx", 12)) || 12);
+        ersInput.style.cssText = "width:120px;height:24px;vertical-align:middle";
+        ersInput.addEventListener("input", function () {
+          var v = Number(ersInput.value) || 12;
+          state.eraserPx = v;
+          setPref("inkEraserPx", v);
+          if (state.tool === "eraser") clearCursor();
+        });
+        ersCtl.appendChild(ersInput);
+        var dblCtl = ctx.itemEl(input, "笔杆双击",
+          "M-Pencil 双击的行为。默认只唤醒工具条，不切换橡皮；系统设置里的「双击切换」建议设为「无/应用内」，否则可能双触发。");
+        selectEl(dblCtl, [
+          ["wake", "唤醒工具条（默认）"],
+          ["pen-eraser", "笔 ↔ 橡皮"],
+          ["undo", "撤销上一笔"],
+          ["palette", "打开工具条/调色盘"],
+          ["none", "不响应"]
+        ], pref("inkDoubleTap", "wake"), function (v) { setPref("inkDoubleTap", v); });
+        var sqCtl = ctx.itemEl(input, "笔杆轻捏",
+          "仅支持轻捏的笔（如 M-Pencil 3）；不支持时不会触发。");
+        selectEl(sqCtl, [
+          ["palette", "打开工具条/调色盘（默认）"],
+          ["pen-eraser", "笔 ↔ 橡皮"],
+          ["undo", "撤销上一笔"],
+          ["none", "不响应"]
+        ], pref("inkSqueeze", "palette"), function (v) { setPref("inkSqueeze", v); });
+
+        var press = ctx.newGroup("压力");
+        var prCtl = ctx.itemEl(press, "压力来源",
+          "自动：先用引擎给的压力，若发现恒定再向 ArkTS 请求设备采样；强制：总是使用 ArkTS 旁路。");
+        selectEl(prCtl, [
+          ["auto", "自动（默认）"],
+          ["on", "总是使用 ArkTS 采样"],
+          ["off", "只用网页事件"]
+        ], pref("inkPressureTap", "auto"), function (v) {
+          state.pressureTapPref = v;
+          setPref("inkPressureTap", v);
+          negotiatePressure();
+        });
+
+        var presetCtl = ctx.itemEl(press, "曲线预设",
+          "线性/柔和/硬朗会同时设置起笔力度与曲线强度；手动调整后变为自定义。");
+        var presetSel = document.createElement("select");
+        presetSel.style.cssText = "min-width:160px;background:var(--background-modifier-form-field);" +
+          "color:var(--text-normal);border:1px solid var(--background-modifier-border);border-radius:6px;padding:4px 7px";
+        var presetOpts = [["linear", "线性"], ["soft", "柔和（轻写更粗）"],
+          ["hard", "硬朗（需要更大力气）"], ["custom", "自定义"]];
+        for (var pi = 0; pi < presetOpts.length; pi++) {
+          var po = document.createElement("option");
+          po.value = presetOpts[pi][0];
+          po.textContent = presetOpts[pi][1];
+          presetSel.appendChild(po);
+        }
+        presetSel.value = (state.curve === "soft" || state.curve === "hard" ||
+          state.curve === "custom") ? state.curve : "linear";
+        presetCtl.appendChild(presetSel);
+
+        var minCtl = ctx.itemEl(press, "起笔力度",
+          "低于此值的压力视为 0，用来消除笔尖刚接触屏幕时的抖动和“毛边”。");
+        var minInput = document.createElement("input");
+        minInput.type = "range";
+        minInput.min = "0";
+        minInput.max = "0.5";
+        minInput.step = "0.01";
+        minInput.value = String(state.pressureMin || 0);
+        minInput.style.width = "180px";
+        var minVal = document.createElement("span");
+        minVal.style.cssText = "margin-left:8px;color:var(--text-muted);font-variant-numeric:tabular-nums";
+        minVal.textContent = Math.round((state.pressureMin || 0) * 100) + "%";
+        minCtl.appendChild(minInput);
+        minCtl.appendChild(minVal);
+
+        var gamCtl = ctx.itemEl(press, "曲线强度",
+          "小于 1 更“软”，轻写也会变粗；大于 1 更“硬”，需要更大力气才变粗。");
+        var gamInput = document.createElement("input");
+        gamInput.type = "range";
+        gamInput.min = "0.4";
+        gamInput.max = "2.6";
+        gamInput.step = "0.02";
+        gamInput.value = String(state.pressureGamma || 1);
+        gamInput.style.width = "180px";
+        var gamVal = document.createElement("span");
+        gamVal.style.cssText = "margin-left:8px;color:var(--text-muted);font-variant-numeric:tabular-nums";
+        gamVal.textContent = Number(state.pressureGamma || 1).toFixed(2);
+        gamCtl.appendChild(gamInput);
+        gamCtl.appendChild(gamVal);
+
+        var graphCtl = ctx.itemEl(press, "曲线预览",
+          "横轴是笔压力，纵轴是墨迹宽度系数；拖动上面的滑杆会立即更新。");
+        var graph = document.createElement("canvas");
+        var graphW = 280;
+        var graphH = 104;
+        var graphDpr = Math.min(window.devicePixelRatio || 1, 2);
+        graph.width = Math.round(graphW * graphDpr);
+        graph.height = Math.round(graphH * graphDpr);
+        graph.style.cssText = "width:" + graphW + "px;height:" + graphH + "px;" +
+          "display:block;border:1px solid var(--background-modifier-border);border-radius:8px;" +
+          "background:var(--background-primary);margin-top:4px";
+        graphCtl.appendChild(graph);
+
+        function drawPressureGraph() {
+          try {
+            var gx = graph.getContext("2d");
+            gx.setTransform(graphDpr, 0, 0, graphDpr, 0, 0);
+            gx.clearRect(0, 0, graphW, graphH);
+            var cs = getComputedStyle(document.body);
+            var faint = (cs.getPropertyValue("--text-faint") || "#888").trim() || "#888";
+            var accent = (cs.getPropertyValue("--interactive-accent") || "#7c6cf0").trim() || "#7c6cf0";
+            var left = 10, top = 10, right = graphW - 10, bottom = graphH - 12;
+            gx.strokeStyle = faint;
+            gx.globalAlpha = 0.35;
+            gx.lineWidth = 1;
+            for (var k = 0; k <= 4; k++) {
+              var yy = top + (bottom - top) * k / 4;
+              gx.beginPath();
+              gx.moveTo(left, yy);
+              gx.lineTo(right, yy);
+              gx.stroke();
+            }
+            for (var m = 0; m <= 4; m++) {
+              var xx = left + (right - left) * m / 4;
+              gx.beginPath();
+              gx.moveTo(xx, top);
+              gx.lineTo(xx, bottom);
+              gx.stroke();
+            }
+            gx.globalAlpha = 1;
+            gx.strokeStyle = accent;
+            gx.lineWidth = 2.2;
+            gx.beginPath();
+            for (var s = 0; s <= 60; s++) {
+              var pv = s / 60;
+              var out = pressureCurve(pv);
+              var px = left + (right - left) * pv;
+              var py = bottom - (bottom - top) * out;
+              if (s === 0) gx.moveTo(px, py);
+              else gx.lineTo(px, py);
+            }
+            gx.stroke();
+            gx.fillStyle = faint;
+            gx.globalAlpha = 0.8;
+            gx.font = "10px sans-serif";
+            gx.fillText("压力 →", right - 42, bottom + 9);
+            gx.save();
+            gx.translate(left - 2, top + 4);
+            gx.rotate(-Math.PI / 2);
+            gx.fillText("宽度", -34, 0);
+            gx.restore();
+            gx.globalAlpha = 1;
+          } catch (eG) {}
+        }
+
+        function markCustom() {
+          state.curve = "custom";
+          setPref("inkCurve", "custom");
+          presetSel.value = "custom";
+        }
+
+        minInput.addEventListener("input", function () {
+          state.pressureMin = clamp(Number(minInput.value) || 0, 0, 0.6);
+          minVal.textContent = Math.round(state.pressureMin * 100) + "%";
+          setPref("inkPressureMin", state.pressureMin);
+          markCustom();
+          drawPressureGraph();
+        });
+        gamInput.addEventListener("input", function () {
+          state.pressureGamma = clamp(Number(gamInput.value) || 1, 0.4, 2.6);
+          gamVal.textContent = state.pressureGamma.toFixed(2);
+          setPref("inkPressureGamma", state.pressureGamma);
+          markCustom();
+          drawPressureGraph();
+        });
+        presetSel.addEventListener("change", function () {
+          var v = presetSel.value;
+          if (v === "linear") { state.pressureMin = 0; state.pressureGamma = 1; }
+          else if (v === "soft") { state.pressureMin = 0; state.pressureGamma = 0.68; }
+          else if (v === "hard") { state.pressureMin = 0.06; state.pressureGamma = 1.45; }
+          else { markCustom(); return; }
+          state.curve = v;
+          setPref("inkCurve", v);
+          setPref("inkPressureMin", state.pressureMin);
+          setPref("inkPressureGamma", state.pressureGamma);
+          minInput.value = String(state.pressureMin);
+          gamInput.value = String(state.pressureGamma);
+          minVal.textContent = Math.round(state.pressureMin * 100) + "%";
+          gamVal.textContent = state.pressureGamma.toFixed(2);
+          drawPressureGraph();
+        });
+        drawPressureGraph();
+
+        var color = ctx.newGroup("颜色");
+        ctx.toggleEl(ctx.itemEl(color, "墨水颜色跟随主题",
+          "开启时深色主题用浅色墨、浅色主题用深色墨（默认）；关闭后使用下面的自选颜色。", true),
+          pref("inkColorAuto", true) !== false,
+          function (on) {
+            state.colorAuto = !!on;
+            setPref("inkColorAuto", !!on);
+            updateToolbarState();
+          });
+        var paletteCtl = ctx.itemEl(color, "工具条调色盘",
+          "设置工具条上的 5 个常用颜色；改完立即重建工具条。");
+        var paletteWrap = document.createElement("div");
+        paletteWrap.style.cssText = "display:flex;gap:6px;align-items:center";
+        for (var palIdx = 0; palIdx < 5; palIdx++) {
+          (function (idx) {
+            var pin = document.createElement("input");
+            pin.type = "color";
+            pin.value = state.palette[idx] || "#1f1f1f";
+            pin.title = "调色盘 " + (idx + 1);
+            pin.style.cssText = "width:30px;height:26px;padding:0;border:0;background:transparent";
+            pin.addEventListener("change", function () {
+              state.palette[idx] = pin.value;
+              setPref("inkPalette", state.palette.slice());
+              rebuildToolbar();
+            });
+            paletteWrap.appendChild(pin);
+          })(palIdx);
+        }
+        paletteCtl.appendChild(paletteWrap);
+        var colorCtl = ctx.itemEl(color, "自选墨色",
+          "选择后会自动关闭“跟随主题”，只影响之后新写的笔画；已有笔画可用“按主题重新着色”或撤销。");
+        var colorInput = document.createElement("input");
+        colorInput.type = "color";
+        colorInput.value = state.color || "#1f1f1f";
+        colorInput.addEventListener("change", function () {
+          state.color = colorInput.value;
+          state.colorAuto = false;
+          setPref("inkColor", state.color);
+          setPref("inkColorAuto", false);
+          updateToolbarState();
+        });
+        colorCtl.appendChild(colorInput);
+        var hlCtl = ctx.itemEl(color, "高亮笔颜色",
+          "高亮笔默认黄色；也可以直接在工具栏选中高亮笔后点色块或自定义颜色。");
+        var hlInput = document.createElement("input");
+        hlInput.type = "color";
+        hlInput.value = state.hlColor || "#ffd54a";
+        hlInput.addEventListener("change", function () {
+          state.hlColor = hlInput.value;
+          setPref("inkHlColor", state.hlColor);
+          updateToolbarState();
+        });
+        hlCtl.appendChild(hlInput);
+
+        var pdf = ctx.newGroup("PDF 与诊断");
+        var pdfCtl = ctx.itemEl(pdf, "写入 PDF 后",
+          "写入为真实 /Ink 注释后，叠加层不再重复绘制；如你的阅读器不显示注释，可重新打开该 PDF 验证。");
+        selectEl(pdfCtl, [
+          ["hide", "隐藏叠加层（默认）"],
+          ["keep", "仍由叠加层显示（会双画）"]
+        ], pref("inkPdfAfterBake", "hide"), function (v) { setPref("inkPdfAfterBake", v); });
+        ctx.toggleEl(ctx.itemEl(pdf, "直接写入 PDF（自动备份）",
+          "停顿约 3 秒后把当前页墨迹写回 PDF；首次写入前保留原文件备份。擦除/撤销/清除会重写本页注释。", true),
+          pref("inkPdfAuto", true) !== false,
+          function (on) { setPref("inkPdfAuto", !!on); if (!on && state.pdfAutoTimer) { clearTimeout(state.pdfAutoTimer); state.pdfAutoTimer = 0; } });
+        var restoreCtl = ctx.itemEl(pdf, "恢复原始 PDF",
+          "从 .obsidian/ohsidian-ink/backups 的原始备份恢复当前 PDF；会丢弃之后写入的注释。");
+        var restoreBtn = document.createElement("button");
+        restoreBtn.textContent = "恢复";
+        restoreBtn.addEventListener("click", function () { inkRestorePdf(); });
+        restoreCtl.appendChild(restoreBtn);
+        var diagCtl = ctx.itemEl(pdf, "诊断", "查看当前笔类型、压力档位、旁路状态与未写回笔数。");
+        var btn = document.createElement("button");
+        btn.textContent = "查看";
+        btn.addEventListener("click", function () { showDiagnostics(); });
+        diagCtl.appendChild(btn);
+      } catch (e) {
+        warn("settings hook failed", e && e.message);
+      }
+    },
+    diagnosticLines: function () {
+      try { return diagnosticLines(); } catch (e) { return ["  ink hooks error"]; }
+    }
+  };
+
+  // ---------------------------------------------------------------------
+  // Commands
+  // ---------------------------------------------------------------------
+  function addCommands(app) {
+    var add = function (id, name, cb) {
+      try { app.commands.addCommand({ id: id, name: name, callback: cb }); } catch (e) {}
+    };
+    add("ohsidian-ink-mode", "OHSidian: 手写模式 开/关（指针 ↔ 笔）", function () {
+      setTool(state.tool === "pointer" ? state.lastPenTool : "pointer");
+      inkStatus("手写工具：" + state.tool);
+    });
+    add("ohsidian-ink-toggle-feature", "OHSidian 手写: 启用/关闭手写模式", function () {
+      var on = !state.enabled;
+      state.enabled = on;
+      setPref("inkEnabled", on);
+      if (!on) {
+        state.tool = "pointer";
+        state.barExpanded = false;
+        state.lastPenSeen = 0;
+        state.lastToolMode = null;
+        if (state.pdfAutoTimer) { clearTimeout(state.pdfAutoTimer); state.pdfAutoTimer = 0; }
+        inkToolMode("pointer");
+        forceReleaseActive(true);
+        palmHide();
+        clearCursor();
+        try { document.body.classList.remove("ohsidian-ink-pen"); } catch (e) {}
+      } else {
+        state.lastToolMode = null;
+        buildToolbar();
+        setTool(state.lastPenTool || "pen");
+      }
+      updateToolbarState();
+      updateToolbarVisibility();
+      inkRefreshSurfaces();
+      inkStatus("手写功能 " + (on ? "已开启" : "已关闭"));
+    });
+    add("ohsidian-ink-enable", "OHSidian: 开启手写（切到阅读视图并选笔）", function () {
+      if (!activeSurfaceNow() && inkEnterReadingMode()) {
+        inkStatus("已切换到阅读视图", 3000);
+        inkAfterEnterReadingMode("pen");
+        return;
+      }
+      buildToolbar();
+      setTool(state.lastPenTool || "pen");
+      updateToolbarState();
+    });
+    add("ohsidian-ink-pen", "OHSidian 手写: 笔", function () { setTool("pen"); });
+    add("ohsidian-ink-highlighter", "OHSidian 手写: 高亮笔", function () { setTool("highlighter"); });
+    add("ohsidian-ink-eraser", "OHSidian 手写: 橡皮", function () { setTool("eraser"); });
+    add("ohsidian-ink-pointer", "OHSidian 手写: 指针/选择", function () { setTool("pointer"); });
+    add("ohsidian-ink-undo", "OHSidian 手写: 撤销墨迹", function () { inkUndo(); });
+    add("ohsidian-ink-redo", "OHSidian 手写: 重做墨迹", function () { inkRedo(); });
+    add("ohsidian-ink-clear", "OHSidian 手写: 清空本页墨迹", function () { inkClearSpace(); });
+    add("ohsidian-ink-pdf-write", "OHSidian 手写: 写入 PDF（真实注释）", function () { inkWritePdf(); });
+    add("ohsidian-ink-pdf-restore", "OHSidian 手写: 恢复 PDF 原始备份", function () { inkRestorePdf(); });
+    add("ohsidian-ink-export", "OHSidian 手写: 导出本页 SVG", function () { inkExportSvg(); });
+    add("ohsidian-ink-recolor", "OHSidian 手写: 按主题重新着色本页", function () { inkRecolorSpace(); });
+    add("ohsidian-ink-toolbar", "OHSidian 手写: 显示/隐藏工具条", function () {
+      buildToolbar();
+      var bar = toolbarEl();
+      if (!bar) return;
+      bar.classList.toggle("is-hidden");
+    });
+    add("ohsidian-ink-diag", "OHSidian 诊断: 手写笔", function () {
+      showDiagnostics();
+    });
+    add("ohsidian-ink-probe-capture", "OHSidian 诊断: 手写笔事件捕获 开/关", function () {
+      state.probeCapture = !state.probeCapture;
+      inkStatus("手写笔事件捕获 → " + (state.probeCapture ? "开" : "关") + "（控制台 [OHSidian ink pen]）");
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Diagnostics probe (opt-in; cheap when off)
+  // ---------------------------------------------------------------------
+  function onProbeEvent(ev) {
+    if (!state.probeCapture) return;
+    if (!isPenEvent(ev)) return;
+    try {
+      var press = typeof ev.pressure === "number" ? ev.pressure : -1;
+      var co = 0;
+      try { co = ev.getCoalescedEvents ? ev.getCoalescedEvents().length : 0; } catch (e) {}
+      if (co > state.coalescedMax) state.coalescedMax = co;
+      console.log("[OHSidian ink pen]", ev.type, "type=" + ev.pointerType,
+        "p=" + press.toFixed(3), "tilt=" + Math.round(ev.tiltX || 0) + "," + Math.round(ev.tiltY || 0),
+        "btn=" + ev.button + " buttons=" + ev.buttons, "co=" + co,
+        "w=" + (ev.width || 0).toFixed(1), "h=" + (ev.height || 0).toFixed(1));
+    } catch (e) {}
+  }
+
+  function installPenObservers() {
+    var record = function (ev) {
+      if (!state.enabled) return;
+      state.pointerTypes = state.pointerTypes || {};
+      var t = ev.pointerType || "?";
+      state.pointerTypes[t] = (state.pointerTypes[t] || 0) + 1;
+      if (isPenEvent(ev)) {
+        state.lastPenAt = nowMs();
+        state.lastPenType = ev.pointerType || "?";
+        state.lastPenDetail = {
+          type: ev.pointerType || "?",
+          p: typeof ev.pressure === "number" ? ev.pressure : -1,
+          tx: ev.tiltX || 0,
+          ty: ev.tiltY || 0,
+          button: ev.button,
+          buttons: ev.buttons,
+          w: ev.width || 0,
+          h: ev.height || 0
+        };
+        // Observe pressure even in pointer mode: this is how G1/G2 is decided
+        // (the device log showed pen pressure reaching the DOM).
+        if (ev.pressure !== undefined) observeDomPressure(ev.pressure);
+      }
+      onProbeEvent(ev);
+    };
+    window.addEventListener("pointerdown", record, true);
+    window.addEventListener("pointermove", record, true);
+    window.addEventListener("pointerdown", onPointerDownCapture, true);
+    window.addEventListener("pointermove", onPointerMoveCapture, true);
+    window.addEventListener("pointerup", onPointerUpCapture, true);
+    window.addEventListener("pointercancel", onPointerUpCapture, true);
+    window.addEventListener("pointermove", onCursorMove, true);
+    window.addEventListener("pointerdown", clearCursor, true);
+    window.addEventListener("pointerup", clearCursor, true);
+    window.addEventListener("pointercancel", clearCursor, true);
+    window.addEventListener("scroll", clearCursor, true);
+    window.addEventListener("scroll", function () {
+      for (var si = 0; si < state.surfaces.length; si++) {
+        var ss = state.surfaces[si];
+        if (ss.kind === "markdown" || ss.kind === "canvas") ss.rects = null;
+      }
+      if (state.barMode !== "always" && state.barExpanded) collapseToolbar();
+    }, { capture: true, passive: true });
+    try { document.addEventListener("pointerleave", clearCursor, true); } catch (eL) {}
+    // A lost pen-up must not leave the translucent "writing" state covering
+    // the nib, or the controls look dead until the 2.6s watchdog fires.
+    var clearWritingChrome = function () {
+      state.penUiSwipe = null;
+      if (state.active) return;
+      state.blockedPointerId = null;
+      var root = toolbarEl();
+      if (root) root.classList.remove("is-writing");
+    };
+    window.addEventListener("pointerup", clearWritingChrome, true);
+    window.addEventListener("pointercancel", clearWritingChrome, true);
+    // A pen swipe that started on chrome must not activate that chrome on
+    // pointerup/click; suppress the synthetic click for a short window.
+    window.addEventListener("click", function (ev) {
+      if (Date.now() < state.penClickSuppressUntil) {
+        try { ev.preventDefault(); } catch (eC1) {}
+        try { ev.stopPropagation(); } catch (eC2) {}
+        try { ev.stopImmediatePropagation(); } catch (eC3) {}
+      }
+    }, true);
+    window.addEventListener("touchstart", onPenCompatibilityBlock, { capture: true, passive: false });
+    window.addEventListener("touchmove", onPenCompatibilityBlock, { capture: true, passive: false });
+    window.addEventListener("touchend", onPenCompatibilityBlock, { capture: true, passive: false });
+    window.addEventListener("touchcancel", onPenCompatibilityBlock, { capture: true, passive: false });
+    window.addEventListener("mousedown", onPenCompatibilityBlock, true);
+    window.addEventListener("mousemove", onPenCompatibilityBlock, true);
+    window.addEventListener("mouseup", onPenCompatibilityBlock, true);
+    window.addEventListener("touchstart", onEdgeTouchStart, { capture: true, passive: true });
+    window.addEventListener("touchmove", onEdgeTouchMove, { capture: true, passive: false });
+    window.addEventListener("touchend", onEdgeTouchEnd, { capture: true, passive: false });
+    window.addEventListener("touchcancel", onEdgeTouchEnd, { capture: true, passive: false });
+    window.addEventListener("pointerdown", onPenEdgePointer, true);
+    window.addEventListener("pointermove", onPenEdgePointer, true);
+    window.addEventListener("touchstart", function (ev) {
+      if (state.active ||
+        (state.penNativeActive && nowMs() - (state.lastPenActivity || 0) < 900)) {
+        try { ev.preventDefault(); } catch (e) {}
+      }
+    }, { capture: true, passive: false });
+    window.addEventListener("touchmove", function (ev) {
+      if (state.active ||
+        (state.penNativeActive && nowMs() - (state.lastPenActivity || 0) < 900)) {
+        try { ev.preventDefault(); } catch (e) {}
+      }
+    }, { capture: true, passive: false });
+    // Any of these can interrupt a pen stroke before its pointerup arrives.
+    window.addEventListener("blur", function () {
+      clearCursor();
+      forceReleaseActive(true);
+      flushPdfWrite();
+    });
+    document.addEventListener("visibilitychange", function () {
+      try {
+        if (document.hidden) {
+          forceReleaseActive(true);
+          flushPdfWrite();
+        }
+      } catch (e) {}
+    });
+    window.addEventListener("keydown", function (ev) {
+      if (ev && (ev.key === "Escape" || ev.keyCode === 27)) forceReleaseActive(true);
+    }, true);
+  }
+
+  function onNativeMessageEvent(ev) {
+    try { onNativeMessage(ev.detail); } catch (e) {}
+  }
+
+  // ---------------------------------------------------------------------
+  // Workspace integration
+  // ---------------------------------------------------------------------
+  function onLayoutChange() {
+    setTimeout(function () {
+      try { inkRefreshSurfaces(); } catch (e) {}
+    }, 60);
+  }
+
+  function onActiveLeafChange() {
+    flushPdfWrite();
+    var app = state.app;
+    var leaf = app && app.workspace ? app.workspace.activeLeaf : null;
+    state.activeLeaf = leaf;
+    state.activeSurface = leaf ? activeSurfaceForLeaf(leaf) : null;
+    if (state.activeSurface && state.activeSurface.kind === "pdf") {
+      // Keep currentSpace in sync for the badge and eraser.
+      try {
+        var pn = state.activeSurface.viewer.currentPageNumber;
+        if (pn > 0) state.activeSurface.currentSpace = "pdf:" + (pn - 1);
+      } catch (e) {}
+      if (!state.activeSurface.currentSpace) {
+        var keys = Object.keys(state.activeSurface.pages);
+        if (keys.length) state.activeSurface.currentSpace = state.activeSurface.pages[keys[0]].space;
+      }
+    }
+    setTimeout(function () {
+      try { inkRefreshSurfaces(); } catch (e) {}
+    }, 30);
+    updateToolbarState();
+  }
+
+  function onRename(file, oldPath) {
+    if (!file || !oldPath || file.path === oldPath) return;
+    var oldKey = inkKey(oldPath);
+    var doc = store.cache[oldKey];
+    var ad = adapter();
+    if (!ad) return;
+    ad.exists(pathFor(oldKey)).then(function (exists) {
+      if (!exists) return;
+      return ad.read(pathFor(oldKey)).then(function (txt) {
+        var parsed = JSON.parse(txt);
+        parsed.target = file.path;
+        parsed.updated = Date.now();
+        var newKey = inkKey(file.path);
+        store.cache[oldKey] = null;
+        store.cache[newKey] = parsed;
+        ensureDirs().then(function () {
+          ad.write(DOCS + "/" + newKey + ".json", JSON.stringify(parsed)).then(function () {
+            ad.remove(pathFor(oldKey)).catch(function () {});
+          }).catch(function () {});
+        });
+      });
+    }).catch(function () {});
+    if (doc) doc.target = file.path;
+  }
+
+  function install(app) {
+    if (state.installed) return true;
+    state.installed = true;
+    state.app = app;
+    loadPrefs();
+    injectCss();
+    installPenObservers();
+    window.addEventListener("ohsidian-native-message", onNativeMessageEvent);
+    addCommands(app);
+    try {
+      app.workspace.onLayoutReady(function () {
+        try { inkRefreshSurfaces(); } catch (e) {}
+        // The active reading view often mounts after onLayoutReady; refresh a
+        // few times so the first nib tap does not hit "not ready".
+        var mountDelays = [150, 400, 900, 1600];
+        for (var md = 0; md < mountDelays.length; md++) {
+          (function (delay) {
+            setTimeout(function () {
+              try { inkRefreshSurfaces(); } catch (e2) {}
+            }, delay);
+          })(mountDelays[md]);
+        }
+        try { buildToolbar(); } catch (eBar) { warn("toolbar build failed", eBar && eBar.message); }
+        updateToolbarState();
+        ensureIpc();
+        var t = setInterval(function () {
+          try {
+            if (!state.ipcReady && window.__ohsidianNativeIpcReady) {
+              state.ipcReady = true;
+            }
+            ensureIpc();
+            // stylusInfo is one-shot right after the handshake; on a fast boot
+            // it can arrive before this layer's listener exists.
+            if (!state.stylusInfo) sendAction({ action: "stylusInfo" });
+            // Retries the penSamplesOn handshake if the socket was not ready
+            // when the pressure detector first asked for samples.
+            negotiatePressure();
+          } catch (e) {}
+        }, 3000);
+        state.ipcTimer = t;
+      });
+      app.workspace.on("layout-change", onLayoutChange);
+      app.workspace.on("active-leaf-change", onActiveLeafChange);
+      app.workspace.on("file-open", onLayoutChange);
+      app.workspace.on("css-change", function () {
+        try {
+          for (var i = 0; i < state.surfaces.length; i++) inkRefreshAutoColors(state.surfaces[i]);
+        } catch (e) {}
+        scheduleRedraw();
+      });
+      if (app.vault && app.vault.on) {
+        app.vault.on("rename", onRename);
+      }
+      window.addEventListener("resize", function () {
+        setTimeout(function () { inkRefreshSurfaces(); }, 80);
+      });
+      document.addEventListener("pointerdown", function (ev) {
+        if (!ev.target || !ev.target.closest) return;
+        if (!ev.target.closest("#" + TOOLBAR_ID) && !ev.target.closest("#" + MENU_ID)) closeMenu();
+      }, true);
+    } catch (e) {
+      warn("workspace hooks failed", e && e.message);
+    }
+    log("installed rev " + OHSIDIAN_INK_REV);
+    inkTrace("boot", {
+      rev: OHSIDIAN_INK_REV,
+      enabled: state.enabled,
+      mode: state.barMode,
+      pos: state.barPos,
+      viewport: [window.innerWidth || 0, window.innerHeight || 0],
+      dpr: window.devicePixelRatio || 1
+    });
+    return true;
+  }
+
+  function boot() {
+    if (state.installed) return true;
+    try {
+      if (window.app) {
+        var ok = install(window.app);
+        if (ok) window.__ohsidianInkInstalled = true;
+        return ok;
+      }
+    } catch (e) {
+      warn("install failed", e && e.message);
+    }
+    return false;
+  }
+
+  // Expose a tiny surface for debugging/tests and let touch-mode.js reach us.
+  window.__ohsidianInk = {
+    state: state,
+    setTool: setTool,
+    undo: inkUndo,
+    redo: inkRedo,
+    clear: inkClearSpace,
+    writePdf: inkWritePdf,
+    exportSvg: inkExportSvg,
+    diagnostics: diagnosticLines,
+    refresh: inkRefreshSurfaces,
+    _down: onPointerDownCapture,
+    _up: onPointerUpCapture,
+    _surfaceAt: surfaceAtEvent,
+    _excluded: isExcluded
+  };
+
+  if (!boot()) {
+    var tries = 0;
+    var timer = setInterval(function () {
+      tries++;
+      if (boot() || tries > 240) clearInterval(timer);
+    }, 250);
+  }
+})();

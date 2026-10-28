@@ -124,6 +124,8 @@ web_engine/src/main/ets/adapter/
 ├── ShapeDetection.ets          # 形状检测
 ├── Speech.ets                  # 文字转语音
 ├── StatusBar.ets               # 状态栏控制
+├── StylusAdapter.ets           # 手写笔手势（双击/轻捏）订阅与广播
+├── PdfInkWriter.ets            # PDF 墨迹注释写回（PDF Kit）
 ├── SubWindow.ets               # 子窗口管理
 ├── SystemFloatingWindow.ets    # 系统悬浮窗
 └── Trash.ets                   # 回收站操作

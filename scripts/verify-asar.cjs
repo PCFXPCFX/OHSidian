@@ -34,6 +34,16 @@ try {
   }
   const checks = {
     'app touch patch marker': /__ohsidianTouchPatch==="\d+"/.test(app),
+    // Ink layer (docs/STYLUS-PEN.md P1/P2). These markers prove the block was
+    // injected, the sidecar store + pressure side-channel are wired, and the
+    // shared loopback socket was extended for stylus/pen messages.
+    'app ink layer marker': app.includes('__ohsidianInkPatch') && app.includes('OHSIDIAN_INK_REV'),
+    'app ink store + pressure tap': app.includes('.obsidian/ohsidian-ink') && app.includes('penSamplesOn'),
+    'app ink surfaces + pdf write': app.includes('ohsidian-ink-base') && app.includes('inkWritePdf') &&
+      app.includes('pdfInk'),
+    'app ink settings + diagnostics hooks': app.includes('__ohsidianInkHooks') &&
+      app.includes('buildSettings'),
+    'app native message fanout': app.includes('ohsidian-native-message') && app.includes('__ohsidianNativeSend'),
     // Round 98r revert: the vdec-shim experiment is shelved (see
     // docs/CHANGES-2026-09.md HEVC verdict); assert the toggle is GONE.
     'app video-hw toggle removed (98r revert)': !app.includes('ohsidian-video-hw'),

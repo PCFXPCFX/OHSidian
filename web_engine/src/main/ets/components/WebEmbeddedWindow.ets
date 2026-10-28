@@ -76,33 +76,6 @@ export struct WebEmbeddedWindow {
       .focusable(true)
       .defaultFocus(true)
       .backgroundColor(Color.White)
-      .gesture(
-        PanGesture({ direction: PanDirection.Vertical | PanDirection.Horizontal })
-          .onActionStart((event: GestureEvent) => {
-            this.multiInputAdapter.OnPanEvent(PanAction.kStart, this.xComponentId, event);
-          })
-          .onActionUpdate((event: GestureEvent) => {
-            this.multiInputAdapter.OnPanEvent(PanAction.kUpdate, this.xComponentId, event);
-          })
-          .onActionEnd((event: GestureEvent) => {
-            this.multiInputAdapter.OnPanEvent(PanAction.kEnd, this.xComponentId, event);
-          })
-          .onActionCancel(() => {
-            this.multiInputAdapter.OnPanEvent(PanAction.kCancel, this.xComponentId, undefined);
-          })
-      )
-      .gesture(
-        PinchGesture()
-          .onActionStart((event: GestureEvent) => {
-            this.multiInputAdapter.OnPinchEvent("start", this.xComponentId, event);
-          })
-          .onActionUpdate((event: GestureEvent) => {
-            this.multiInputAdapter.OnPinchEvent("update", this.xComponentId, event);
-          })
-          .onActionEnd((event: GestureEvent) => {
-            this.multiInputAdapter.OnPinchEvent("end", this.xComponentId, event);
-          })
-      )
       .onDragEnter((event?: DragEvent) => {
         this.dragDropAdapter.dragEnterData(this.xComponentId, (event as DragEvent).getSummary());
       })

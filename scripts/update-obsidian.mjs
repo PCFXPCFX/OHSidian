@@ -168,6 +168,11 @@ const readPatch = (name) => fs.readFileSync(path.join(PATCH_DIR, name), 'utf8');
 
 const TOUCH_MODE_PATCH = readPatch('touch-mode.js');
 
+// The ink layer (docs/STYLUS-PEN.md P1/P2) is prepended BEFORE touch-mode.js
+// so its settings/diagnostics hooks exist by the time the settings page is
+// built. Both blocks live in the same app.js scope and share one IPC socket.
+const INK_PATCH = readPatch('ohsidian-ink.js');
+
 /**
  * IPC guard patch for the asar's main process (main.js):
  * wraps ipcMain.on/handle/... so handlers that touch an already-destroyed
@@ -183,10 +188,18 @@ async function main() {
   const currentVersion = readReleaseInfo();
   log(`current Obsidian version: ${currentVersion}`);
 
-  const release = await fetchReleaseJson();
   // --repatch without a version rebuilds the CURRENTLY PINNED kernel (what
   // hvigor/ensure-obsidian-asar and local rebuilds want); the plain path
   // without --repatch upgrades to latest stable as documented.
+  //
+  // Offline repatch: the pinned artifact already records hash + signature, and
+  // the download is cached under scripts/.tmp-update. Fetching the live release
+  // JSON is therefore unnecessary (and makes repatching impossible without a
+  // network), so skip it when we are rebuilding the pinned kernel.
+  let release = null;
+  if (!repatch) {
+    release = await fetchReleaseJson();
+  }
   const targetVersion = versionArg || (repatch ? currentVersion : release.latestVersion);
   log(`target Obsidian version: ${targetVersion}${repatch ? ' (repatch)' : ''}`);
 
@@ -203,7 +216,14 @@ async function main() {
   // come from the pinned table, otherwise --repatch silently downloads and
   // installs "latest" under the pinned version name.
   let entry;
-  if (release.beta && versionArg === release.beta.latestVersion) {
+  if (repatch) {
+    entry = readPinnedArtifact(targetVersion);
+    if (!entry) {
+      fail(`no pinned artifact for Obsidian ${targetVersion}; add it to scripts/obsidian-artifacts.json ` +
+        '(offline repatch needs the pinned hash + signature to validate the cached download)');
+    }
+    log(`offline repatch: using pinned artifact for ${targetVersion}`);
+  } else if (release.beta && versionArg === release.beta.latestVersion) {
     entry = release.beta;
   } else if (targetVersion === release.latestVersion) {
     entry = release;
@@ -263,7 +283,7 @@ async function main() {
   fs.writeFileSync(downloadedAsar, asarBuffer);
 
   // --- inject touch-mode command + IPC guard ---
-  log('injecting touch-mode command into app.js');
+  log('injecting ink layer + touch-mode command into app.js');
   const extractedDir = path.join(TEMP_DIR, 'extracted');
   fs.rmSync(extractedDir, { recursive: true, force: true });
   asar.extractAll(downloadedAsar, extractedDir);
@@ -334,7 +354,7 @@ async function main() {
     }
   }
 
-  fs.writeFileSync(appJs, TOUCH_MODE_PATCH + appSrc);
+  fs.writeFileSync(appJs, INK_PATCH + TOUCH_MODE_PATCH + appSrc);
 
   const asarMainJs = path.join(extractedDir, 'main.js');
   if (fs.existsSync(asarMainJs)) {

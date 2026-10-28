@@ -883,17 +883,20 @@ function ohsidianNativeIpcEnsure(){
     try{s.setKeepAlive(true,30000)}catch(eK){}
     s.on("connect",function(){
       __ohsidianNativeIpcReady=true;
+      window.__ohsidianNativeIpcReady=true;
       __ohsidianNativeIpcTriedAt=0;
       __ohsidianNativeIpcIn="";
       try{s.write(JSON.stringify({hello:1,token:token})+"\n")}catch(eH){}
     });
     s.on("error",function(){
       __ohsidianNativeIpcReady=false;
+      window.__ohsidianNativeIpcReady=false;
       try{s.destroy()}catch(eD){}
       if(__ohsidianNativeIpcSock===s)__ohsidianNativeIpcSock=null;
     });
     s.on("close",function(){
       __ohsidianNativeIpcReady=false;
+      window.__ohsidianNativeIpcReady=false;
       if(__ohsidianNativeIpcSock===s)__ohsidianNativeIpcSock=null;
     });
     s.on("data",function(chunk){
@@ -907,6 +910,10 @@ function ohsidianNativeIpcEnsure(){
           var msg=JSON.parse(line);
           if(msg&&msg.event==="opened"&&typeof msg.seq==="number")ohsidianConfirmNativeOpen(msg.seq);
           if(msg&&msg.event==="close")ohsidianHandleNativeClosed();
+          /* Hand writing bridge: the ink layer listens for stylus gestures,
+             pen samples and PDF write-back results on this event. Dispatch
+             every message so new consumers do not need another socket. */
+          try{window.dispatchEvent(new CustomEvent("ohsidian-native-message",{detail:msg}))}catch(eM){}
         }
       }catch(eD){}
     });
@@ -924,11 +931,20 @@ function ohsidianNativeIpcSend(req){
     return true;
   }catch(e){
     __ohsidianNativeIpcReady=false;
+    window.__ohsidianNativeIpcReady=false;
     try{__ohsidianNativeIpcSock.destroy()}catch(eD){}
     __ohsidianNativeIpcSock=null;
     return false;
   }
 }
+/* The ink layer (scripts/patches/ohsidian-ink.js) reuses this socket instead
+   of opening a second connection: the ArkTS page accepts one client. It also
+   shares the UI-preference file, which lives inside this closure. */
+window.__ohsidianNativeSend=ohsidianNativeIpcSend;
+window.__ohsidianNativeEnsure=ohsidianNativeIpcEnsure;
+window.ohsidianReadUiPrefs=ohsidianReadUiPrefs;
+window.ohsidianWriteUiPrefs=ohsidianWriteUiPrefs;
+window.ohsidianShowReportModal=ohsidianShowReportModal;
 function ohsidianNativeGeometry(el){
   try{
     if(!el||!el.getBoundingClientRect)return null;
@@ -3557,6 +3573,7 @@ function ohsidianSettingsRows(root){
         var ok=ohsidianWriteUiPrefs(prefs);
         try{new Notice("OHSidian: 嵌入网页字体跟随 → "+(on?"开":"关")+(ok?"（重开该网页生效）":"（写入失败）"),5000)}catch(e){}
       });
+    /* 手写笔设置现在是独立的“手写笔”选项卡，见 ohsidianBuildStylusTab(). */
     /* --- 诊断 --- */
     var diag=newGroup("导出");
     var pathCtl=itemEl(diag,"Pandoc 路径",
@@ -3757,6 +3774,140 @@ function ohsidianEnsureSettingsTab(){
     return false;
   }
 }
+/* Dedicated “手写笔” settings tab. It borrows a real core SettingTab for the
+   same reasons as the OHSidian tab above, but renders only the ink patch's
+   groups. Keeping it separate means users who never touch a pen never see
+   pressure/toolbar rows in the main OHSidian page. */
+function ohsidianBuildStylusTab(){
+  try{
+    var s=window.app&&window.app.setting;
+    if(!s)return null;
+    if(window.__ohsidianStylusTabObj)return window.__ohsidianStylusTabObj;
+    var Base=ohsidianSettingsTabBase(s);
+    if(!Base){
+      try{
+        var pt=(s.pluginTabs&&s.pluginTabs.length)?s.pluginTabs[0]:null;
+        if(pt&&pt.constructor)Base=pt.constructor;
+      }catch(e2){}
+    }
+    var tab=null;
+    if(Base){try{tab=new Base(window.app,s)}catch(e3){tab=null}}
+    if(!tab){
+      tab={
+        setting:s,
+        settingItems:[],
+        getSettingDefinitions:function(){return[]},
+        update:function(){return this}
+      };
+      try{
+        tab.containerEl=document.createElement("div");
+        tab.containerEl.className="vertical-tab-content";
+      }catch(e4){}
+    }
+    tab.id="ohsidian-stylus";
+    tab.name="手写笔";
+    tab.display=function(){
+      try{
+        var c=this.containerEl;
+        if(c){
+          while(c.firstChild)c.removeChild(c.firstChild);
+          c.classList.add("setting-page");
+        }
+        var mk=function(tag,cls,text){
+          var el=document.createElement(tag);
+          if(cls)el.className=cls;
+          if(text!==undefined)el.textContent=text;
+          return el;
+        };
+        var page=mk("div","setting-page-content");
+        page.style.paddingTop="var(--size-4-6)";
+        c.appendChild(page);
+        var newGroup=function(heading){
+          var group=mk("div","setting-group");
+          page.appendChild(group);
+          if(heading){
+            var h=mk("div","setting-item setting-item-heading");
+            var n=mk("div","setting-item-name",heading);
+            n.style.cssText="font-size:calc(var(--font-ui-medium) * 1.18);"+
+              "font-weight:var(--font-semibold,600)";
+            h.appendChild(n);h.appendChild(mk("div","setting-item-control"));
+            group.appendChild(h);
+          }
+          var list=mk("div","setting-items");
+          group.appendChild(list);
+          return list;
+        };
+        var itemEl=function(list,name,desc,toggleRow){
+          var r=mk("div","setting-item"+(toggleRow?" mod-toggle":""));
+          r.setAttribute("tabindex","-1");
+          var info=mk("div","setting-item-info");
+          info.appendChild(mk("div","setting-item-name",name));
+          info.appendChild(mk("div","setting-item-description",desc));
+          var ctl=mk("div","setting-item-control");
+          r.appendChild(info);r.appendChild(ctl);
+          list.appendChild(r);
+          return ctl;
+        };
+        var toggleEl=function(ctl,on,onChange){
+          var box=mk("div","checkbox-container"+(on?" is-enabled":""));
+          var inp=document.createElement("input");
+          inp.type="checkbox";
+          inp.checked=!!on;
+          box.appendChild(inp);
+          inp.addEventListener("change",function(){
+            if(inp.checked){box.classList.add("is-enabled")}
+            else{box.classList.remove("is-enabled")}
+            onChange(!!inp.checked);
+          });
+          ctl.appendChild(box);
+        };
+        var ctx={newGroup:newGroup,itemEl:itemEl,toggleEl:toggleEl,mk:mk};
+        if(window.__ohsidianInkHooks&&typeof window.__ohsidianInkHooks.buildSettings==="function"){
+          window.__ohsidianInkHooks.buildSettings(ctx);
+        }else{
+          page.appendChild(mk("p","","手写笔模块未加载。请重新加载 OHSidian。"));
+        }
+      }catch(eD){
+        window.__ohsidianStylusSettingsError="渲染手写笔设置失败: "+String((eD&&eD.message)||eD);
+        try{console.warn("[OHSidian] stylus settings failed:",window.__ohsidianStylusSettingsError)}catch(e2){}
+      }
+    };
+    tab.hide=function(){};
+    tab.update=function(){this.settingItems=[];return this};
+    tab.getSettingDefinitions=function(){return[]};
+    if(!tab.containerEl&&!tab.navEl)return null;
+    window.__ohsidianStylusTabObj=tab;
+    return tab;
+  }catch(e){return null}
+}
+function ohsidianEnsureStylusTab(){
+  try{
+    var s=window.app&&window.app.setting;
+    if(!s||typeof s.addSettingTab!=="function")return false;
+    if(window.__ohsidianStylusTab)return true;
+    if(!ohsidianSettingsReady())return false;
+    var tab=ohsidianBuildStylusTab();
+    if(!tab)return false;
+    try{
+      if(!s.settingTabs||s.settingTabs.indexOf(tab)<0)s.addSettingTab(tab);
+    }catch(eAdd){
+      window.__ohsidianStylusSettingsError="addSettingTab(手写笔) 抛错: "+
+        String((eAdd&&eAdd.message)||eAdd);
+      return false;
+    }
+    window.__ohsidianStylusTab=tab;
+    window.__ohsidianStylusSettingsError="";
+    return true;
+  }catch(e){
+    window.__ohsidianStylusSettingsError=String((e&&e.message)||e);
+    return false;
+  }
+}
+function ohsidianEnsureAllSettingsTabs(){
+  try{ohsidianEnsureSettingsTab()}catch(e1){}
+  try{ohsidianEnsureStylusTab()}catch(e2){}
+}
+
 /* Registration has to happen while the settings modal is open: its container and
    search component are created there. Wrapping open() gives us that moment, and
    a few delayed retries cover the gap between open() and onOpen(). */
@@ -3770,7 +3921,7 @@ function ohsidianHookSettingsOpen(){
       try{
         var delays=[80,300,800,1600,3000];
         for(var i=0;i<delays.length;i++){
-          (function(d){setTimeout(function(){try{ohsidianEnsureSettingsTab()}catch(e){}},d)})(delays[i]);
+          (function(d){setTimeout(function(){try{ohsidianEnsureAllSettingsTabs()}catch(e){}},d)})(delays[i]);
         }
       }catch(e){}
       return r;
@@ -3913,18 +4064,18 @@ function ohsidianInstallTouchProbe(){
   }catch(e){return false}
 }
 function ohsidianScheduleSettingsTab(){
-  try{window.app.workspace.onLayoutReady(function(){ohsidianEnsureSettingsTab()})}catch(e){}
+  try{window.app.workspace.onLayoutReady(function(){ohsidianEnsureAllSettingsTabs()})}catch(e){}
   try{ohsidianHookSettingsOpen()}catch(eH){}
   /* Try once now (harmless: it just records "waiting for the settings panel"),
      then let the open() hook do the real work. No polling ladder - the modal is
      the only moment registration can succeed. */
-  setTimeout(function(){try{ohsidianEnsureSettingsTab()}catch(e){}},2000);
+  setTimeout(function(){try{ohsidianEnsureAllSettingsTabs()}catch(e){}},2000);
 }
 /* One-glance answer to "is the patch I am running the one we just built?".
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="188";
+var OHSIDIAN_PATCH_REV="189";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -3992,6 +4143,12 @@ function ohsidianBuildStatusLines(){
   row("最近右键",cm?("trusted="+cm.trusted+" · touch="+cm.touch+" · "+
     Math.round((Date.now()-cm.t)/1000)+"s 前"):"未捕获（长按一次再看）");
   row("工具栏",document.getElementById("ohsidian-toolbar-hit")?"no-drag 已注入":"未注入");
+  try{
+    if(window.__ohsidianInkHooks&&typeof window.__ohsidianInkHooks.diagnosticLines==="function"){
+      var inkLines=window.__ohsidianInkHooks.diagnosticLines()||[];
+      for(var iInk=0;iInk<inkLines.length;iInk++)L.push(inkLines[iInk]);
+    }
+  }catch(eInkDiag){}
   /* ---- 功能 --------------------------------------------------------- */
   sec("功能");
   var prefs={};
@@ -4070,6 +4227,18 @@ var install=function(app){
     app.commands.addCommand({id:"ohsidian-diag-pandoc",name:"OHSidian 诊断: Pandoc 环境",
       callback:function(){ohsidianRunPandocProbe()}});
     try{ohsidianScheduleSettingsTab()}catch(eTab){}
+    /* The ink layer needs the loopback socket even when no native video was
+       opened; retry until the ArkTS page has published its port file. */
+    try{
+      var inkIpcTries=0;
+      var inkIpcTimer=setInterval(function(){
+        inkIpcTries++;
+        try{
+          if(ohsidianNativeIpcEnsure()||inkIpcTries>150)clearInterval(inkIpcTimer);
+        }catch(eIpc){clearInterval(inkIpcTimer)}
+      },2000);
+      setTimeout(function(){try{ohsidianNativeIpcEnsure()}catch(eIpc0){}},1200);
+    }catch(eIpcBoot){}
     /* TEMPORARY: toolbar hit-test probe (remove with the fix). */
     try{ohsidianInstallTouchProbe()}catch(eTP){}
     /* BUG-001: install the text-over-binary write guard as early as the vault

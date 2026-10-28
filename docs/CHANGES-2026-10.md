@@ -3553,3 +3553,71 @@ var n    =mk("div","setting-item-name",heading);   // 「诊断」同理
 - 重打 asar 24.92 MiB，`verify-asar` 全绿（`FRESH-PROCESS VERIFY: SYNTAX OK`）；
 - 复查 asar 内容：坏代码已消失、`page.style.paddingTop` 在、补丁号 188、旧副标题不在；
 - 注意：`main.js` 属于 HAP 包装层（不在 asar 内），必须重编 HAP 才带上 opt-in 改动。
+
+## 第 189 轮 (2026-10-28): 手写笔 M-Pencil 全链路适配（v35）
+
+**范围**：手写笔输入仲裁、笔记/PDF/Canvas/内嵌 PDF 墨迹、PDF 直接写回与恢复、
+性能/耗电、工具条/橡皮/调色盘/界面效果，以及 ArkTS 外部审计修复。
+方案文档已压缩为 `docs/STYLUS-PEN.md`。
+
+**输入链路**
+
+- 默认关闭：`inkEnabled` 缺省 false，老安装一次性迁移；设置名改为“手写笔模式”。
+- ArkTS `onPageTouchIntercept`：Pen/Mouse/Touchpad 放行；笔悬停/书写 1.2s 内
+  手指/手掌/Unknown 全拦；其余时间按接触面积拦手掌，允许手指点按。
+- 渲染层：笔在 ink surface 画；在 ink chrome 可点/长按/拖滑块；在 Obsidian
+  其他 UI 或空白处 pointerdown 即拦；兼容 touch/mouse 在笔活动期吞掉。
+- 移除 NodeContainer 的 PanGesture/PinchGesture；双击默认只唤醒工具条。
+- `taskpool` 执行 PDF 写入与恢复，避免 PDFKit 同步 load/save 冻结 UI。
+
+**PDF**
+
+- 真实 viewer：`view.pdfViewer.pdfViewer` + `containerEl` 回退。
+- DOM 回退 `pdfdom`：页 canvas 挂在滚动内容内，随合成器原生滚动；缩放用
+  `offsetWidth/offsetHeight` 与 offsetParent 链，避免 transform 二次缩放。
+- 第 2 页起首次 resize 用 `sized` 强制设置 canvas 真实尺寸。
+- 直接写入：replace 先删本页 `ohsidian-` 与 sidecar 旧 id，再按当前笔画重加
+  （含 baked）；抬笔/擦除/撤销/清空后 3s 自动写当前页，翻页/失焦 flush。
+- 原始备份：主路径 `.obsidian/ohsidian-ink/backups/<name>-<pathHash>.orig.pdf`，
+  失败 fallback 到 PDF 同目录 `.ohsidian-orig.pdf`；恢复 `findBackup()` 两处都查。
+- 替换：先复制到 PDF 同目录 `.hso-new-*`，校验后同文件系统 swap；平台拒绝覆盖
+  时先 `src → .hso-old-*` 再换入，失败恢复；不跨 cache/vault rename。
+- 修正 replace 跳过 baked 导致第二次写入删笔画的问题。
+
+**性能/耗电**
+
+- live 增量绘制，只画新增段；抬笔 `appendStroke` 只追加当前笔，跳过整页重绘。
+- `beginStroke()` 缓存 sizer/page/canvas rect，整笔不再每点读布局。
+- undo 快照改 stroke 引用，不再 JSON 深拷贝整页；sidecar 保存 900ms 合并。
+- 橡皮：pointermove 只在 base canvas 上 `destination-out` 挖圆，pointerup 一次性
+  应用路径；bbox 预筛 + 浅拷贝；只重绘被擦 surface。覆盖 markdown/PDF/pdfdom/Canvas。
+- 滚动原生；hover ring 节流；毛玻璃默认关，减少动画默认开。
+
+**UI/交互**
+
+- 橡皮圆环显示擦除半径（修复 `state.cursorEnabled` 未初始化）；半径可配 6–32px。
+- 长按/双击橡皮按钮打开“滑动清除本页”自绘滑块，面板锚定橡皮上方。
+- 工具条 5 色调色盘可在设置在“颜色 → 工具条调色盘”配置，立即重建。
+- 界面效果：毛玻璃/减少动画开关；毛玻璃使用 CSS backdrop-filter，平板默认关。
+
+**外部审计修复**
+
+- `PdfDocument.releaseDocument()` 无条件调用；失败路径清理 cacheSrc/cacheOut。
+- Unknown 手掌面积检测、restore taskpool/seq/busy 互斥、restore 临时文件清理。
+- canIUse 缓存；PenSampleTap catch 增加告警；删除未赋值 penAreaW/H。
+- worker 内不再调用 canIUse，避免 taskpool 误报 PDF Kit 不可用。
+
+**验证**
+
+- `node --check scripts/patches/ohsidian-ink.js`、`touch-mode.js` OK；
+- `update-obsidian --repatch` + `verify-asar` 全绿；
+- `hvigorw assembleHap` **BUILD SUCCESSFUL**；HAP v35 120931640 B，2026-10-28 10:44:42；
+- 关键真机项：橡皮即时消失、PDF 缩放/滚动对齐、PDF 直接写入与备份/恢复、
+  调色盘配置、毛玻璃/减少动画。
+
+**已知限制**
+
+- 加密/超大/损坏 PDF 可能拒绝写回；PDF 被其他进程锁定时最终 swap 可能失败。
+- pdfdom 归一化写入对旋转/裁切页可能有位置偏差；首次备份是“当时”的文件。
+- Obsidian pdf.js 对 `/Ink` 渲染不完整，因此叠加层仍保留。
+- P3 原生低延迟覆盖层未启动。

@@ -28,15 +28,19 @@
  */
 
 import { WebWindow, BackPressBridge, NativeVideoOverlay, NativeVideoTheme } from 'web_engine';
+import { StylusAdapter, StylusKind, PenSampleTap } from 'web_engine';
+import { PdfInkWriter, PdfInkRequest, PdfInkResult, PdfInkStroke } from 'web_engine';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { KeyCode } from '@kit.InputKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { socket } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
+import { taskpool } from '@kit.ArkTS';
 import { media } from '@kit.MediaKit';
 import { image } from '@kit.ImageKit';
 import { window } from '@kit.ArkUI';
+import { vibrator } from '@kit.SensorServiceKit';
 import CustomChildProcess from '../process/CustomChildProcess';
 
 // Round 105: how long the renderer gets to answer a back gesture with its
@@ -91,6 +95,35 @@ interface NativeVideoRequest {
   hello?: number;
   token?: string;
   event?: string;
+  // Developer diagnostics from the renderer ink layer. One line per key UI
+  // transition (toolbar, nib, surface mount, gesture) so a HiLog capture can
+  // answer "did the click reach the patch?" without a remote debugger.
+  detail?: string;
+  // Renderer ink tool state: "pen" (pen/highlighter/eraser) or "pointer".
+  // ArkTS uses it to block finger/palm hit-testing while a pen tool is active.
+  tool?: string;
+  // --- handwriting bridge (docs/STYLUS-PEN.md §6.4) ---
+  // Renderer -> ArkTS: enable/disable the pressure side-channel.
+  on?: boolean;
+  // ArkTS -> renderer: batched pen samples, [x, y, pressure01, tiltX, tiltY, ageMs].
+  pts?: Array<Array<number>>;
+  phase?: string;
+  w?: number;
+  h?: number;
+  // Renderer -> ArkTS: PDF ink write-back.
+  rel?: string;
+  vaultRoot?: string;
+  page?: number;
+  strokes?: Array<PdfInkStroke>;
+  // "vector" (PDF points) or "normalized" (0..1 page coords, pdfdom).
+  inkMode?: string;
+  // Replace our previous annotations on that page (erase/delete/undo sync).
+  replace?: boolean;
+  removeIds?: Array<string>;
+  // ArkTS -> renderer: write-back result.
+  bytes?: number;
+  error?: string;
+  backup?: string;
 }
 
 // BUG-005 liveness budget. The renderer refreshes the overlay request on every
@@ -124,6 +157,27 @@ interface IUpdateStyle {
 
 CustomChildProcess.toString();
 let storage = LocalStorage.getShared();
+/**
+ * PDFKit load/save is synchronous and can take hundreds of ms on a large PDF.
+ * Running it on the UI thread froze the canvas after every auto-write; keep the
+ * whole copy/annotate/save sequence in a taskpool worker instead.
+ */
+@Concurrent
+function pdfInkWriteTask(req: PdfInkRequest): PdfInkResult {
+  return PdfInkWriter.write(req);
+}
+
+interface PdfInkRestoreArgs {
+  path: string;
+  backup: string;
+  cacheDir: string;
+}
+
+@Concurrent
+function pdfInkRestoreTask(args: PdfInkRestoreArgs): PdfInkResult {
+  return PdfInkWriter.restore(args.path, args.backup, args.cacheDir);
+}
+
 @Entry(storage)
 @Component
 struct Index {
@@ -200,6 +254,32 @@ struct Index {
   //     the reliable signal and must not be routed through the renderer.
   private nativeLastActivity: number = 0;
   private nativeWatchdog: number = -1;
+  // --- handwriting bridge state (docs/STYLUS-PEN.md) ---------------------
+  // Pressure samples are only produced while the renderer asks for them; the
+  // renderer turns the channel on after it has proved that the engine drops
+  // pressure (gate G2/G3 in the plan). Idle pages pay nothing.
+  private penSamplesWanted: boolean = false;
+  private penId: number = -1;
+  private penPending: Array<Array<number>> = [];
+  private penFlushTimer: number = -1;
+  private penPhase: string = 'move';
+  private penSampleSent: number = 0;
+  private penProbeLogged: number = 0;
+  private penOwnerXid: string = '';
+  private stylusForwarded: number = 0;
+  // While a pen is writing (and briefly after), finger hit-testing is blocked
+  // before it reaches the XComponent. This keeps palm/finger swipes out of the
+  // web content: Obsidian never sees them, so it cannot open side panels or
+  // fire edge gestures. Pen events still pass through untouched.
+  private penGuardUntil: number = 0;
+  // True while the renderer has a pen/highlighter/eraser tool selected. In
+  // this mode finger/palm contacts are blocked at hit-test time so they never
+  // reach Obsidian's own swipe handlers.
+  private inkPenMode: boolean = false;
+  // PDF ink commands are sequenced independently from the video overlay.
+  private lastPdfSeq: number = 0;
+  private lastPdfRestoreSeq: number = 0;
+  private pdfInkBusy: boolean = false;
 
   private initStyle: IStyleData = {
     backgroundColor: 'ffffffff',
@@ -220,6 +300,16 @@ struct Index {
     this.nativeWatchdog = setInterval(() => this.sweepNativeOverlay(), 1000);
     this.attachNativeWindow();
     this.startNativeIpc();
+    // Pen Kit's stylusInteraction service is process-wide; every page registers
+    // a sender so the gesture lands in the window that has focus.
+    try {
+      StylusAdapter.register(this.xcomponentId, (kind: StylusKind, ts: number) => {
+        this.onStylusGesture(kind, ts);
+      });
+      StylusAdapter.ensure();
+    } catch (e) {
+      console.warn('StylusIpc', 'register failed: ' + JSON.stringify(e));
+    }
   }
 
   aboutToDisappear() {
@@ -227,6 +317,15 @@ struct Index {
     // Never leave the system status bar hidden if the page dies mid-fullscreen.
     this.applySystemBars(false);
     this.stopNativeIpc();
+    try {
+      StylusAdapter.unregister(this.xcomponentId);
+    } catch (e) {
+    }
+    if (this.penFlushTimer >= 0) {
+      clearTimeout(this.penFlushTimer);
+      this.penFlushTimer = -1;
+    }
+    this.penPending = [];
     if (this.nativeTimer >= 0) {
       clearInterval(this.nativeTimer);
       this.nativeTimer = -1;
@@ -563,6 +662,13 @@ struct Index {
             // process that only scans loopback ports cannot inject requests.
             if (msg.hello === 1 && msg.token === this.nativeToken) {
               this.nativeAuthorized = true;
+              // A renderer restart starts in pointer/hand mode until it says
+              // otherwise; do not inherit a stale pen lock.
+              this.inkPenMode = false;
+              // Tell the ink layer what the process can actually do; it shows
+              // this in diagnostics instead of guessing. Repeated on request
+              // because a fast boot can send this before the listener exists.
+              this.sendStylusInfo();
               if (!this.nativeIpcPrimed) {
                 // The renderer may have opened via the file fallback before
                 // the socket connected; prime one read before stopping it.
@@ -572,13 +678,418 @@ struct Index {
               this.stopFilePolling();
             }
           } else {
-            this.acceptNativeRequest(msg);
+            // Control messages are not media requests: they carry no seq and
+            // no rect, and must not disturb the overlay state machine.
+            if (msg.action === 'penSamplesOn') {
+              this.setPenSamplesWanted(msg.on === true);
+            } else if (msg.action === 'stylusInfo') {
+              this.sendStylusInfo();
+            } else if (msg.action === 'inkLog') {
+              const inkEvent: string = msg.event === undefined ? '' : msg.event;
+              const inkDetail: string = msg.detail === undefined ? '' : msg.detail;
+              console.info('InkUI', inkEvent + ' ' + inkDetail);
+            } else if (msg.action === 'inkTool') {
+              this.inkPenMode = msg.tool === 'pen';
+              console.info('InkUI', 'nativeTool ' + (this.inkPenMode ? 'pen' : 'hand'));
+            } else if (msg.action === 'pdfInk') {
+              this.handlePdfInk(msg);
+            } else if (msg.action === 'pdfInkRestore') {
+              this.handlePdfRestore(msg);
+            } else {
+              this.acceptNativeRequest(msg);
+            }
           }
         } catch (e) {
           // Ignore one malformed line; the next line is still valid.
         }
       }
       idx = this.nativeBuffer.indexOf('\n');
+    }
+  }
+
+  // ===== handwriting bridge ==============================================
+  // Everything below is transport: Pen Kit gestures become one IPC line, and
+  // ArkUI pen samples become batched IPC lines for the renderer's pressure
+  // merge. No ink is rendered here in P1; that lives in the renderer patch.
+
+  /**
+   * A double-tap / squeeze belongs to the focused window. The renderer checks
+   * document.hasFocus() again, because window focus and DOM focus can disagree
+   * for a moment during a mode switch.
+   */
+  private onStylusGesture(kind: StylusKind, ts: number): void {
+    if (this.disposed) {
+      return;
+    }
+    let focused: boolean = true;
+    try {
+      if (this.nativeWin !== null) {
+        focused = this.nativeWin.isFocused();
+      }
+    } catch (e) {
+      focused = true;
+    }
+    if (!focused) {
+      console.info('StylusIpc', 'drop ' + kind + ' (window not focused)');
+      return;
+    }
+    this.stylusForwarded++;
+    this.vibrateTick();
+    this.sendNativeLine(JSON.stringify({
+      event: 'stylus',
+      kind: kind,
+      ts: ts,
+      xcomponentId: this.xcomponentId
+    }));
+  }
+
+  /** Short tick so a barrel double-tap is felt, not guessed. */
+  private vibrateTick(): void {
+    try {
+      const effect: vibrator.VibrateTime = { type: 'time', duration: 12 };
+      const attribute: vibrator.VibrateAttribute = { id: 0, usage: 'unknown' };
+      vibrator.startVibration(effect, attribute).catch((err: BusinessError) => {
+        // A tablet without a motor rejects this; never let it bubble.
+        console.info('StylusIpc', 'vibrate skipped: ' + err.code);
+      });
+    } catch (e) {
+    }
+  }
+
+  private sendNativeLine(json: string): void {
+    const conn: socket.TCPSocketConnection | null = this.nativeClient;
+    if (conn === null || !this.nativeAuthorized) {
+      return;
+    }
+    try {
+      conn.send({ data: json + '\n' }).catch((err: Error) => {
+        console.warn('StylusIpc', 'send failed: ' + JSON.stringify(err));
+      });
+    } catch (e) {
+      console.warn('StylusIpc', 'send threw: ' + JSON.stringify(e));
+    }
+  }
+
+  /** Capability snapshot for the ink layer's diagnostics (also on demand). */
+  private sendStylusInfo(): void {
+    this.sendNativeLine(JSON.stringify({
+      event: 'stylusInfo',
+      supported: StylusAdapter.isSupported(),
+      subscribed: StylusAdapter.isSubscribed(),
+      error: StylusAdapter.errorText(),
+      pdf: PdfInkWriter.available()
+    }));
+  }
+
+  /**
+   * ArkUI-level pen/finger arbitration. Hit testing happens before the event
+   * reaches the XComponent; returning Block for finger contacts while the pen
+   * guard is active is the only reliable way to keep palm swipes out of the
+   * web content (DOM preventDefault runs too late).
+   */
+  private onPageTouchIntercept(event: TouchEvent): HitTestMode {
+    if (this.disposed) {
+      return HitTestMode.Default;
+    }
+    try {
+      if (event.sourceTool === SourceTool.Pen ||
+        event.sourceTool === SourceTool.MOUSE ||
+        event.sourceTool === SourceTool.TOUCHPAD) {
+        return HitTestMode.Default;
+      }
+      if (Date.now() < this.penGuardUntil) {
+        // The pen is hovering or writing right now: all finger/palm contacts
+        // are rejected so a resting hand cannot scroll or open panels.
+        return HitTestMode.Block;
+      }
+      // Finger, palm, or an unknown contact: allow normal taps but reject a
+      // palm-sized contact. Unknown is used by some devices for palms.
+      const palmLimit: number = this.inkPenMode ? 34 : 44;
+      const list = event.touches;
+      if (list) {
+        for (let i = 0; i < list.length; i++) {
+          const tw: number | undefined = list[i].width;
+          const th: number | undefined = list[i].height;
+          if ((tw !== undefined && tw > palmLimit) ||
+            (th !== undefined && th > palmLimit)) {
+            return HitTestMode.Block;
+          }
+        }
+      }
+    } catch (e) {
+    }
+    return HitTestMode.Default;
+  }
+
+  /**
+   * Stylus hover is the earliest signal that a pen is over the screen. Use it
+   * to arm the guard before the pen touches down, so a palm already resting on
+   * the glass cannot start a finger swipe first.
+   */
+  private onPageHover(isHover: boolean, event: HoverEvent): void {
+    try {
+      if (isHover && event.sourceTool === SourceTool.Pen) {
+        this.penGuardUntil = Date.now() + 1200;
+      }
+    } catch (e) {
+    }
+  }
+
+  /**
+   * The page-level tap that feeds the renderer's pressure side-channel. It is
+   * deliberately attached to the web content's parent: touch events bubble, so
+   * this sees every pen sample without taking any input away from the engine.
+   */
+  private onPageTouch(event: TouchEvent): void {
+    if (this.disposed || event.sourceTool !== SourceTool.Pen) {
+      return;
+    }
+    // Extend the pen guard on down/move/up; finger contacts during this window
+    // are blocked in onPageTouchIntercept before the web engine sees them.
+    this.penGuardUntil = Date.now() + 1200;
+    if (event.type === TouchType.Down) {
+      this.penId = PenSampleTap.penIdOf(event);
+      this.penPhase = 'down';
+      // Tells the renderer "the input you are about to receive is a pen" even
+      // when the engine reports it as mouse/touch (gate G3 in the plan).
+      this.sendNativeLine(JSON.stringify({ event: 'penActive', active: true }));
+    } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      if (this.penId < 0) {
+        this.penId = PenSampleTap.penIdOf(event);
+      }
+      this.penPhase = 'up';
+      this.sendNativeLine(JSON.stringify({ event: 'penActive', active: false }));
+    } else if (this.penPhase === 'down') {
+      this.penPhase = 'move';
+    }
+    if (this.penId < 0) {
+      return;
+    }
+    // Probe: five lines per stroke prove that the page sees pen events at all.
+    // This is the ArkTS half of docs/STYLUS-PEN.md appendix A.
+    this.penProbeLogged++;
+    if (this.penProbeLogged <= 5 || this.penProbeLogged % 200 === 0) {
+      console.info('PenProbe', JSON.stringify({
+        t: event.type,
+        src: event.sourceTool,
+        p: event.pressure,
+        touches: event.touches.length,
+        penId: this.penId,
+        samplesWanted: this.penSamplesWanted
+      }));
+    }
+    if (this.penSamplesWanted) {
+      const added: number = PenSampleTap.collect(event, this.penId, this.penPending);
+      if (added > 0) {
+        // Samples are already in this component's vp coordinates. On this
+        // engine 1 CSS px == 1 vp (docs/STYLUS-PEN.md §7.2); the renderer
+        // treats a zero w/h as "no scaling" and applies a calibrated offset.
+        this.schedulePenFlush();
+      }
+    }
+    if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      // The flush clears penId; if sampling is off there is nothing to flush.
+      if (!this.penSamplesWanted) {
+        this.penId = -1;
+      }
+    }
+  }
+
+  private schedulePenFlush(): void {
+    if (this.penFlushTimer >= 0) {
+      return;
+    }
+    this.penFlushTimer = setTimeout(() => {
+      this.penFlushTimer = -1;
+      this.flushPenSamples();
+    }, 8);
+  }
+
+  private flushPenSamples(): void {
+    if (this.penPending.length === 0) {
+      if (this.penPhase === 'up') {
+        this.penPhase = 'move';
+        this.penId = -1;
+      }
+      return;
+    }
+    const pts: Array<Array<number>> = this.penPending;
+    const phase: string = this.penPhase;
+    this.penPending = [];
+    this.penSampleSent += pts.length;
+    if (phase === 'up') {
+      this.penPhase = 'move';
+      this.penId = -1;
+    }
+    if (!this.nativeAuthorized) {
+      return;
+    }
+    this.sendNativeLine(JSON.stringify({
+      event: 'penSamples',
+      phase: phase,
+      n: this.penSampleSent,
+      pts: pts
+    }));
+  }
+
+  private setPenSamplesWanted(on: boolean): void {
+    if (this.penSamplesWanted === on) {
+      return;
+    }
+    this.penSamplesWanted = on;
+    this.penPending = [];
+    this.penId = -1;
+    if (this.penFlushTimer >= 0) {
+      clearTimeout(this.penFlushTimer);
+      this.penFlushTimer = -1;
+    }
+    console.info('StylusIpc', 'pen samples ' + (on ? 'on' : 'off') + ' xid=' + this.xcomponentId);
+  }
+
+  /**
+   * PDF ink write-back (P2). Implemented in PdfInkWriter; this method only
+   * sequences the request and guarantees a response so the renderer's promise
+   * cannot hang.
+   */
+  private handlePdfInk(req: NativeVideoRequest): void {
+    const seq: number = typeof req.seq === 'number' ? req.seq : 0;
+    if (!(seq > this.lastPdfSeq)) {
+      return;
+    }
+    this.lastPdfSeq = seq;
+    const reply = (result: PdfInkResult): void => {
+      this.sendNativeLine(JSON.stringify({
+        event: 'pdfInkResult',
+        seq: seq,
+        ok: result.ok,
+        bytes: result.bytes,
+        error: result.error,
+        backup: result.backup
+      }));
+    };
+    try {
+      if (!PdfInkWriter.available()) {
+        reply({ ok: false, bytes: 0, error: 'PDF Kit 不可用', backup: '' });
+        return;
+      }
+      if (this.pdfInkBusy) {
+        reply({ ok: false, bytes: 0, error: 'PDF 写入忙，请稍后', backup: '' });
+        return;
+      }
+      const path: string = req.path ? req.path : '';
+      const root: string = req.vaultRoot ? req.vaultRoot : '';
+      const rel: string = req.rel ? req.rel : '';
+      const strokes: Array<PdfInkStroke> = req.strokes ? req.strokes : [];
+      const page: number = typeof req.page === 'number' ? req.page : -1;
+      const replace: boolean = req.replace === true;
+      if (!path || !root || !rel || page < 0 || (!replace && strokes.length === 0)) {
+        reply({ ok: false, bytes: 0, error: '请求参数不完整', backup: '' });
+        return;
+      }
+      // The renderer is trusted, but a wrong rel/path pair must not be able to
+      // write outside the vault: reject traversal and mismatched roots.
+      const rootPrefix: string = root.endsWith('/') ? root : (root + '/');
+      if (rel.indexOf('..') >= 0 || rel.startsWith('/') ||
+        (path !== root && path.indexOf(rootPrefix) !== 0)) {
+        reply({ ok: false, bytes: 0, error: '路径不在仓库内', backup: '' });
+        return;
+      }
+      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      const backupDir: string = root + '/.obsidian/ohsidian-ink/backups';
+      const pdfReq: PdfInkRequest = {
+        src: path,
+        page: page,
+        strokes: strokes,
+        cacheDir: ctx.cacheDir,
+        backupDir: backupDir,
+        mode: req.inkMode ? req.inkMode : 'vector',
+        replace: req.replace === true,
+        removeIds: req.removeIds ? req.removeIds : []
+      };
+      this.pdfInkBusy = true;
+      taskpool.execute(pdfInkWriteTask, pdfReq).then((out: Object) => {
+        this.pdfInkBusy = false;
+        const result: PdfInkResult = out as PdfInkResult;
+        console.info('PdfInk', 'page=' + page + ' strokes=' + strokes.length +
+          ' ok=' + result.ok + (result.error ? ' err=' + result.error : ''));
+        reply(result);
+      }).catch((e: Error) => {
+        this.pdfInkBusy = false;
+        console.warn('PdfInk', 'taskpool failed, falling back to UI thread: ' + JSON.stringify(e));
+        try {
+          const result: PdfInkResult = PdfInkWriter.write(pdfReq);
+          reply(result);
+        } catch (e2) {
+          reply({ ok: false, bytes: 0, error: '写入失败：' + e.message, backup: '' });
+        }
+      });
+    } catch (e) {
+      this.pdfInkBusy = false;
+      console.warn('PdfInk', 'write failed: ' + JSON.stringify(e));
+      reply({ ok: false, bytes: 0, error: '写入异常：' + JSON.stringify(e), backup: '' });
+    }
+  }
+
+  private handlePdfRestore(req: NativeVideoRequest): void {
+    const seq: number = typeof req.seq === 'number' ? req.seq : 0;
+    if (!(seq > this.lastPdfRestoreSeq)) {
+      return;
+    }
+    this.lastPdfRestoreSeq = seq;
+    const reply = (result: PdfInkResult): void => {
+      this.sendNativeLine(JSON.stringify({
+        event: 'pdfInkResult',
+        seq: seq,
+        ok: result.ok,
+        bytes: result.bytes,
+        error: result.error,
+        backup: result.backup
+      }));
+    };
+    try {
+      if (this.pdfInkBusy) {
+        reply({ ok: false, bytes: 0, error: 'PDF 写入进行中，请稍后再恢复', backup: '' });
+        return;
+      }
+      const path: string = req.path ? req.path : '';
+      const root: string = req.vaultRoot ? req.vaultRoot : '';
+      const rel: string = req.rel ? req.rel : '';
+      const rootPrefix: string = root.endsWith('/') ? root : (root + '/');
+      if (!path || !root || !rel || rel.indexOf('..') >= 0 || rel.startsWith('/') ||
+        (path !== root && path.indexOf(rootPrefix) !== 0)) {
+        reply({ ok: false, bytes: 0, error: '恢复路径无效', backup: '' });
+        return;
+      }
+      const ctx: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+      const backupDir: string = root + '/.obsidian/ohsidian-ink/backups';
+      const backup: string = PdfInkWriter.findBackup(path, backupDir);
+      const args: PdfInkRestoreArgs = {
+        path: path,
+        backup: backup,
+        cacheDir: ctx.cacheDir
+      };
+      this.pdfInkBusy = true;
+      taskpool.execute(pdfInkRestoreTask, args).then((out: Object) => {
+        this.pdfInkBusy = false;
+        const result: PdfInkResult = out as PdfInkResult;
+        console.info('PdfInk', 'restore ok=' + result.ok + (result.error ? ' err=' + result.error : ''));
+        reply(result);
+      }).catch((e: Error) => {
+        // Worker unavailable: restore is only a copy, do it synchronously as a
+        // last resort rather than leaving the user without a recovery path.
+        console.warn('PdfInk', 'restore taskpool failed: ' + JSON.stringify(e));
+        try {
+          const result: PdfInkResult = PdfInkWriter.restore(path, backup, ctx.cacheDir);
+          this.pdfInkBusy = false;
+          reply(result);
+        } catch (e2) {
+          this.pdfInkBusy = false;
+          reply({ ok: false, bytes: 0, error: '恢复异常：' + e.message, backup: '' });
+        }
+      });
+    } catch (e) {
+      this.pdfInkBusy = false;
+      reply({ ok: false, bytes: 0, error: '恢复异常：' + JSON.stringify(e), backup: '' });
     }
   }
 
@@ -1135,6 +1646,15 @@ struct Index {
             event.stopPropagation();
           }
         }
+      })
+      // Stylus hover arms the guard before touchdown; finger/palm is blocked
+      // during pen activity, while pen/mouse/touchpad pass through.
+      .onHover((isHover: boolean, event: HoverEvent) => this.onPageHover(isHover, event))
+      .onTouchIntercept((event: TouchEvent) => this.onPageTouchIntercept(event))
+      // Bubbling pen samples for the pressure side-channel; the engine keeps
+      // full ownership of the input itself (no hit-test change).
+      .onTouch((event: TouchEvent) => {
+        this.onPageTouch(event);
       })
       .backgroundColor(this.backgroundColor_)
       .opacity(this.opacity_)

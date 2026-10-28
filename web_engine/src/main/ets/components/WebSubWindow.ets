@@ -77,21 +77,6 @@ export struct WebSubWindow {
       .backgroundColor(this.params.initColorRgb)
       .focusable(true)
       .defaultFocus(true)
-      .gesture(
-        PanGesture({ direction: PanDirection.Vertical | PanDirection.Horizontal })
-          .onActionStart((event: GestureEvent) => {
-            this.multiInputAdapter.OnPanEvent(PanAction.kStart, this.xComponentId, event);
-          })
-          .onActionUpdate((event: GestureEvent) => {
-            this.multiInputAdapter.OnPanEvent(PanAction.kUpdate, this.xComponentId, event);
-          })
-          .onActionEnd((event: GestureEvent) => {
-            this.multiInputAdapter.OnPanEvent(PanAction.kEnd, this.xComponentId, event);
-          })
-          .onActionCancel(() => {
-            this.multiInputAdapter.OnPanEvent(PanAction.kCancel, this.xComponentId, undefined);
-          })
-      )
       .onDragEnter((event?: DragEvent) => {
         LogUtil.info(WebSubWindow.TAG, 'OhosDrag WebWindow onDragEnter xComponentId:' + this.xComponentId);
         this.dragDropAdapter.dragEnterData(this.xComponentId, (event as DragEvent).getSummary());

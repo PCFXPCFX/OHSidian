@@ -50,6 +50,13 @@ export class MultiInputAdapter extends BaseAdapter {
       // The scroll wheel event of the touch screen is triggered by
       // the touch event
       return false;
+    } else if (event.sourceTool === SourceTool.Pen) {
+      // A pen is not a scroll source. The pan gesture on the web surface
+      // exists to synthesise wheel events for touchpads (see the Mouse
+      // branch above); forwarding pen drags here produced a second,
+      // synthetic scroll on top of the pen events the engine already
+      // receives from the XComponent, so drawing dragged the page.
+      return false;
     }
     return true;
   }
