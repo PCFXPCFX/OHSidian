@@ -14,8 +14,8 @@
  * pressure is constant it asks ArkTS for the device-rate sample stream
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
-window.__ohsidianInkPatch = "35";
-var OHSIDIAN_INK_REV = "35";
+window.__ohsidianInkPatch = "36";
+var OHSIDIAN_INK_REV = "36";
 (function () {
   "use strict";
 
@@ -1664,7 +1664,12 @@ var OHSIDIAN_INK_REV = "35";
       viewer: viewer,
       container: container,
       pages: {},
-      dpr: window.devicePixelRatio || 1,
+      // The overlay never needs more than 2x; 2.249 costs 26% more pixels
+      // per page with no visible gain on handwriting at reading distance.
+      dpr: Math.min(window.devicePixelRatio || 1, 2),
+      io: null,
+      scaleTimer: 0,
+      disposed: false,
       doc: null,
       currentSpace: "",
       hooks: false,
@@ -1679,7 +1684,7 @@ var OHSIDIAN_INK_REV = "35";
         }
       },
       ensurePage: function (pageEl) {
-        if (!pageEl) return null;
+        if (!pageEl || this.disposed) return null;
         var idx = parseInt(pageEl.dataset.pageNumber, 10);
         if (!(idx > 0)) return null;
         var index = idx - 1;
@@ -1687,12 +1692,17 @@ var OHSIDIAN_INK_REV = "35";
         try { pageView = this.viewer.getPageView(index); } catch (e) {}
         if (!pageView || !pageView.viewport) return null;
         var vp = pageView.viewport;
-        try {
-          if (getComputedStyle(pageEl).position === "static") pageEl.style.position = "relative";
-        } catch (ePos) {}
+        // getComputedStyle forces a style flush. Probe each page once: pdf.js
+        // keeps the page div for the lifetime of the viewer.
+        if (pageEl.dataset.ohsidianInkPos !== "1") {
+          try {
+            if (getComputedStyle(pageEl).position === "static") pageEl.style.position = "relative";
+          } catch (ePos) {}
+          pageEl.dataset.ohsidianInkPos = "1";
+        }
         var cv = ensureCanvas(pageEl, "ohsidian-ink-pdf", 4);
         var entry = this.pages[index];
-        if (!entry || entry.pageEl !== pageEl || entry.viewport !== vp) {
+        if (!entry || entry.pageEl !== pageEl || entry.viewport !== vp || entry.cv !== cv) {
           var w = Math.max(1, vp.width);
           var h = Math.max(1, vp.height);
           sizeCanvas(cv, w, h, this.dpr);
@@ -1706,8 +1716,43 @@ var OHSIDIAN_INK_REV = "35";
             h: h
           };
           this.pages[index] = entry;
+          // Populate a newly mounted page immediately; pagerendered may have
+          // already fired before the observer/pen-down created this canvas.
+          this.redrawPage(entry);
         }
         return entry;
+      },
+      dropPage: function (entry) {
+        if (!entry) return;
+        // Never tear down the page the pen is writing on. The next refresh
+        // collects it after the stroke is committed.
+        if (state.active && state.active.surface === this &&
+          (!state.active.entry || state.active.entry === entry)) return;
+        try {
+          if (entry.cv && entry.cv.parentNode) entry.cv.parentNode.removeChild(entry.cv);
+        } catch (e) {}
+        if (this.pages[entry.index] === entry) delete this.pages[entry.index];
+      },
+      dropPageEl: function (pageEl) {
+        for (var key in this.pages) {
+          if (!Object.prototype.hasOwnProperty.call(this.pages, key)) continue;
+          if (this.pages[key] && this.pages[key].pageEl === pageEl) {
+            this.dropPage(this.pages[key]);
+            return;
+          }
+        }
+      },
+      prunePages: function () {
+        var dead = [];
+        for (var key in this.pages) {
+          if (!Object.prototype.hasOwnProperty.call(this.pages, key)) continue;
+          var entry = this.pages[key];
+          if (!entry || !entry.pageEl || !entry.pageEl.isConnected ||
+            !entry.cv || !entry.cv.isConnected) {
+            dead.push(entry);
+          }
+        }
+        for (var i = 0; i < dead.length; i++) this.dropPage(dead[i]);
       },
       surfaceAt: function (el) {
         var pageEl = this.pageOf(el);
@@ -1753,30 +1798,34 @@ var OHSIDIAN_INK_REV = "35";
         ctx.fill();
         ctx.restore();
       },
-      redraw: function () {
+      redrawPage: function (entry) {
+        if (!entry || !entry.cv || !entry.cv.isConnected) return;
+        var ctx = entry.cv.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, entry.cv.width, entry.cv.height);
         var doc = this.doc;
         if (!doc) return;
+        ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+        // Read the preference once per page, not once per stroke.
+        var showBaked = pref("inkPdfAfterBake", "hide") === "keep";
+        for (var i = 0; i < doc.strokes.length; i++) {
+          var st = doc.strokes[i];
+          if (st.space !== entry.space) continue;
+          if (st.baked && !showBaked) continue;
+          drawStrokeOnCtx(ctx, st, {
+            toCanvasPoint: (function (e) {
+              return function (x, y) { return surface.toCanvasPointOn(e, x, y); };
+            })(entry),
+            widthScale: (function (e) {
+              return function () { return surface.widthScaleOn(e); };
+            })(entry)
+          });
+        }
+      },
+      redraw: function () {
         for (var key in this.pages) {
           if (!Object.prototype.hasOwnProperty.call(this.pages, key)) continue;
-          var entry = this.pages[key];
-          if (!entry || !entry.cv || !entry.cv.isConnected) continue;
-          var ctx = entry.cv.getContext("2d");
-          ctx.setTransform(1, 0, 0, 1, 0, 0);
-          ctx.clearRect(0, 0, entry.cv.width, entry.cv.height);
-          ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-          for (var i = 0; i < doc.strokes.length; i++) {
-            var st = doc.strokes[i];
-            if (st.space !== entry.space) continue;
-            if (st.baked && pref("inkPdfAfterBake", "hide") !== "keep") continue;
-            drawStrokeOnCtx(ctx, st, {
-              toCanvasPoint: (function (e) {
-                return function (x, y) { return surface.toCanvasPointOn(e, x, y); };
-              })(entry),
-              widthScale: (function (e) {
-                return function () { return surface.widthScaleOn(e); };
-              })(entry)
-            });
-          }
+          this.redrawPage(this.pages[key]);
         }
       },
       drawLive: function (entry, stroke) {
@@ -1795,8 +1844,43 @@ var OHSIDIAN_INK_REV = "35";
       clearLive: function (entry) {
         if (entry) this.drawLive(entry, null);
       },
-      refreshPages: function () {
+      observePages: function () {
+        var self = this;
         var els = this.container.querySelectorAll(".page[data-page-number]");
+        if (typeof IntersectionObserver !== "function") return false;
+        if (!this.io) {
+          // Keep the overlay within ±1.2 screens of the viewport. pdf.js can
+          // render pages ahead of the visible area; without this bound an
+          // overlay canvas is allocated for every page ever visited.
+          this.io = new IntersectionObserver(function (entries) {
+            if (self.disposed || !state.enabled) return;
+            for (var i = 0; i < entries.length; i++) {
+              var en = entries[i];
+              var pageEl = en.target;
+              if (en.isIntersecting) {
+                // ensurePage redraws only when it actually mounted/resized the
+                // page, so re-observing on every layout change stays cheap.
+                try { self.ensurePage(pageEl); } catch (e) {}
+              } else {
+                self.dropPageEl(pageEl);
+              }
+            }
+          }, { root: null, rootMargin: "120% 0px" });
+        }
+        // Rebuild the observation set: page divs can be replaced when pdf.js
+        // loads another document in the same leaf.
+        try { this.io.disconnect(); } catch (e2) {}
+        for (var j = 0; j < els.length; j++) {
+          try { this.io.observe(els[j]); } catch (e3) {}
+        }
+        return true;
+      },
+      refreshPages: function () {
+        this.prunePages();
+        var els = this.container.querySelectorAll(".page[data-page-number]");
+        if (this.observePages()) return;
+        // No IntersectionObserver (very old engine): preserve the old
+        // behaviour rather than losing ink on non-visible pages entirely.
         for (var i = 0; i < els.length; i++) this.ensurePage(els[i]);
         this.redraw();
       },
@@ -1809,12 +1893,19 @@ var OHSIDIAN_INK_REV = "35";
             var pageEl = e && e.source && e.source.div;
             if (!pageEl) return;
             var entry = self.ensurePage(pageEl);
-            if (entry) self.drawLive(entry, null);
-            self.redraw();
+            if (!entry) return;
+            self.drawLive(entry, null);
+            // Only this page changed. The old code cleared and repainted
+            // every mounted page here, i.e. N clears for each of N renders.
+            self.redrawPage(entry);
           } catch (e2) {}
         };
         var onScale = function () {
-          setTimeout(function () { self.refreshPages(); }, 30);
+          if (self.scaleTimer) clearTimeout(self.scaleTimer);
+          self.scaleTimer = setTimeout(function () {
+            self.scaleTimer = 0;
+            try { self.refreshPages(); } catch (eS) {}
+          }, 120);
         };
         this.handlers = { rendered: onRendered, scale: onScale };
         try {
@@ -1827,6 +1918,7 @@ var OHSIDIAN_INK_REV = "35";
         setTimeout(function () { self.refreshPages(); }, 0);
       },
       unmount: function () {
+        this.disposed = true;
         try {
           if (this.handlers) {
             this.viewer.eventBus.off("pagerendered", this.handlers.rendered);
@@ -1834,6 +1926,16 @@ var OHSIDIAN_INK_REV = "35";
             this.viewer.eventBus.off("scalechanged", this.handlers.scale);
           }
         } catch (eOff) {}
+        try {
+          if (this.io) {
+            this.io.disconnect();
+            this.io = null;
+          }
+        } catch (eIO) {}
+        if (this.scaleTimer) {
+          clearTimeout(this.scaleTimer);
+          this.scaleTimer = 0;
+        }
         for (var key in this.pages) {
           if (!Object.prototype.hasOwnProperty.call(this.pages, key)) continue;
           var entry = this.pages[key];
@@ -2556,6 +2658,15 @@ var OHSIDIAN_INK_REV = "35";
   function inkRefreshSurfaces() {
     var app = state.app;
     if (!app || !app.workspace) return;
+    if (!state.enabled) {
+      // Handwriting mode is off. The settings page promises "plain Obsidian",
+      // so do not mount a single overlay canvas (PDF pages included).
+      for (var off = state.surfaces.length - 1; off >= 0; off--) {
+        try { removeSurface(state.surfaces[off]); } catch (eOff) {}
+      }
+      updateToolbarVisibility();
+      return;
+    }
     var leaves = [];
     try {
       leaves = leaves.concat(app.workspace.getLeavesOfType("markdown") || []);
@@ -2810,12 +2921,16 @@ var OHSIDIAN_INK_REV = "35";
 
   function negotiatePressure() {
     var want = false;
-    if (state.pressureTapPref === "on") {
-      want = true;
-    } else if (state.pressureTapPref === "auto") {
-      want = state.pressureMode === "fake" ||
-        (state.pressureMode === "unknown" && state.domPressureCount > 30 &&
-          Object.keys(state.domPressureValues).length <= 2);
+    // Handwriting mode off = plain Obsidian: stop the native ArkUI sample
+    // stream too, otherwise the pen keeps waking the app for nothing.
+    if (state.enabled) {
+      if (state.pressureTapPref === "on") {
+        want = true;
+      } else if (state.pressureTapPref === "auto") {
+        want = state.pressureMode === "fake" ||
+          (state.pressureMode === "unknown" && state.domPressureCount > 30 &&
+            Object.keys(state.domPressureValues).length <= 2);
+      }
     }
     if (want !== state.pressureTapOn) {
       var sent = sendAction({ action: "penSamplesOn", on: want });
@@ -5210,7 +5325,28 @@ var OHSIDIAN_INK_REV = "35";
     try { console.log(lines.join("\n")); } catch (e2) {}
   }
 
+  function pdfOverlayStats() {
+    var out = { canvases: 0, bytes: 0, mounted: 0, dpr: 0 };
+    try {
+      var list = document.querySelectorAll("canvas.ohsidian-ink-pdf");
+      out.canvases = list.length;
+      for (var i = 0; i < list.length; i++) {
+        var cv = list[i];
+        out.bytes += (cv.width || 0) * (cv.height || 0) * 4;
+      }
+      for (var s = 0; s < state.surfaces.length; s++) {
+        var sf = state.surfaces[s];
+        if (sf.kind === "pdf") {
+          out.mounted += Object.keys(sf.pages || {}).length;
+          out.dpr = sf.dpr || out.dpr;
+        }
+      }
+    } catch (e) {}
+    return out;
+  }
+
   function diagnosticLines() {
+    var pdfStat = pdfOverlayStats();
     var pt = Object.keys(state.pointerTypes || {}).map(function (k) {
       return k + "×" + state.pointerTypes[k];
     }).join(" ");
@@ -5253,6 +5389,11 @@ var OHSIDIAN_INK_REV = "35";
         state.gestureCount + " 次",
       "  " + "墨迹".padEnd(10) + "层=" + (surface ? surface.kind : "无") +
         " · 笔数=" + (doc ? doc.strokes.length : 0) + " · 未写回=" + pending,
+      "  " + "PDF叠层".padEnd(9) + (state.enabled
+        ? pdfStat.canvases + " 张/" + pdfStat.mounted + " 页 · " +
+          (pdfStat.bytes / 1048576).toFixed(1) + " MB · dpr " +
+          Number(pdfStat.dpr || 0).toFixed(2)
+        : "手写笔模式关闭（0 张）"),
       "  " + "IPC".padEnd(11) + (state.ipcReady ? "已连接" : "未连接") +
         " · 收 " + state.ipcRecv + " / 发 " + state.ipcSent +
         " · 最近笔事件 " + age
@@ -5304,6 +5445,7 @@ var OHSIDIAN_INK_REV = "35";
             updateToolbarState();
             updateToolbarVisibility();
             inkRefreshSurfaces();
+            try { negotiatePressure(); } catch (eNP) {}
           });
         var barCtl = ctx.itemEl(g, "工具条显示",
           "紧凑：点开后保持，直到再点笔尖；自动：点开后 8 秒收起；常驻：始终展开。");
@@ -5930,13 +6072,14 @@ var OHSIDIAN_INK_REV = "35";
     addCommands(app);
     try {
       app.workspace.onLayoutReady(function () {
-        try { inkRefreshSurfaces(); } catch (e) {}
+        if (state.enabled) { try { inkRefreshSurfaces(); } catch (e) {} }
         // The active reading view often mounts after onLayoutReady; refresh a
         // few times so the first nib tap does not hit "not ready".
         var mountDelays = [150, 400, 900, 1600];
         for (var md = 0; md < mountDelays.length; md++) {
           (function (delay) {
             setTimeout(function () {
+              if (!state.enabled) return;
               try { inkRefreshSurfaces(); } catch (e2) {}
             }, delay);
           })(mountDelays[md]);
@@ -6018,6 +6161,7 @@ var OHSIDIAN_INK_REV = "35";
     writePdf: inkWritePdf,
     exportSvg: inkExportSvg,
     diagnostics: diagnosticLines,
+    pdfStats: pdfOverlayStats,
     refresh: inkRefreshSurfaces,
     _down: onPointerDownCapture,
     _up: onPointerUpCapture,

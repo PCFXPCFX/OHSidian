@@ -3621,3 +3621,62 @@ var n    =mk("div","setting-item-name",heading);   // 「诊断」同理
 - pdfdom 归一化写入对旋转/裁切页可能有位置偏差；首次备份是“当时”的文件。
 - Obsidian pdf.js 对 `/Ink` 渲染不完整，因此叠加层仍保留。
 - P3 原生低延迟覆盖层未启动。
+
+## 第 190 轮 (2026-10-28): PDF 性能审计修复——叠层按需挂载 + 内核页 canvas 上限（v36）
+
+**来源**：`docs/PDF-PERF-AUDIT.md`（只读代码审计）。本轮落地其 P0（本仓库墨迹层的 PDF 叠层缺陷）
+与 P1（pdf.js 每页像素上限），不改上游 pdf.js 产物。
+
+**P0：PDF 叠层不再无条件给每页挂 canvas**
+
+| 问题（审计 B1） | 修复 |
+|---|---|
+| `state.enabled` 只拦输入，不拦挂载；关闭手写笔仍给每页建叠层 | `inkRefreshSurfaces()` 在 `!state.enabled` 时先卸载全部 surface 并直接返回；`install()` 的 5 次盲刷也只在启用时执行 |
+| 每页叠层按 `devicePixelRatio=2.249` 全分辨率分配 | PDF surface `dpr = min(devicePixelRatio, 2)`，与 pdfembed 路径一致 |
+| `pagerendered` 里遍历所有页清屏 → N 页渲染共 N² 次全画布清除 | 拆出 `redrawPage(entry)`；`pagerendered` 只重画事件对应的单页 |
+| `pages` 只增不减，pdf.js `reset()` 摘掉的 canvas 仍被持有 | 新增 `prunePages()` / `dropPage()`；IO 离开视口、DOM 断开、页面替换都释放叠层 |
+| 页面重渲染后旧条目仍指向 detached canvas | `ensurePage()` 增加 `entry.cv !== cv` 判定，重新建条目并立即重画 |
+| 每个可见页都常驻叠层，长文档随翻页增长 | `IntersectionObserver`（`rootMargin:"120% 0px"`）只挂视口 ±1.2 屏；旧引擎无 IO 时保留全量兜底 |
+| 每次缩放都全量重扫页表 | `scalechanging/scalechanged` 合并 120ms 防抖，只做一次 `refreshPages()` |
+| 每笔重绘都读一次 `inkPdfAfterBake` | 每页只读一次 |
+| 关闭手写笔后 ArkTS 仍可能开压力采样 | `negotiatePressure()` 增加 `state.enabled` 门；设置开关立即下发 `penSamplesOn:false` |
+
+另外：`unmount()` 置 `disposed`、断开 IO、清缩放定时器；IO 回调与 `ensurePage()` 都检查
+`disposed/enabled`，避免关闭后排队回调又挂回 canvas。
+
+**P1：一页 PDF 的 canvas 不超过一屏**
+
+`scripts/update-obsidian.mjs` 的 `APP_BODY_PATCHES` 新增：
+
+```js
+maxCanvasPixels:16777216,  →  maxCanvasPixels:16777216,capCanvasAreaFactor:0,
+```
+
+`capCanvasAreaFactor` 未被 Obsidian 转发，回落 `AppOptions`；`0` 的语义是“页 canvas ≤ 一屏像素”。
+本机 1244×818@2.249 代入：上限 5.15 Mpx。整窗宽 A4 从 9.69 Mpx/38.8 MB 降到 5.15 Mpx/20.6 MB
+（线性分辨率 73%）；900 宽面板仅 2.219 vs 2.249，几乎无损；600 窄栏不变。
+`verify-asar.cjs` 新增 `app pdf canvas cap (P1)` 与 `app ink pdf overlay bounded (P0)` 两个断言。
+
+**诊断**
+
+`OHSidian 手写笔诊断` 新增 `PDF叠层` 行：叠层张数 / 页表页数 / 总 MB / overlay dpr。
+关闭手写笔时应为 `0 张`；开启后应只随可见页数变化。`window.__ohsidianInk.pdfStats()` 可单独取。
+
+**验证**
+
+- `node --check scripts/patches/ohsidian-ink.js`、`update-obsidian.mjs`、`verify-asar.cjs` OK；
+- `update-obsidian --repatch`（1.13.7，锚点 `maxCanvasPixels:16777216` count=1）+ `verify-asar` 全绿；
+- HAP 内 asar 复查：P0/P1 标记与 `OHSIDIAN_INK_REV=36` 均在位；
+- `hvigorw assembleHap` **BUILD SUCCESSFUL in 28 s 673 ms**；
+  HAP **120,935,732 B**，2026-10-28 11:32:37，SHA-256
+  `262584F3DEDCDBB04283F4ECAD019226B5E11A863A0D14F6C2FBAE776EEC3C00`。
+
+**风险 / 未做**
+
+- `IntersectionObserver` 回调是异步的：开启后第一帧可能还没挂叠层，落笔时 `surfaceAt` 会同步
+  `ensurePage`，不影响书写；若某页已有墨迹且刚滚回，最多晚一帧显示。
+- overlay dpr 2 在 2.249 屏上比主 canvas 略软（2.0 vs 2.249）；P1 宽页文字分辨率降到 73%，
+  这是“每页 39 MB → 21 MB”的代价，窄面板无感。
+- P2（打开期 300ms 内抑制宽度变化触发的重定标、`enableDetailCanvas`）与 P3（`enableHWA` A/B）
+  本轮未做；按审计建议留到真机读数之后再定。
+- P1 只压主画布；高倍缩放时上游 `enableDetailCanvas` 仍可能再建 detail canvas（P3），高倍下内存/渲染任务可能翻倍，需真机 A/B。

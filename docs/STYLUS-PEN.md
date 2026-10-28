@@ -1,7 +1,7 @@
 # 手写笔（华为 M-Pencil）适配
 
-> 状态：实验功能，当前 **v35**。默认关闭，需在“设置 → 手写笔 → 手写笔模式”开启。
-> 实现与变更记录见 `docs/CHANGES-2026-10.md` 第 189 轮；更细的真机记录已归档到该文件的旧轮次。
+> 状态：实验功能，当前 **v36**。默认关闭，需在“设置 → 手写笔 → 手写笔模式”开启。
+> 实现与变更记录见 `docs/CHANGES-2026-10.md` 第 189–190 轮；更细的真机记录已归档到该文件的旧轮次。
 
 ## 1. 目标与边界
 
@@ -110,6 +110,10 @@ Stroke：
 - **DOM 回退**：`view.pdfViewer` 不可用时，用 `.page` 建立 `pdfdom` surface；页 canvas 挂在**滚动内容**（page 父节点）上，随合成器原生滚动，不用 scroll 事件追位置。
 - 缩放用 `offsetWidth/offsetHeight`（布局尺寸），避免 transform 二次缩放。
 - 翻页时用屏幕中心 `elementFromPoint` 定位可见 `.page`，按需创建并激活。
+- **只在手写笔模式开启时挂载**；关闭后 PDF 上不保留任何叠层 canvas。
+- 叠层只给视口 ±1.2 屏内的页分配，离开即释放；`dpr` 封顶 2（设备 2.249 时墨迹仍清晰）。
+- `pagerendered` 只重画事件对应的单页；页表只保留仍在 DOM 的页，翻过的页不再持有 detached canvas。
+- pdf.js 自己的页 canvas 由内核配置 `capCanvasAreaFactor:0` 限制在一屏像素内：整窗宽 A4 约 39 MB → 21 MB，窄分栏几乎不变。
 - 直接写入失败/不支持时仍保留叠加层。
 
 ### 5.3 内嵌 PDF
@@ -136,6 +140,11 @@ Stroke：
 7. **保存节流**：`saveSoon` 900ms 合并；关闭/失焦 flush。
 8. **光标节流**：hover ring 约 60fps；橡皮圆环与擦除半径一致。
 9. **UI 效果默认省电**：毛玻璃默认关，减少动画默认开。
+10. **PDF 叠层按需**：手写笔模式关闭时 0 张；开启时只给视口 ±1.2 屏分配，滚动离开即释放。
+11. **单页重绘**：`pagerendered` 只清/画该页，不再每渲染一页就遍历全部页（旧实现为 N² 次全画布清除）。
+12. **页表清理**：pdf.js reset 会摘掉叠层 canvas；`prunePages()` 同步删除 detached 条目，翻过的页不再占内存。
+13. **内核像素上限**：`maxCanvasPixels:16777216,capCanvasAreaFactor:0`，一页 PDF 的 canvas 不超过一屏像素；宽页降 27% 线性分辨率，窄面板几乎无损。
+14. **关闭即停**：`inkEnabled=false` 时同时停止 ArkTS 的 `penSamplesOn` 采样流，避免笔继续唤醒应用。
 
 ## 7. PDF 直接写入
 
@@ -215,6 +224,9 @@ PdfInk write/restore
 
 `InkUI commit` 包含 `space/points/color/width/tiles/hostH`，用于判断写入与宽度。
 
+诊断面板的 `PDF叠层` 行给出：叠层 canvas 张数、页表页数、总字节、overlay `dpr`。
+关闭手写笔模式后应为 **0 张**；开启后应只随可见页数增长，而不是随文档页数增长。
+
 ## 11. 文件
 
 | 文件 | 作用 |
@@ -225,6 +237,8 @@ PdfInk write/restore
 | `web_engine/src/main/ets/adapter/PdfInkWriter.ets` | PDF `/Ink` 写入、replace、备份、恢复 |
 | `scripts/patches/ohsidian-ink.js` | 渲染层：输入、surface、墨迹、工具条、设置 |
 | `scripts/patches/touch-mode.js` | 设置页/独立“手写笔”tab、IPC 端口 |
+| `scripts/update-obsidian.mjs` | 内核补丁：`capCanvasAreaFactor:0`（PDF 页 canvas 一屏上限） |
+| `scripts/verify-asar.cjs` | 校验 P0/P1 标记与 asar 语法 |
 | `electron/src/main/module.json5` | VIBRATE 权限 |
 
 ## 12. 验收清单
@@ -238,4 +252,5 @@ PdfInk write/restore
 7. 双击笔杆只唤醒工具条；可配置为笔↔橡皮。
 8. 调色盘 5 色可在设置修改；工具条立即更新。
 9. PDF 自动写入成功；备份位于主目录或 PDF 同目录；恢复可用。
-10. 关闭手写笔模式后完全回到普通 Obsidian。
+10. 关闭手写笔模式后完全回到普通 Obsidian：PDF 无叠层 canvas，诊断 `PDF叠层` 为 0 张。
+11. 开启后滚动/翻页只挂载可见页；长 PDF 内存不随页数线性增长，页面重渲染只重画本页。

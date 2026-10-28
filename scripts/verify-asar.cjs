@@ -43,6 +43,14 @@ try {
       app.includes('pdfInk'),
     'app ink settings + diagnostics hooks': app.includes('__ohsidianInkHooks') &&
       app.includes('buildSettings'),
+    // P0 (docs/PDF-PERF-AUDIT.md): the PDF overlay is opt-in, bounded to the
+    // visible pages, capped at 2x, redrawn per page, and its page table is
+    // pruned instead of retaining detached canvases.
+    'app ink pdf overlay bounded (P0)': app.includes('prunePages: function') &&
+      app.includes('observePages: function') && app.includes('redrawPage: function') &&
+      app.includes('if (!state.enabled) {'),
+    // P1: cap each pdf.js page canvas at one screen's pixels.
+    'app pdf canvas cap (P1)': app.includes('maxCanvasPixels:16777216,capCanvasAreaFactor:0,'),
     'app native message fanout': app.includes('ohsidian-native-message') && app.includes('__ohsidianNativeSend'),
     // Round 98r revert: the vdec-shim experiment is shelved (see
     // docs/CHANGES-2026-09.md HEVC verdict); assert the toggle is GONE.
