@@ -14,8 +14,8 @@
  * pressure is constant it asks ArkTS for the device-rate sample stream
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
-window.__ohsidianInkPatch = "36";
-var OHSIDIAN_INK_REV = "36";
+window.__ohsidianInkPatch = "37";
+var OHSIDIAN_INK_REV = "37";
 (function () {
   "use strict";
 
@@ -4525,7 +4525,7 @@ var OHSIDIAN_INK_REV = "36";
       "#" + TOOLBAR_ID + "[data-pos=bl] #ohsidian-ink-toast{right:auto;left:0}",
       "#ohsidian-ink-toast.is-visible{opacity:.96;transform:none}",
       "#" + CLEAR_ID + "{position:fixed;right:14px;bottom:calc(var(--keyboard-height,0px) + var(--safe-area-inset-bottom,0px) + 124px);" +
-        "z-index:70;display:none;width:228px;padding:10px 12px 9px;border-radius:11px;" +
+        "z-index:70;display:none;width:168px;padding:9px 10px 8px;border-radius:11px;" +
         "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
         "box-shadow:var(--shadow-s,0 2px 10px rgba(0,0,0,.16));color:var(--text-normal)}",
       "#" + CLEAR_ID + "[data-pos=bl]{left:14px;right:auto}",
@@ -4766,7 +4766,7 @@ var OHSIDIAN_INK_REV = "36";
       var btn = document.querySelector("#" + TOOLBAR_ID + " button[data-act=eraser]");
       if (btn) {
         var br = btn.getBoundingClientRect();
-        var pw = el.offsetWidth || 228;
+        var pw = el.offsetWidth || 168;
         var ph = el.offsetHeight || 92;
         var left = Math.max(8, Math.min(br.left + br.width / 2 - pw / 2,
           (window.innerWidth || 1024) - pw - 8));

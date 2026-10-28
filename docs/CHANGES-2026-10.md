@@ -3725,3 +3725,33 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
   仍应兜住。若某引擎把两者都报 0，P1 不启用，但不会回归；P0 的叠层修复仍生效。
 - 高 DPI 触摸 PC 会按平板取 `0`，文字比 `200` 略软；这是“二合一当平板用”的取舍。
 - `screen.availWidth/Height` 若被移植层报成物理像素，`0` 会先撞 `maxCanvasPixels`，P1 失效但不回归。
+
+## 第 192 轮 (2026-10-28): 缩短“滑动清除本页”的滑动距离（v37）
+
+**现象**：长按/双击橡皮打开的清除面板宽度 228px，滑条有效行程约 204px，90% 触发点约 184px；
+在平板上单手从橡皮按钮起滑到最右，手腕行程偏长。
+
+**改法**（`scripts/patches/ohsidian-ink.js`）：
+
+| 项 | 改前 | 改后 |
+|---|---:|---:|
+| 面板宽 | 228px | **168px** |
+| 内边距 | 10/12/9 | 9/10/8 |
+| 滑条有效宽 | ≈204px | **≈148px** |
+| 90% 触发行程 | ≈184px | **≈133px** |
+
+- 缩窄面板同时收紧内边距，文字仍完整显示；锚定/居中逻辑的 fallback 宽度从 228 改为 168。
+- 触发阈值仍为 90%，保留“滑到底”手感，避免误触清除。
+- `OHSIDIAN_INK_REV` 36 → **37**。
+
+**验证**：
+
+- `node --check scripts/patches/ohsidian-ink.js` OK；
+- `update-obsidian --repatch` + `verify-asar` 全绿；
+- HAP 内 asar 复查：`width:168px`、`offsetWidth || 168`、`OHSIDIAN_INK_REV="37"` 均在位；
+- `hvigorw assembleHap` **BUILD SUCCESSFUL in 42 s 343 ms**；
+  HAP **120,935,732 B**，2026-10-28 12:02:19，SHA-256
+  `4065A0D25506E15D690968FBA4E20FF5F1983BACF4234EB8281069090EEA5738`。
+
+**真机项**：长按橡皮，确认面板在橡皮上方、文字不换行；从滑条左端滑到右端约 13 个 10px，
+松手后清空本页；关闭面板后再次打开归零。
