@@ -507,3 +507,31 @@ rasterRatio(dpr) = (2.249 / dpr)^2     // 2.249 → 5.06× vs 1.0；1.38× vs 1.
 剩余内容型瓶颈：**首次打开就停在第 1 页**时，封面单页仍需约 10.8s。该耗时与画布
 尺寸无关（0.643 与 0.8 缩放均约 10.7s），更像大图解码/绘制；后续若要继续优化，
 方向是 worker 侧图片尺寸上限或封面低清预渲染，而不是继续降 canvas 像素。
+
+---
+
+## 8. 首开 10 s 的真正瓶颈（2026-10-30 真机）
+
+**不是文件读取，也不是 IPC**：
+
+- 22.5 MB PDF 读取 + 解析：`pdfDocLoaded 317 ms`；
+- 第 1 页 pdf.js 栅格：`pdfPage page:1 10.2–10.4 s`；
+- 第 1 页 PDF Kit 原生栅格：`pdfPreviewProbe 268–300 ms`；
+- 单页 6 笔写回：`PdfInk ms=184`。
+
+第 1 页 operator list 只有 14 项，含两张图：`2559×1440` 与
+`5816×2044 / DCTDecode / SMask 247 0 R`（压缩后 432 KB）。耗时在这张
+12 MP JPEG + 12 MP 软掩码的解码/绘制，而不是磁盘或 socket。
+
+验证过的方案与结果：
+
+| 方案 | 结果 |
+|---|---|
+| `maxImageSize` 限制 | pdf.js 直接**删除**超限图片（"Image exceeded maximum allowed size and was removed"），不能降采样显示 |
+| worker 内 `createImageBitmap` resize 后再传主线程 | 首屏仍 ~10 s，瓶颈不在主线程缩放 |
+| 原生 PDF Kit 预览 + JS `<img>` 覆盖 | 原生 300 ms，但 pdf.js 绘制占满主线程，IPC 回包延迟到 ~8.4 s 后才到，覆盖图来不及显示 |
+| 恢复页码时先跳页（已上线） | 非第 1 页恢复从 10 s 降到 ~0.5 s |
+
+结论：要修“首次就停在第 1 页”，必须让预览**不依赖 Web 主线程**——用 ArkUI
+原生 `Image` + PDF Kit `PixelMap` 覆盖在 XComponent 上；或者替换 pdf.js 的
+JPEG 解码路径。纯 JS 层覆盖已被真机数据证伪。

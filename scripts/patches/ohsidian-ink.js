@@ -103,6 +103,7 @@ var OHSIDIAN_INK_REV = "39";
     seq: Date.now(),
     stylusInfo: null,
     pdfPending: {},
+    pdfPreviewPending: {},
     pdfInFlight: false,
     pdfAutoTimer: 0,
     pdfAutoSurface: null,
@@ -1807,6 +1808,14 @@ var OHSIDIAN_INK_REV = "39";
       pdfOwner: view.viewer || view,
       container: container,
       pages: {},
+      renderedPages: {},
+      previewTimer: 0,
+      previewTries: 0,
+      previewRetry: 0,
+      previewHold: false,
+      previewHoldTimer: 0,
+      previewCover: null,
+      fixedPreview: null,
       // Probe state (device agent reads probe:* lines from hilog).
       openedAt: nowMs(),
       docLoadedAt: 0,
@@ -1833,11 +1842,36 @@ var OHSIDIAN_INK_REV = "39";
           return null;
         }
       },
-      ensurePage: function (pageEl) {
+      pageHasInk: function (index) {
+        var doc = this.doc;
+        if (!doc || !doc.strokes) return false;
+        var space = "pdf:" + index;
+        for (var i = 0; i < doc.strokes.length; i++) {
+          var st = doc.strokes[i];
+          if (st && st.space === space) return true;
+        }
+        return false;
+      },
+      ensurePage: function (pageEl, force) {
         if (!pageEl || this.disposed) return null;
         var idx = parseInt(pageEl.dataset.pageNumber, 10);
         if (!(idx > 0)) return null;
         var index = idx - 1;
+        // Most pages carry no ink. Allocating a base+live canvas for them is
+        // pure compositing cost: on the tablet a scroll over such pages drops
+        // to ~39 fps, while the same scroll with no overlay canvases is a
+        // locked 60 fps. Only mount canvases for pages that actually have
+        // strokes, or when a stroke is about to start (force=true).
+        var activeHere = !!(state.active && state.active.surface === this);
+        if (!force && !activeHere && !this.pageHasInk(index)) {
+          var dead = this.pages[index];
+          if (dead && (dead.cv || dead.live)) {
+            try { removeCanvas(pageEl, "ohsidian-ink-pdf"); } catch (eRm) {}
+            try { removeCanvas(pageEl, "ohsidian-ink-pdf-live"); } catch (eRl) {}
+            delete this.pages[index];
+          }
+          return null;
+        }
         var pageView = null;
         try { pageView = this.viewer.getPageView(index); } catch (e) {}
         if (!pageView || !pageView.viewport) return null;
@@ -1910,6 +1944,7 @@ var OHSIDIAN_INK_REV = "39";
         // collects it after the stroke is committed.
         if (state.active && state.active.surface === this &&
           (!state.active.entry || state.active.entry === entry)) return;
+        dropPdfPreview(this, entry.index);
         try {
           if (entry.cv && entry.cv.parentNode) entry.cv.parentNode.removeChild(entry.cv);
         } catch (e) {}
@@ -1942,7 +1977,9 @@ var OHSIDIAN_INK_REV = "39";
       surfaceAt: function (el) {
         var pageEl = this.pageOf(el);
         if (!pageEl) return null;
-        return this.ensurePage(pageEl);
+        // A pen-down must always get an entry, even on a blank page: this is
+        // where the base+live canvases are created for the first stroke.
+        return this.ensurePage(pageEl, true);
       },
       toSpaceOn: function (entry, clientX, clientY) {
         var r = entry._spaceRect || entry.pageEl.getBoundingClientRect();
@@ -2110,6 +2147,25 @@ var OHSIDIAN_INK_REV = "39";
               pages: e && e.pagesCount,
               ms: Math.round(nowMs() - self.openedAt)
             });
+            if (window.__ohsidianAgentBuild) {
+              pdfScanFilters(self.viewer);
+              setTimeout(function () {
+                try {
+                  if (!self.viewer.pagesCount) return;
+                  var pv0 = self.viewer.getPageView(0);
+                  var pp0 = pv0 && pv0.pdfPage;
+                  if (!pp0 || !pp0.getOperatorList) return;
+                  var t0 = nowMs();
+                  pp0.getOperatorList().then(function (ol) {
+                    probeHook("pdfOpList", {
+                      page: 1,
+                      ms: Math.round(nowMs() - t0),
+                      ops: ol && ol.fnArray ? ol.fnArray.length : -1
+                    });
+                  }).catch(function () {});
+                } catch (e0) {}
+              }, 200);
+            }
             // pdf.js persists {fingerprint,page,scrollTop} in localStorage.
             // Restoring the page only after pagesinit means pdf.js has already
             // queued a render of page 1; a heavy cover page then blocks the
@@ -2130,6 +2186,17 @@ var OHSIDIAN_INK_REV = "39";
               try { self.viewer.currentPageNumber = jumpPage; } catch (eCJ) {}
               probeHook("pdfPreJump", { page: jumpPage });
             }
+            var targetPage = 0;
+            try { targetPage = Math.max(0, (self.viewer.currentPageNumber || 1) - 1); } catch (eT) {}
+            // Native first-paint preview is still experimental: it is only
+            // exercised by local agent builds until the overlay/z-order and
+            // main-thread interaction are verified. Release keeps pdf.js only.
+            if (window.__ohsidianAgentBuild) {
+              setTimeout(function () {
+                try { requestPdfPreview(self); } catch (ePV) {}
+              }, 600);
+              requestPdfPreview(self, targetPage);
+            }
             // Page divs exist now; mount the overlay canvases even if the
             // surface attached before the document finished loading.
             self.refreshPages();
@@ -2138,18 +2205,6 @@ var OHSIDIAN_INK_REV = "39";
         var onPageStart = function (e) {
           try {
             var pn = e && e.pageNumber;
-            var cur = 0;
-            try { cur = self.viewer.currentPageNumber || 0; } catch (eC) {}
-            // pdf.js starts rendering the page that was visible before
-            // Obsidian restores the saved scroll position. A cover page with
-            // a large image can hold the (serialized) render queue for 10+
-            // seconds, leaving the real page white. Cancel renders far from
-            // the current page; pdf.js restarts them when they become visible.
-            if (pn > 0 && cur > 0 && Math.abs(pn - cur) > 2) {
-              try { if (e.source && e.source.cancelRendering) e.source.cancelRendering(); } catch (eX) {}
-              probeHook("pdfRenderCancel", { page: pn, cur: cur });
-              return;
-            }
             var vp = e && e.source && e.source.viewport;
             if (pn > 0) {
               self.pageStarts[pn] = {
@@ -2168,6 +2223,10 @@ var OHSIDIAN_INK_REV = "39";
             var st = pn ? self.pageStarts[pn] : null;
             var vp = e && e.source && e.source.viewport;
             var cv = e && e.source && e.source.canvas;
+            if (pn > 0) {
+              self.renderedPages[pn] = true;
+              dropPdfPreview(self, pn - 1);
+            }
             self.rendered++;
             probeHook("pdfPage", {
               page: pn,
@@ -2186,6 +2245,44 @@ var OHSIDIAN_INK_REV = "39";
             // Only this page changed. The old code cleared and repainted
             // every mounted page here, i.e. N clears for each of N renders.
             self.redrawPage(entry);
+            if (window.__ohsidianAgentBuild && pn === 1 && !self.opProbed) {
+              self.opProbed = true;
+              try {
+                var pp1 = e && e.source && e.source.pdfPage;
+                if (pp1 && pp1.getOperatorList) {
+                  pp1.getOperatorList().then(function (ol) {
+                    var hist = {};
+                    for (var oi = 0; oi < ol.fnArray.length; oi++) {
+                      var f = ol.fnArray[oi];
+                      hist[f] = (hist[f] || 0) + 1;
+                    }
+                    var top = Object.keys(hist).map(function (k) {
+                      return [Number(k), hist[k]];
+                    }).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 10);
+                    var detail = [];
+                    for (var di = 0; di < ol.fnArray.length; di++) {
+                      var args = (ol.argsArray && ol.argsArray[di]) || [];
+                      var compact = [];
+                      for (var ai = 0; ai < args.length && ai < 3; ai++) {
+                        var v = args[ai];
+                        if (typeof v === "number") compact.push(v);
+                        else if (typeof v === "string") compact.push(v.slice(0, 24));
+                        else if (v && typeof v === "object") {
+                          compact.push(v.width ? ("obj:" + v.width + "x" + v.height) : "[obj]");
+                        } else compact.push(String(v));
+                      }
+                      detail.push([ol.fnArray[di], compact]);
+                    }
+                    probeHook("pdfOps", {
+                      page: 1,
+                      total: ol.fnArray.length,
+                      top: top,
+                      detail: detail
+                    });
+                  }).catch(function () {});
+                }
+              } catch (eOp) {}
+            }
             /* OHSIDIAN_DEV_PROBE_START */
             if (state.lastPdfWriteAt &&
               !self.annoProbed && pn === self.viewer.currentPageNumber) {
@@ -3462,6 +3559,14 @@ var OHSIDIAN_INK_REV = "39";
 
   function onPointerDownCapture(ev) {
     if (!state.installed || !ev || !state.enabled) return;
+    if (window.__ohsidianAgentBuild && ev.pointerType === "touch" && !state.perfTouchStarted) {
+      state.perfTouchStarted = true;
+      probeHook("perfInput", {
+        lag: Math.round(nowMs() - ev.timeStamp),
+        pointerType: ev.pointerType
+      });
+      perfRafSample("touch", 2500);
+    }
     if (isPenEvent(ev)) state.lastPenSeen = nowMs();
     // A palm/finger landing during an active pen stroke must not scroll,
     // select text or click anything. This replaces the old full-screen guard.
@@ -4343,6 +4448,29 @@ var OHSIDIAN_INK_REV = "39";
       resolvePdfResult(msg);
       return;
     }
+    if (msg.event === "pdfPreviewProbeResult") {
+      probeHook("pdfPreviewProbe", {
+        ok: !!msg.ok,
+        ms: msg.ms,
+        w: msg.w,
+        h: msg.h,
+        error: msg.error || ""
+      });
+      return;
+    }
+    if (msg.event === "pdfPreviewResult") {
+      var pp = state.pdfPreviewPending[msg.seq];
+      if (!pp) return;
+      delete state.pdfPreviewPending[msg.seq];
+      if (!msg.ok) {
+        probeHook("pdfPreview", { ok: false, ms: msg.ms, error: msg.error || "" });
+        return;
+      }
+      var ppUrl = pdfPreviewUrl(pp.out);
+      if (ppUrl) showPdfPreview(pp.surface, pp.page, ppUrl);
+      probeHook("pdfPreview", { ok: true, ms: msg.ms, bytes: msg.bytes, page: pp.page });
+      return;
+    }
   }
 
   function handleGesture(kind) {
@@ -4528,6 +4656,229 @@ var OHSIDIAN_INK_REV = "39";
     if (!leaf || !leaf.view || typeof leaf.view.getViewType !== "function") return null;
     var t = leaf.view.getViewType();
     return (t === "markdown" || t === "pdf" || t === "canvas") ? leaf : null;
+  }
+
+  // ---------------------------------------------------------------------
+  // PDF native first-paint preview
+  // ---------------------------------------------------------------------
+  function pdfPreviewPath(file, page) {
+    try {
+      var ad = adapter();
+      if (!ad || typeof ad.getBasePath !== "function") return "";
+      var base = ad.getBasePath();
+      if (!base) return "";
+      return base + "/.obsidian/ohsidian-ink/cache/preview-" +
+        inkKey(file.path) + "-" + page + ".png";
+    } catch (e) { return ""; }
+  }
+
+  function pdfPreviewCached(path) {
+    try {
+      var fsMod = require("fs");
+      return !!(path && fsMod.existsSync(path));
+    } catch (e) { return false; }
+  }
+
+  function pdfPreviewUrl(path) {
+    try {
+      var fsMod = require("fs");
+      if (!fsMod.existsSync(path)) return "";
+      var buf = fsMod.readFileSync(path);
+      if (!buf || !buf.length) return "";
+      return URL.createObjectURL(new Blob([buf], { type: "image/png" }));
+    } catch (e) { return ""; }
+  }
+
+  function showPdfPreview(surface, pageIndex, url) {
+    try {
+      if (!surface || !surface.container) return;
+      if (surface.renderedPages && surface.renderedPages[pageIndex + 1]) return;
+      var pageEl = surface.container.querySelector(
+        '.page[data-page-number="' + (pageIndex + 1) + '"]');
+      if (!pageEl) return;
+      var img = pageEl.querySelector("img.ohsidian-pdf-preview");
+      if (!img) {
+        img = document.createElement("img");
+        img.className = "ohsidian-pdf-preview";
+        img.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;" +
+          "object-fit:fill;pointer-events:none;z-index:3;background:#fff;";
+        pageEl.appendChild(img);
+      }
+      img.src = url;
+    } catch (e) {}
+  }
+
+  function dropPdfPreview(surface, pageIndex) {
+    try {
+      if (!surface || !surface.container) return;
+      var pageEl = surface.container.querySelector(
+        '.page[data-page-number="' + (pageIndex + 1) + '"]');
+      if (!pageEl) return;
+      var img = pageEl.querySelector("img.ohsidian-pdf-preview");
+      if (!img) return;
+      try {
+        if (img.src.indexOf("blob:") === 0) URL.revokeObjectURL(img.src);
+      } catch (eR) {}
+      if (img.parentNode) img.parentNode.removeChild(img);
+    } catch (e) {}
+  }
+
+  function pdfPreviewCover(surface) {
+    try {
+      dropPdfPreviewCover(surface);
+      var r = surface.container.getBoundingClientRect();
+      var d = document.createElement("div");
+      d.className = "ohsidian-pdf-preview-cover";
+      d.style.cssText = "position:fixed;left:" + r.left + "px;top:" + r.top +
+        "px;width:" + r.width + "px;height:" + r.height +
+        "px;background:var(--background-primary,#fff);z-index:99998;pointer-events:none;";
+      document.body.appendChild(d);
+      surface.previewCover = d;
+    } catch (e) {}
+  }
+
+  function dropPdfPreviewCover(surface) {
+    try {
+      if (surface && surface.previewCover && surface.previewCover.parentNode) {
+        surface.previewCover.parentNode.removeChild(surface.previewCover);
+      }
+    } catch (e) {}
+    if (surface) surface.previewCover = null;
+  }
+
+  function dropFixedPreview(surface) {
+    try {
+      if (surface && surface.fixedPreview && surface.fixedPreview.parentNode) {
+        if (surface.fixedPreview.src.indexOf("blob:") === 0) {
+          URL.revokeObjectURL(surface.fixedPreview.src);
+        }
+        surface.fixedPreview.parentNode.removeChild(surface.fixedPreview);
+      }
+    } catch (e) {}
+    if (surface) surface.fixedPreview = null;
+  }
+
+  function showFixedPreview(surface, pageIndex, url) {
+    try {
+      if (!surface || !surface.container) return;
+      dropFixedPreview(surface);
+      var pageEl = surface.container.querySelector(
+        '.page[data-page-number="' + (pageIndex + 1) + '"]');
+      if (!pageEl) return;
+      var scrollEl = surface.viewer && surface.viewer.container;
+      if (scrollEl) scrollEl.scrollTop = pageEl.offsetTop;
+      var r = pageEl.getBoundingClientRect();
+      var img = document.createElement("img");
+      img.className = "ohsidian-pdf-preview-fixed";
+      img.src = url;
+      img.style.cssText = "position:fixed;left:" + r.left + "px;top:" + r.top +
+        "px;width:" + r.width + "px;height:" + r.height +
+        "px;background:#fff;z-index:99999;pointer-events:none;";
+      document.body.appendChild(img);
+      surface.fixedPreview = img;
+      dropPdfPreviewCover(surface);
+    } catch (e) {}
+  }
+
+  function releasePreviewHold(surface, url) {
+    if (!surface || !surface.previewHold) return;
+    surface.previewHold = false;
+    if (surface.previewHoldTimer) {
+      clearTimeout(surface.previewHoldTimer);
+      surface.previewHoldTimer = 0;
+    }
+    try {
+      surface.viewer.currentPageNumber = 1;
+      var pageEl = surface.container.querySelector('.page[data-page-number="1"]');
+      if (pageEl && surface.viewer.container) {
+        surface.viewer.container.scrollTop = pageEl.offsetTop;
+      }
+    } catch (eS) {}
+    if (url) showFixedPreview(surface, 0, url);
+    else dropPdfPreviewCover(surface);
+  }
+
+  function requestPdfPreview(surface, pageOverride) {
+    inkTrace("previewCall", {
+      kind: surface && surface.kind,
+      leaf: !!(surface && surface.leaf),
+      file: !!(surface && surface.leaf && surface.leaf.view && surface.leaf.view.file)
+    });
+    if (!surface || surface.kind !== "pdf" || !surface.leaf) return;
+    var file = surface.leaf.view && surface.leaf.view.file;
+    if (!file) return;
+    var page = 0;
+    if (typeof pageOverride === "number" && pageOverride >= 0) page = pageOverride;
+    else {
+      try { page = Math.max(0, (surface.viewer.currentPageNumber || 1) - 1); } catch (eP) {}
+    }
+    var out = pdfPreviewPath(file, page);
+    if (!out) {
+      inkTrace("previewReq", { page: page, noPath: true });
+      return;
+    }
+    // Cached PNG (from a previous open) is shown immediately; pdf.js will
+    // replace it as soon as its own canvas is ready.
+    var cached = pdfPreviewUrl(out);
+    if (cached) {
+      showPdfPreview(surface, page, cached);
+      return;
+    }
+    try {
+      var ad = adapter();
+      var abs = ad.getFullPath(file.path);
+      var pv = surface.viewer.getPageView(page);
+      var vp = pv && pv.viewport;
+      var w = vp ? Math.max(1, Math.round(vp.width)) : 0;
+      var h = vp ? Math.max(1, Math.round(vp.height)) : 0;
+      if (!w || !h) {
+        // pdf.js creates the page view a moment after pagesinit. The page div
+        // already has its layout size; use it so the native render can start
+        // BEFORE pdf.js begins the 10 s page render (the UI thread is blocked
+        // while that render runs, which delays the preview to no benefit).
+        try {
+          var pe = surface.container.querySelector(
+            '.page[data-page-number="' + (page + 1) + '"]');
+          if (pe) {
+            w = Math.max(1, Math.round(pe.clientWidth || pe.offsetWidth || 0));
+            h = Math.max(1, Math.round(pe.clientHeight || pe.offsetHeight || 0));
+          }
+        } catch (ePe) {}
+      }
+      if (!w || !h) {
+        var tries = surface.previewTries || 0;
+        if (tries < 12 && !surface.previewRetry) {
+          surface.previewTries = tries + 1;
+          surface.previewRetry = setTimeout(function () {
+            surface.previewRetry = 0;
+            try { requestPdfPreview(surface); } catch (eR) {}
+          }, 100);
+        }
+        return;
+      }
+      var seq = state.seq++;
+      state.pdfPreviewPending[seq] = { surface: surface, page: page, out: out };
+      var sent = sendAction({
+        action: "pdfPreview",
+        seq: seq,
+        path: abs,
+        page: page,
+        w: w,
+        h: h,
+        out: out
+      });
+      inkTrace("previewReq", { page: page, sent: !!sent, w: w, h: h, out: !!out });
+    } catch (e) {
+      inkTrace("previewReq", { page: page, error: String(e && e.message || e) });
+    }
+  }
+
+  function schedulePdfPreview(surface) {
+    if (!surface || surface.previewTimer) return;
+    surface.previewTimer = setTimeout(function () {
+      surface.previewTimer = 0;
+      try { requestPdfPreview(surface); } catch (e) {}
+    }, 300);
   }
 
   // ---------------------------------------------------------------------
@@ -6632,6 +6983,201 @@ var OHSIDIAN_INK_REV = "39";
     if (doc) doc.target = file.path;
   }
 
+  /* ---- device-agent perf sampling (local builds only) ------------------ */
+  function pdfCountBytes(bytes, needle) {
+    var pat = [];
+    for (var i = 0; i < needle.length; i++) pat.push(needle.charCodeAt(i));
+    var n = 0;
+    var limit = bytes.length - pat.length;
+    for (var j = 0; j <= limit; j++) {
+      var ok = true;
+      for (var k = 0; k < pat.length; k++) {
+        if (bytes[j + k] !== pat[k]) { ok = false; break; }
+      }
+      if (ok) { n++; j += pat.length - 1; }
+    }
+    return n;
+  }
+
+  function pdfFindBytes(bytes, needle, from) {
+    var pat = [];
+    for (var i = 0; i < needle.length; i++) pat.push(needle.charCodeAt(i));
+    var limit = bytes.length - pat.length;
+    for (var j = Math.max(0, from || 0); j <= limit; j++) {
+      var ok = true;
+      for (var k = 0; k < pat.length; k++) {
+        if (bytes[j + k] !== pat[k]) { ok = false; break; }
+      }
+      if (ok) return j;
+    }
+    return -1;
+  }
+
+  function pdfAsciiAround(bytes, at, before, after) {
+    var s = "";
+    var from = Math.max(0, at - before);
+    var to = Math.min(bytes.length, at + after);
+    for (var i = from; i < to; i++) {
+      var c = bytes[i];
+      s += (c >= 32 && c < 127) ? String.fromCharCode(c) : ".";
+    }
+    return s;
+  }
+
+  function pdfScanFilters(viewer) {
+    try {
+      if (!viewer || !viewer.pdfDocument || !viewer.pdfDocument.getData) return;
+      viewer.pdfDocument.getData().then(function (bytes) {
+        var counts = {
+          jpx: pdfCountBytes(bytes, "/JPXDecode"),
+          dct: pdfCountBytes(bytes, "/DCTDecode"),
+          flate: pdfCountBytes(bytes, "/FlateDecode"),
+          jbig2: pdfCountBytes(bytes, "/JBIG2Decode"),
+          ccitt: pdfCountBytes(bytes, "/CCITTFaxDecode")
+        };
+        var at = pdfFindBytes(bytes, "/Width 5816", 0);
+        probeHook("pdfFilters", {
+          bytes: bytes.length,
+          counts: counts,
+          at5816: at,
+          ctx5816: at >= 0 ? pdfAsciiAround(bytes, at, 260, 260) : ""
+        });
+      }).catch(function (eF) {
+        probeHook("pdfFilters", { error: String(eF && eF.message || eF) });
+      });
+    } catch (e) {}
+  }
+
+  function perfOverlayStats() {
+    var canvases = 0;
+    var pixels = 0;
+    try {
+      for (var i = 0; i < state.surfaces.length; i++) {
+        var s = state.surfaces[i];
+        if (s.kind !== "pdf" || !s.pages) continue;
+        for (var k in s.pages) {
+          if (!Object.prototype.hasOwnProperty.call(s.pages, k)) continue;
+          var e = s.pages[k];
+          if (e && e.cv) { canvases++; pixels += e.cv.width * e.cv.height; }
+          if (e && e.live) { canvases++; pixels += e.live.width * e.live.height; }
+        }
+      }
+    } catch (eO) {}
+    return { canvases: canvases, mp: Math.round(pixels / 1e6) };
+  }
+
+  /**
+   * Samples requestAnimationFrame deltas for `ms`. A frame interval above
+   * ~24ms is counted as jank (60Hz budget is 16.7ms). `extra` is merged into
+   * the probe payload so a caller can attach input-latency numbers.
+   */
+  function perfRafSample(label, ms, extra) {
+    var deltas = [];
+    var last = 0;
+    var start = nowMs();
+    var stopped = false;
+    function finish() {
+      if (stopped) return;
+      stopped = true;
+      deltas.sort(function (a, b) { return a - b; });
+      var n = deltas.length;
+      var sum = 0;
+      var jank = 0;
+      for (var i = 0; i < n; i++) {
+        sum += deltas[i];
+        if (deltas[i] > 24) jank++;
+      }
+      probeHook("perf", {
+        label: label,
+        frames: n,
+        avg: n ? Number((sum / n).toFixed(1)) : 0,
+        p50: n ? Number(deltas[Math.floor(n * 0.5)].toFixed(1)) : 0,
+        p95: n ? Number(deltas[Math.min(n - 1, Math.floor(n * 0.95))].toFixed(1)) : 0,
+        max: n ? Number(deltas[n - 1].toFixed(1)) : 0,
+        jank: jank,
+        overlays: perfOverlayStats(),
+        extra: extra || null
+      });
+    }
+    function tick(t) {
+      if (stopped) return;
+      if (last) deltas.push(t - last);
+      last = t;
+      if (nowMs() - start < ms) requestAnimationFrame(tick);
+      else finish();
+    }
+    requestAnimationFrame(tick);
+  }
+
+  function installPerfProbes() {
+    if (!window.__ohsidianAgentBuild) return;
+    try {
+      var hasID = typeof ImageDecoder !== "undefined";
+      var hasCIB = typeof createImageBitmap === "function";
+      var p = hasID && ImageDecoder.isTypeSupported
+        ? ImageDecoder.isTypeSupported("image/jpeg") : Promise.resolve(false);
+      Promise.resolve(p).then(function (ok) {
+        probeHook("imgSupport", { imageDecoder: hasID, jpeg: !!ok, createImageBitmap: hasCIB });
+      }).catch(function () {
+        probeHook("imgSupport", { imageDecoder: hasID, jpeg: false, createImageBitmap: hasCIB });
+      });
+    } catch (eIS) {}
+    setTimeout(function () { perfRafSample("idle", 3000); }, 6000);
+    // Scroll the PDF container while sampling: first with the ink overlays,
+    // then with the layer temporarily disabled, so the overlay's compositing
+    // cost is measurable instead of guessed. Agent builds run it once; set
+    // window.__ohsidianPerfScroll=false to skip it in a long device session.
+    if (window.__ohsidianPerfScroll !== false) setTimeout(function () {
+      try {
+        var s = activeSurfaceNow();
+        var el = s && s.kind === "pdf" && s.viewer && s.viewer.container;
+        if (!el) return;
+        var origin = el.scrollTop;
+        var t0 = nowMs();
+        var timer = setInterval(function () {
+          el.scrollTop += 240;
+          if (nowMs() - t0 > 3000) clearInterval(timer);
+        }, 50);
+        perfRafSample("pdfscroll", 3000);
+        setTimeout(function () {
+          try { state.enabled = false; inkRefreshSurfaces(); } catch (eOff) {}
+          setTimeout(function () {
+            var t1 = nowMs();
+            var tm = setInterval(function () {
+              el.scrollTop += 240;
+              if (nowMs() - t1 > 3000) clearInterval(tm);
+            }, 50);
+            perfRafSample("pdfscroll_noink", 3000);
+            setTimeout(function () {
+              try { state.enabled = true; inkRefreshSurfaces(); } catch (eOn) {}
+              try { el.scrollTop = origin; } catch (eR) {}
+            }, 3500);
+          }, 800);
+        }, 3500);
+      } catch (eS) {}
+    }, 12000);
+    try {
+      if (typeof PerformanceObserver === "function") {
+        var seen = {};
+        var po = new PerformanceObserver(function (list) {
+          try {
+            var entries = list.getEntries();
+            for (var i = 0; i < entries.length; i++) {
+              var e = entries[i];
+              var bucket = Math.round(e.duration / 50) * 50;
+              seen[bucket] = (seen[bucket] || 0) + 1;
+            }
+          } catch (eL) {}
+        });
+        po.observe({ entryTypes: ["longtask"] });
+        setTimeout(function () {
+          try { po.disconnect(); } catch (eD) {}
+          probeHook("longtask", { buckets: seen });
+        }, 20000);
+      }
+    } catch (eP) {}
+  }
+
   function install(app) {
     if (state.installed) return true;
     state.installed = true;
@@ -6641,6 +7187,7 @@ var OHSIDIAN_INK_REV = "39";
     installPenObservers();
     window.addEventListener("ohsidian-native-message", onNativeMessageEvent);
     addCommands(app);
+    installPerfProbes();
     var readyDone = false;
     function onWorkspaceReady() {
       if (readyDone) return;

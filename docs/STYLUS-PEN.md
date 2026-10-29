@@ -115,6 +115,7 @@ Stroke：
 - 翻页时用屏幕中心 `elementFromPoint` 定位可见 `.page`，按需创建并激活。
 - **只在手写笔模式开启时挂载**；关闭后 PDF 上不保留任何叠层 canvas。
 - 叠层只给视口 ±1.2 屏内的页分配，离开即释放；`dpr` 封顶 2（设备 2.249 时墨迹仍清晰）。
+- **无墨迹页不分配 canvas**：`ensurePage` 先查 `pageHasInk(index)`，空白页不挂 base/live，落笔时 `surfaceAt` 以 `force=true` 才创建。真机同一段 PDF 滚动：有叠加层 39 fps（p95 66.6 ms）→ 按需分配后 60 fps（p95 16.8 ms，0 叠加层）。
 - `pagerendered` 只重画事件对应的单页；页表只保留仍在 DOM 的页，翻过的页不再持有 detached canvas。
 - pdf.js 自己的页 canvas 只在高 DPI 触摸设备（`dpr≥2` 且 `pointer:coarse`/触摸点）限制在一屏像素内：整窗宽 A4 约 39 MB → 21 MB；普通 PC（鼠标/触控板）保持上游 `200`，文字清晰度不变。
 - `app://` 响应补 `Content-Type`（`.mjs`/`.js`/`.wasm`/字体/PDF），让 pdf.js 的 **module worker** 真正跑在 worker 线程；否则静默退回 fake worker，表现为加载慢/白页。

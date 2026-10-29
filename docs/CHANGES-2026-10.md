@@ -3931,7 +3931,7 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 | 产物 | 用途 | 大小/时间 | SHA-256 |
 |---|---|---|---|
 | `electron-default-agent.hap` | 仅真机调试（含探针） | 120,976,288 B / 2026-10-29 23:48:43 | 见构建日志 |
-| `electron-default-signed.hap` | release（无 Agent/探针） | 120,968,095 B / 2026-10-29 23:50:34 | `B14BE6E74421612642F58256E9BE6A7BBF247065BCE79B08C9FA708581EB5C0B` |
+| `electron-default-signed.hap` | release（无 Agent/探针） | 121,010,094 B / 2026-10-30 00:42:41 | `B2197D419E9C0C4D778AAA025B8DAFC3FF68FD056108B5D653017730F6B3C9C2` |
 
 ### 四、验证
 
@@ -3947,3 +3947,43 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 - 压力/倾斜仍依赖真实 M-Pencil；本轮用 `uitest` 触摸 + agent build 的 `fingerDraw`
   验证捕获/写回链路，压力值固定 0.92。
 - 多页批量的“擦除/撤销后重写”尚未逐项回归。
+
+### 六、真机复测补记（2026-10-30，滚动帧率与首开瓶颈）
+
+**触摸/滚动掉帧**：PDF 页在没有任何墨迹时也会分配 base + live 两张 2470×1390
+画布（每页约 7 MP）。真机 A/B（同一段 3 s 自动滚动）：
+
+| 场景 | 帧数 | 平均帧间隔 | p95 | 卡顿帧 | 叠加层 |
+|---|---:|---:|---:|---:|---|
+| 有叠加层（4 张，14 MP） | 118 | 25.1 ms | 66.6 ms | 33 | 4 |
+| 关闭手写层 | 179 | 16.8 ms | 16.8 ms | 1 | 0 |
+| **改为按页按需分配后** | **176** | **17.1 ms** | **16.8 ms** | **5** | **0** |
+
+修复：`ensurePage` 先查 `pageHasInk(index)`；没有笔画的页不建 canvas，落笔时
+`surfaceAt` 以 `force=true` 才创建。这条同时解释了“很多控件不跟手/帧数低”——
+滚动时合成器要搬 14 MP 的透明层，和控件本身无关。
+
+**首次打开 PDF 的 10 s**：不是文件读取，也不是 IPC：
+
+| 阶段 | 真机耗时 | 证据 |
+|---|---:|---|
+| 22.5 MB 文件读取 + 解析 | **317 ms** | `pdfDocLoaded ms:317` |
+| 第 1 页 pdf.js 栅格 | **10.2–10.4 s** | `pdfPage page:1 ms:10450` |
+| 第 1 页 PDF Kit 原生栅格 | **~300 ms** | `pdfPreviewProbe ok:true ms:268` |
+| 单页 6 笔写回 | 184 ms | `PdfInk page=29 ... ms=184` |
+
+第 1 页只有 14 个 operator，其中 2 张图：`2559×1440` 和
+`5816×2044 / DCTDecode / SMask 247 0 R`（压缩后仅 432 KB）。10 s 花在这张
+12 MP JPEG + 12 MP 软掩码的解码/缩放/绘制，不是磁盘或 socket。
+
+尝试与结论：
+- pdf.js 的 `maxImageSize` 超限是**删除图片**（"Image exceeded maximum allowed
+  size and was removed"），不是降采样，不能用于显示；
+- 在 worker 端对 transferable bitmap 做 `createImageBitmap(resize...)` 后
+  首屏仍约 10 s，说明瓶颈不在主线程缩放；
+- 原生预览约 300 ms，但 pdf.js 绘制期间渲染主线程被占满，IPC 回包要等绘制
+  结束（实测请求 03.0 s、回包 11.4 s），所以“先渲染预览再盖图”在纯 JS 层
+  不可行；正确方向是 **ArkUI 原生 Image overlay**（PDF Kit PixelMap，独立于
+  Web 主线程）或 worker 内 JPEG 解码路径替换。
+
+以上原生预览代码目前只在 `--agent` 构建中启用，release 不请求。

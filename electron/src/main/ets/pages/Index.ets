@@ -29,7 +29,7 @@
 
 import { WebWindow, BackPressBridge, NativeVideoOverlay, NativeVideoTheme } from 'web_engine';
 import { StylusAdapter, StylusKind, PenSampleTap } from 'web_engine';
-import { PdfInkWriter, PdfInkRequest, PdfInkResult, PdfInkStroke } from 'web_engine';
+import { PdfInkWriter, PdfInkRequest, PdfInkResult, PdfInkStroke, PdfPreviewProbeResult, PdfPreviewResult } from 'web_engine';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { KeyCode } from '@kit.InputKit';
@@ -77,6 +77,8 @@ interface NativeVideoRequest {
   xcomponentId: string;
   path: string;
   thumbFile: string;
+  // Renderer -> ArkTS: where the native PDF page preview PNG should be written.
+  out?: string;
   rect: NativeVideoRect | null;
   region: NativeVideoRegion | null;
   dpr: number;
@@ -167,6 +169,29 @@ let storage = LocalStorage.getShared();
 @Concurrent
 function pdfInkWriteTask(req: PdfInkRequest): PdfInkResult {
   return PdfInkWriter.write(req);
+}
+
+interface PdfPreviewProbeArgs {
+  path: string;
+  page: number;
+}
+
+@Concurrent
+function pdfPreviewProbeTask(args: PdfPreviewProbeArgs): PdfPreviewProbeResult {
+  return PdfInkWriter.probePagePixelMap(args.path, args.page);
+}
+
+interface PdfPreviewArgs {
+  path: string;
+  page: number;
+  width: number;
+  height: number;
+  out: string;
+}
+
+@Concurrent
+async function pdfPreviewTask(args: PdfPreviewArgs): Promise<PdfPreviewResult> {
+  return await PdfInkWriter.renderPreview(args.path, args.page, args.width, args.height, args.out);
 }
 
 interface PdfInkRestoreArgs {
@@ -718,6 +743,10 @@ struct Index {
               console.info('InkUI', 'nativeTool ' + (this.inkPenMode ? 'pen' : 'hand'));
             } else if (msg.action === 'pdfInk') {
               this.handlePdfInk(msg);
+            } else if (msg.action === 'pdfPreviewProbe') {
+              this.handlePdfPreviewProbe(msg);
+            } else if (msg.action === 'pdfPreview') {
+              this.handlePdfPreview(msg);
             } else if (msg.action === 'pdfInkRestore') {
               this.handlePdfRestore(msg);
             } else {
@@ -1057,6 +1086,63 @@ struct Index {
       console.warn('PdfInk', 'write failed: ' + JSON.stringify(e));
       reply({ ok: false, bytes: 0, error: '写入异常：' + JSON.stringify(e), backup: '' });
     }
+  }
+
+  private handlePdfPreviewProbe(req: NativeVideoRequest): void {
+    const seq: number = typeof req.seq === 'number' ? req.seq : 0;
+    const path: string = req.path ? req.path : '';
+    const page: number = typeof req.page === 'number' ? req.page : 0;
+    const reply = (result: PdfPreviewProbeResult): void => {
+      this.sendNativeLine(JSON.stringify({
+        event: 'pdfPreviewProbeResult',
+        seq: seq,
+        ok: result.ok,
+        ms: result.ms,
+        w: result.w,
+        h: result.h,
+        error: result.error
+      }));
+    };
+    if (!path) {
+      reply({ ok: false, ms: 0, w: 0, h: 0, error: 'no path' });
+      return;
+    }
+    taskpool.execute(pdfPreviewProbeTask, { path: path, page: page }).then((out: Object) => {
+      reply(out as PdfPreviewProbeResult);
+    }).catch((e: Error) => {
+      reply({ ok: false, ms: 0, w: 0, h: 0, error: 'task:' + e.message });
+    });
+  }
+
+  private handlePdfPreview(req: NativeVideoRequest): void {
+    const seq: number = typeof req.seq === 'number' ? req.seq : 0;
+    const path: string = req.path ? req.path : '';
+    const out: string = req.out ? req.out : '';
+    const page: number = typeof req.page === 'number' ? req.page : 0;
+    const w: number = typeof req.w === 'number' ? req.w : 0;
+    const h: number = typeof req.h === 'number' ? req.h : 0;
+    const reply = (result: PdfPreviewResult): void => {
+      this.sendNativeLine(JSON.stringify({
+        event: 'pdfPreviewResult',
+        seq: seq,
+        ok: result.ok,
+        ms: result.ms,
+        bytes: result.bytes,
+        w: result.w,
+        h: result.h,
+        error: result.error
+      }));
+    };
+    if (!path || !out || w <= 0 || h <= 0) {
+      reply({ ok: false, ms: 0, bytes: 0, w: 0, h: 0, error: 'bad request' });
+      return;
+    }
+    const args: PdfPreviewArgs = { path: path, page: page, width: w, height: h, out: out };
+    taskpool.execute(pdfPreviewTask, args).then((o: Object) => {
+      reply(o as PdfPreviewResult);
+    }).catch((e: Error) => {
+      reply({ ok: false, ms: 0, bytes: 0, w: 0, h: 0, error: 'task:' + e.message });
+    });
   }
 
   private handlePdfRestore(req: NativeVideoRequest): void {

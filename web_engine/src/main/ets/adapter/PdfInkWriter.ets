@@ -29,6 +29,7 @@
 
 import { pdfService } from '@kit.PDFKit';
 import { fileIo } from '@kit.CoreFileKit';
+import { image } from '@kit.ImageKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import LogUtil from '../utils/LogUtil';
 
@@ -77,6 +78,23 @@ export interface PdfInkResult {
   backup: string;
 }
 
+export interface PdfPreviewProbeResult {
+  ok: boolean;
+  ms: number;
+  w: number;
+  h: number;
+  error: string;
+}
+
+export interface PdfPreviewResult {
+  ok: boolean;
+  ms: number;
+  bytes: number;
+  w: number;
+  h: number;
+  error: string;
+}
+
 /**
  * Writes renderer-captured strokes into a PDF as real /Ink annotations.
  *
@@ -103,6 +121,115 @@ export class PdfInkWriter {
       PdfInkWriter.availableCache = 0;
       return false;
     }
+  }
+
+  /**
+   * Device-agent probe: how long does PDF Kit take to rasterize one page?
+   * Used to decide whether a native first-paint preview is worth building.
+   */
+  static probePagePixelMap(src: string, page: number): PdfPreviewProbeResult {
+    const result: PdfPreviewProbeResult = { ok: false, ms: 0, w: 0, h: 0, error: '' };
+    const started: number = Date.now();
+    if (!src || page < 0) {
+      result.error = 'bad request';
+      return result;
+    }
+    const doc = new pdfService.PdfDocument();
+    try {
+      const parse = doc.loadDocument(src);
+      if (parse !== pdfService.ParseResult.PARSE_SUCCESS) {
+        result.error = 'parse:' + parse;
+        return result;
+      }
+      const pg = doc.getPage(page);
+      const pm = pg.getPagePixelMap();
+      result.ok = true;
+      pm.release();
+    } catch (e) {
+      const err = e as BusinessError;
+      result.error = 'exc:' + err.code + ' ' + err.message;
+    } finally {
+      try { doc.releaseDocument(); } catch (eR) {}
+      result.ms = Date.now() - started;
+    }
+    return result;
+  }
+
+  /**
+   * First-paint preview: rasterize one page with PDF Kit (native codecs) and
+   * write a PNG. pdf.js needs ~10 s for this PDF's 5816x2044 JPEG + SMask on
+   * the tablet; PDF Kit does the same page in ~300 ms. The renderer shows the
+   * PNG until pdf.js' own canvas is ready.
+   */
+  static async renderPreview(src: string, page: number, width: number, height: number,
+    out: string): Promise<PdfPreviewResult> {
+    const result: PdfPreviewResult = { ok: false, ms: 0, bytes: 0, w: 0, h: 0, error: '' };
+    const started: number = Date.now();
+    if (!src || page < 0 || !out || width <= 0 || height <= 0) {
+      result.error = 'bad request';
+      return result;
+    }
+    const doc = new pdfService.PdfDocument();
+    let pm: image.PixelMap | null = null;
+    try {
+      const parse = doc.loadDocument(src);
+      if (parse !== pdfService.ParseResult.PARSE_SUCCESS) {
+        result.error = 'parse:' + parse;
+        return result;
+      }
+      const pg = doc.getPage(page);
+      const pw: number = pg.getWidth();
+      const ph: number = pg.getHeight();
+      if (!(pw > 0) || !(ph > 0)) {
+        result.error = 'page size';
+        return result;
+      }
+      const m = new pdfService.PdfMatrix();
+      m.x = 0;
+      m.y = 0;
+      m.width = pw;
+      m.height = ph;
+      m.rotate = 0;
+      pm = pg.getAreaPixelMapWithOptions(m, width, height);
+      if (pm === null) {
+        result.error = 'no pixelmap';
+        return result;
+      }
+      const packer: image.ImagePacker = image.createImagePacker();
+      try {
+        const opt: image.PackingOption = { format: 'image/png', quality: 100 };
+        const buf: ArrayBuffer = await packer.packing(pm, opt);
+        const slash: number = out.lastIndexOf('/');
+        if (slash > 0) {
+          try { fileIo.mkdirSync(out.substring(0, slash), true); } catch (eMk) {}
+        }
+        const f: fileIo.File = fileIo.openSync(out,
+          fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+        try {
+          fileIo.writeSync(f.fd, buf);
+        } finally {
+          fileIo.closeSync(f);
+        }
+        result.ok = true;
+        result.bytes = buf.byteLength;
+        result.w = width;
+        result.h = height;
+      } finally {
+        try { packer.release(); } catch (ePr) {}
+      }
+    } catch (e) {
+      const err = e as BusinessError;
+      result.error = 'exc:' + err.code + ' ' + err.message;
+    } finally {
+      if (pm !== null) {
+        try { pm.release(); } catch (ePm) {}
+      }
+      try { doc.releaseDocument(); } catch (eR) {}
+      result.ms = Date.now() - started;
+      LogUtil.info(TAG, 'preview page=' + page + ' ms=' + result.ms +
+        ' bytes=' + result.bytes + ' ok=' + result.ok + (result.error ? ' err=' + result.error : ''));
+    }
+    return result;
   }
 
   static write(req: PdfInkRequest): PdfInkResult {
