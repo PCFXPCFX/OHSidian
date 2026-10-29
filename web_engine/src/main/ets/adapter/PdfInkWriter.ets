@@ -36,6 +36,11 @@ const TAG: string = 'PdfInkWriter';
 const MAX_PDF_BYTES: number = 300 * 1024 * 1024;
 const MAX_STROKES: number = 1500;
 const MAX_POINTS: number = 80000;
+// Old annotations are found by this marker as well as by the uniqueId prefix.
+// PDF Kit may rewrite/generate unique ids on save; relying on the id alone
+// would leave the previous set in place and every auto-write would stack a
+// second copy (dense "abstract art" instead of handwriting).
+const INK_MARK: string = 'ohsidian-ink';
 
 export interface PdfInkStroke {
   id?: string;
@@ -54,6 +59,9 @@ export interface PdfInkRequest {
   // "vector": pts are PDF user-space points. "normalized": pts are 0..1 of
   // the rendered page, top-left origin (pdfdom fallback).
   mode?: string;
+  // "ink" (standard /Ink) or "polyline" (/PolyLine). The latter is a
+  // compatibility path for viewers/PDF Kit builds that fill /Ink paths.
+  inkStyle?: string;
   // Remove our previous annotations on this page before adding the current
   // set. This is how erase/delete/modify stay in sync.
   replace?: boolean;
@@ -99,6 +107,8 @@ export class PdfInkWriter {
 
   static write(req: PdfInkRequest): PdfInkResult {
     const result: PdfInkResult = { ok: false, bytes: 0, error: '', backup: '' };
+    const started: number = Date.now();
+    const style: string = req.inkStyle === 'polyline' ? 'polyline' : 'ink';
     // Availability is checked by the UI-thread caller before dispatching the
     // task. Do not call canIUse again inside the taskpool worker: some ArkTS
     // builds do not expose capability queries on worker threads and that would
@@ -164,6 +174,8 @@ export class PdfInkWriter {
     const doc = new pdfService.PdfDocument();
     try {
       const parse = doc.loadDocument(cacheSrc);
+      LogUtil.info(TAG, 'timing load page=' + req.page + ' ms=' + (Date.now() - started) +
+        ' result=' + parse);
       if (parse !== pdfService.ParseResult.PARSE_SUCCESS) {
         result.error = '解析失败：' + parse + '（加密 PDF 需要密码，暂不支持）';
         PdfInkWriter.cleanup(cacheSrc, cacheOut);
@@ -173,9 +185,11 @@ export class PdfInkWriter {
       // Stroke ids are reused as annotation ids, so a retry skips what is
       // already in the PDF instead of stacking a second copy.
       const existingIds: Set<string> = new Set<string>();
+      let removedCount: number = 0;
       if (req.replace) {
         // Remove only annotations this app created earlier. Other readers'
-        // highlights/comments on the page are preserved.
+        // highlights/comments on the page are preserved. Match the marker as
+        // well as the id: PDF Kit may rewrite unique ids when saving.
         try {
           const owned = page.getAnnotations();
           const removeSet: Set<string> = new Set<string>();
@@ -185,9 +199,29 @@ export class PdfInkWriter {
             }
           }
           for (let a = owned.length - 1; a >= 0; a--) {
-            const uid = owned[a].uniqueId;
-            if (uid && (uid.indexOf('ohsidian-') === 0 || removeSet.has(uid))) {
+            const uid = owned[a].uniqueId ? owned[a].uniqueId : '';
+            let title: string = '';
+            let content: string = '';
+            let subject: string = '';
+            // PdfAnnotation itself only exposes type/uniqueId; the marker is
+            // on PdfAnnotationInfo. A failed info read must not abort the
+            // whole write, so fall back to the id check.
+            try {
+              const ainfo = owned[a].getAnnotationInfo();
+              title = ainfo && ainfo.title ? ainfo.title : '';
+              content = ainfo && ainfo.content ? ainfo.content : '';
+              subject = ainfo && ainfo.subject ? ainfo.subject : '';
+            } catch (eInfo) {
+              title = '';
+              content = '';
+              subject = '';
+            }
+            if ((uid && uid.indexOf('ohsidian-') === 0) || removeSet.has(uid) ||
+              (title && title.indexOf(INK_MARK) === 0) ||
+              (content && content.indexOf(INK_MARK) === 0) ||
+              (subject && subject.indexOf(INK_MARK) === 0)) {
               page.removeAnnotation(owned[a]);
+              removedCount++;
             }
           }
         } catch (eRm) {
@@ -216,6 +250,7 @@ export class PdfInkWriter {
         PdfInkWriter.cleanup(cacheSrc, cacheOut);
         return result;
       }
+      let addedCount: number = 0;
       for (let s = 0; s < req.strokes.length; s++) {
         const stroke = req.strokes[s];
         const annId: string = 'ohsidian-' + (stroke.id ? stroke.id :
@@ -223,16 +258,10 @@ export class PdfInkWriter {
         if (existingIds.has(annId)) {
           continue;
         }
-        const info = new pdfService.InkAnnotationInfo();
-        info.type = pdfService.AnnotationType.INK;
-        info.uniqueId = annId;
-        info.lineColor = stroke.color;
-        info.opacity = stroke.opacity;
         const border = new pdfService.PdfBorder();
         border.borderStyle = pdfService.BorderStyle.SOLID;
         border.borderWidth = stroke.width;
         border.borderColor = stroke.color;
-        info.border = border;
         const pts: Array<pdfService.PdfPoint> = [];
         for (let p = 0; p < stroke.pts.length; p++) {
           const pair = stroke.pts[p];
@@ -247,13 +276,56 @@ export class PdfInkWriter {
           }
           pts.push(pt);
         }
-        info.inkPoints = pts;
-        page.addAnnotation(info);
+        if (style === 'polyline') {
+          const pinfo = new pdfService.PolylineAnnotationInfo();
+          pinfo.type = pdfService.AnnotationType.POLYLINE;
+          pinfo.uniqueId = annId;
+          pinfo.lineColor = stroke.color;
+          pinfo.opacity = stroke.opacity;
+          pinfo.border = border;
+          pinfo.vertexes = pts;
+          pinfo.title = INK_MARK;
+          pinfo.content = INK_MARK + ' ' + annId;
+          pinfo.subject = INK_MARK;
+          page.addAnnotation(pinfo);
+        } else {
+          const info = new pdfService.InkAnnotationInfo();
+          info.type = pdfService.AnnotationType.INK;
+          info.uniqueId = annId;
+          info.lineColor = stroke.color;
+          info.opacity = stroke.opacity;
+          info.border = border;
+          info.inkPoints = pts;
+          info.title = INK_MARK;
+          info.content = INK_MARK + ' ' + annId;
+          info.subject = INK_MARK;
+          page.addAnnotation(info);
+        }
+        addedCount++;
       }
+      LogUtil.info(TAG, 'timing add style=' + style + ' removed=' + removedCount +
+        ' added=' + addedCount + ' ms=' + (Date.now() - started));
       if (!doc.saveDocument(cacheOut)) {
         result.error = '保存 PDF 失败';
         PdfInkWriter.cleanup(cacheSrc, cacheOut);
         return result;
+      }
+      LogUtil.info(TAG, 'timing save ms=' + (Date.now() - started));
+      // Re-open the saved file before it can replace the user's PDF. A header
+      // check is not enough: a broken xref/annotation tree still starts with
+      // "%PDF-" but makes pdf.js render white pages after the swap.
+      const verifyDoc = new pdfService.PdfDocument();
+      try {
+        const vres = verifyDoc.loadDocument(cacheOut);
+        const vpages = vres === pdfService.ParseResult.PARSE_SUCCESS ? verifyDoc.getPageCount() : 0;
+        LogUtil.info(TAG, 'timing verify pages=' + vpages + ' ms=' + (Date.now() - started));
+        if (vres !== pdfService.ParseResult.PARSE_SUCCESS || vpages < req.page + 1) {
+          result.error = '写出的 PDF 校验失败（pages=' + vpages + '），已保留原文件';
+          PdfInkWriter.cleanup(cacheSrc, cacheOut);
+          return result;
+        }
+      } finally {
+        try { verifyDoc.releaseDocument(); } catch (eVer) {}
       }
     } catch (e) {
       const err = e as BusinessError;
@@ -372,7 +444,9 @@ export class PdfInkWriter {
     result.ok = true;
     result.bytes = bytes;
     result.backup = backupPath;
-    LogUtil.info(TAG, 'pdf ink written page=' + req.page + ' strokes=' + req.strokes.length + ' bytes=' + bytes);
+    LogUtil.info(TAG, 'pdf ink written page=' + req.page + ' style=' + style +
+      ' strokes=' + req.strokes.length + ' bytes=' + bytes +
+      ' totalMs=' + (Date.now() - started));
     return result;
   }
 

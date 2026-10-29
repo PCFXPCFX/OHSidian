@@ -117,6 +117,8 @@ interface NativeVideoRequest {
   strokes?: Array<PdfInkStroke>;
   // "vector" (PDF points) or "normalized" (0..1 page coords, pdfdom).
   inkMode?: string;
+  // "ink" (standard /Ink) or "polyline" (/PolyLine compatibility).
+  inkStyle?: string;
   // Replace our previous annotations on that page (erase/delete/undo sync).
   replace?: boolean;
   removeIds?: Array<string>;
@@ -1003,14 +1005,18 @@ struct Index {
         cacheDir: ctx.cacheDir,
         backupDir: backupDir,
         mode: req.inkMode ? req.inkMode : 'vector',
+        inkStyle: req.inkStyle === 'polyline' ? 'polyline' : 'ink',
         replace: req.replace === true,
         removeIds: req.removeIds ? req.removeIds : []
       };
       this.pdfInkBusy = true;
+      const writeT0: number = Date.now();
       taskpool.execute(pdfInkWriteTask, pdfReq).then((out: Object) => {
         this.pdfInkBusy = false;
         const result: PdfInkResult = out as PdfInkResult;
         console.info('PdfInk', 'page=' + page + ' strokes=' + strokes.length +
+          ' style=' + (pdfReq.inkStyle ? pdfReq.inkStyle : 'ink') +
+          ' ms=' + (Date.now() - writeT0) +
           ' ok=' + result.ok + (result.error ? ' err=' + result.error : ''));
         reply(result);
       }).catch((e: Error) => {

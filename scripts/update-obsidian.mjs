@@ -401,6 +401,34 @@ async function main() {
     } else {
       log('WARNING: updater gate pattern not found - auto-update stays controllable from settings');
     }
+    /* The app:// protocol handler sets Range/Length/ACAO/Last-Modified but no
+       Content-Type. Module scripts and module workers (pdf.js 5 uses
+       `new Worker(url,{type:"module"})` for pdf.worker.min.mjs) are rejected
+       without a JavaScript MIME type; pdf.js then silently falls back to a
+       "fake worker" on the UI thread, which is exactly the slow/white PDF
+       loading path. Set a small extension->MIME map on the same response. */
+    const APP_MIME_SRC = 'return T.set("Access-Control-Allow-Origin","*")';
+    const APP_MIME_DST = 'let _ohExt=String(n).toLowerCase();let _ohDot=_ohExt.lastIndexOf(".");_ohExt=_ohDot>=0?_ohExt.slice(_ohDot):"";let _ohMap={".mjs":"text/javascript; charset=utf-8",".js":"text/javascript; charset=utf-8",".wasm":"application/wasm",".css":"text/css; charset=utf-8",".json":"application/json",".html":"text/html; charset=utf-8",".pdf":"application/pdf",".svg":"image/svg+xml",".ttf":"font/ttf",".otf":"font/otf",".woff":"font/woff",".woff2":"font/woff2"};if(_ohMap[_ohExt])T.set("Content-Type",_ohMap[_ohExt]);return T.set("Access-Control-Allow-Origin","*")';
+    // Electron still exposes registerFileProtocol; when that branch wins the
+    // handler builds a callback object instead of a Response. Patch both.
+    const APP_MIME_FILE_SRC = 'n({path:s,headers:S})';
+    const APP_MIME_FILE_DST = '(function(){let _ohExt=String(s).toLowerCase();let _ohDot=_ohExt.lastIndexOf(".");_ohExt=_ohDot>=0?_ohExt.slice(_ohDot):"";let _ohMap={".mjs":"text/javascript; charset=utf-8",".js":"text/javascript; charset=utf-8",".wasm":"application/wasm",".css":"text/css; charset=utf-8",".json":"application/json",".html":"text/html; charset=utf-8",".pdf":"application/pdf",".svg":"image/svg+xml",".ttf":"font/ttf",".otf":"font/otf",".woff":"font/woff",".woff2":"font/woff2"};if(_ohMap[_ohExt])S["Content-Type"]=_ohMap[_ohExt]})(),n({path:s,headers:S})';
+    if (mainSrc.includes(APP_MIME_DST)) {
+      log('app:// MIME map already present (module worker can load)');
+    } else if (mainSrc.includes(APP_MIME_SRC)) {
+      mainSrc = mainSrc.replace(APP_MIME_SRC, APP_MIME_DST);
+      log('app:// Content-Type map added (protocol.handle branch)');
+    } else {
+      log('WARNING: app:// response anchor not found - pdf.js may fall back to a fake worker (slow/white PDF)');
+    }
+    if (mainSrc.includes(APP_MIME_FILE_DST)) {
+      log('app:// file-protocol MIME map already present');
+    } else if (mainSrc.includes(APP_MIME_FILE_SRC)) {
+      mainSrc = mainSrc.replace(APP_MIME_FILE_SRC, APP_MIME_FILE_DST);
+      log('app:// Content-Type map added (registerFileProtocol branch)');
+    } else {
+      log('WARNING: app:// file-protocol anchor not found');
+    }
     /* Round 93 (93e): default the window frame to NATIVE. Upstream reads
        the GLOBAL config (D = <userData>/obsidian.json) once at startup:
        `Ae=D.frame==="native"` -> every unset value (the stock "hidden"

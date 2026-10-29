@@ -3755,3 +3755,67 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 
 **真机项**：长按橡皮，确认面板在橡皮上方、文字不换行；从滑条左端滑到右端约 13 个 10px，
 松手后清空本页；关闭面板后再次打开归零。
+
+## 第 193 轮 (2026-10-29): PDF 慢/白页/写回异常专项 + 真机 Agent（v38）
+
+**背景**：用户报告 PDF 加载仍慢、经常全白；写回后整页变白并重新慢速加载；写进 PDF 的笔迹像
+“艺术画”（曲线相连、局部被填充）。本轮只以代码和真机探针为准，先修可证实的链路缺陷，再落
+一套可重放的真机 Agent。
+
+### 一、查到的 PDF 缺陷（按严重度）
+
+| # | 代码证据 | 后果 | 处理 |
+|---|---|---|---|
+| 1 | `main.js` 的 `app://` 响应只有 Range/Length/ACAO/Last-Modified，**没有 Content-Type** | pdf.js 5 用 `new Worker(...,{type:"module"})` 加载 `pdf.worker.min.mjs`；无 JS MIME 会被拒绝，pdf.js 静默退回 **fake worker**，解析/字体/图像解码全在 UI 线程 → 加载慢、白页 | `update-obsidian.mjs` 给 `protocol.handle` 与 `registerFileProtocol` 两个分支都加 MIME map（mjs/js/wasm/css/json/html/pdf/svg/字体） |
+| 2 | `pagerendered` 原先遍历所有页重画（R190 已修）；仍缺 worker 读数 | 无法区分“栅格慢”还是“worker 没起来” | 加 `InkProbe`：boot / pdfSurface / pdfDocLoaded / pdfPagesInit / pdfPage / pdfReload / pdfPageChange |
+| 3 | `schedulePdfWrite` 停笔 3s 就替换正在打开的 PDF 文件 | Obsidian 文件监听触发整页重载 → 白屏 + 重新解析 | 默认改为 `leave`：离开 PDF/后台才写；可切回 `idle`/`manual` |
+| 4 | `inkWritePdf` 只写 `s.currentSpace` | 第 3 页写完翻到第 5 页再离开，第 3 页可能永远不写回 | 新增 `pdfDirty` + `markPdfPageDirty` + `inkWritePdfAll`；按 `!written` 和脏页批量逐页写 |
+| 5 | `pdfWritePage` 超时 20s，但 PDFKit parse/save/swap 可能更久 | 前端判超时，后台仍在写；下一次写重复叠加 | 超时 90s，并提示后台可能仍在写 |
+| 6 | `PdfInkWriter` replace 只按 `uniqueId` 前缀删除旧注释 | PDFKit 保存后可能改写/重生成 id，旧注释留存；每次自动写再叠一层 → 线条密集/填充状 | 同时按 `title/content/subject` 的 `ohsidian-ink` 标记删除；保留其他应用注释 |
+| 7 | `InkAnnotationInfo` 在部分 PDF Kit/阅读器上被画成填充路径 | 写回后像“艺术画” | 默认改为 `/PolyLine`（`PolylineAnnotationInfo`），设置可切回 `/Ink`；`pdf-ink` fixer 可回退 |
+| 8 | `inkPdfAfterBake` 默认 `hide`，但 Obsidian 的 pdf.js 对 `/Ink` 用 `stroke="transparent"` 且无 `.inkAnnotation` CSS | 写回后叠加层隐藏、PDF 注释又不可见 → 看起来墨迹丢失 | 默认改 `keep` 并做一次性迁移；PDF 注释作为可移植副本 |
+| 9 | 真实 PDF surface 的页还没 `viewport` 时，`surfaceAtEvent` 会创建 `pdfdom` 回退 | 同一页两套 space；真实页随后渲染，笔迹不显示/写错页 | 有真实 pdf surface 时不再回退 `pdfdom`，等页 viewport |
+| 10 | 写回前只检查 `%PDF-` 头 | 坏 xref/annotation tree 仍能通过头检查，替换后 pdf.js 白页 | 保存后重新 `loadDocument` 并校验页数；失败保留原文件 |
+| 11 | 页面渲染 N 次触发 N 次全画布清理（R190 修）；写回后 viewer 重建没有探针 | 难以量化“白页是否写回触发” | `pdfViewerReplaced` / `pdfReload.afterWrite` / `pdfPage.white` |
+| 12 | 无设备侧回归入口 | 每次靠手点/肉眼 | `tools/device-agent` 场景、日志解析、报告、保守 fixer |
+
+### 二、写回链路现在的行为
+
+- 时机：默认 **离开 PDF**；`flushPdfWrite` 调 `inkWritePdfAll`，按脏页逐页写。
+- 脏页来源：新笔迹（`written=false`）、擦除、撤销/重做、清空、页表 `pdfDirty`。
+- 单页失败即停，保留脏页；下次离开/手动再试。
+- 写出后校验页数；成功才替换；原文件备份不变。
+- 注释样式默认 `POLYLINE`；`/Ink` 可切回。
+- 写回后默认保留叠加层，确保本机可见；PDF 内注释是跨阅读器副本。
+
+### 三、真机 Agent（`tools/device-agent/`）
+
+- `agent.mjs doctor/install/launch/logs/run/fix`；`hdc` 自动定位 DevEco SDK。
+- 场景 DSL：click/doubleClick/longClick/swipe/fling/text/key/wait/screenshot/shell；坐标支持
+  physical 或 `{css:[x,y]}`（按 profile dpr 换算）。
+- 日志解析 `InkUI probe:*`、`PdfInkWriter timing`、`PdfInk page=...`、`Setting up fake worker`。
+- 报告 `reports/<时间>-<场景>/report.md|json`，含 fake worker、docLoaded、首页、最慢页、
+  白页率、reloads、write 耗时、payload 抽查、每页表。
+- 保守 fixer：`pdf-cap-50`（高 DPI 页 canvas 0→50）、`pdf-ink`（默认 polyline→ink）；
+  `fix --apply` 会先跑 baseline，重建/安装/复跑，指标不变好则回滚并重装。
+- 探针只走现有 `inkLog` IPC，不新增权限；不改变默认日志量级（6000 条上限）。
+
+### 四、验证
+
+- `node --check`：ink/update/verify/agent 全部 OK。
+- `update-obsidian --repatch`：MIME 两个分支都注入；`verify-asar` 全绿。
+- ArkTS 编译修复：`PdfAnnotation` 不暴露 `title/content`，改用
+  `getAnnotationInfo()`；`PolylineAnnotationInfo` 编译通过。
+- `hvigorw assembleHap` **BUILD SUCCESSFUL in 25 s 756 ms**；
+  HAP **120,960,689 B**，2026-10-29 18:28:26，SHA-256
+  `0FF11DCD12986A682473CF476FEC5BE39EADE44F07904DEE580B2391B4922508`。
+- HAP 内 asar：`OHSIDIAN_INK_REV=38`、`probe`、`inkWritePdfAll`/`pdfDirtyPages`、
+  `app://` MIME 均在位。
+
+### 五、仍需真机确认
+
+- `InkProbe fakeWorker` 必须为 0；若非 0，下次接着查 `app://` 的 module worker 加载错误。
+- 写回后 `pdfPage.white` 与 `pdfReload.afterWrite`：确认默认 `leave` 不再在阅读中白屏。
+- 第 3 页写、翻第 5 页、离开：两页都写回。
+- `POLYLINE` 与 `INK` 两种样式在 Obsidian/系统 PDF 阅读器里的显示差异；必要时改用 Stamp PNG。
+- 真机 Agent 首次运行需校准 `uitest` 坐标（physical vs CSS）。

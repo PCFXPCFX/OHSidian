@@ -59,6 +59,12 @@ try {
     'app video-hw toggle removed (98r revert)': !app.includes('ohsidian-video-hw'),
     'app console bridge opt-in (round 96b)': app.includes('ohsidianConsoleCapture'),
     'main console bridge (round 96b)': main.includes('__ohsidianConsoleBridge'),
+    // pdf.js 5 loads pdf.worker.min.mjs as a module worker. Without a
+    // JavaScript Content-Type the module worker is rejected and pdf.js
+    // silently runs parsing on the UI thread (slow/white PDF pages).
+    'main app:// MIME map (pdf worker)': main.includes('".mjs":"text/javascript; charset=utf-8"') &&
+      main.includes('T.set("Content-Type",_ohMap[_ohExt])') &&
+      main.includes('S["Content-Type"]=_ohMap[_ohExt]'),
     'app media hang watchdog (round 95c)': app.includes('loadedmetadata') && app.includes('__ohsidianWatched'),
     'app back-press consumer (round 96)': app.includes('applyBackPress'),
     // Round 104: back press must close the mobile drawer / tab switcher, and

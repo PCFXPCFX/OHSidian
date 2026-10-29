@@ -14,10 +14,32 @@
  * pressure is constant it asks ArkTS for the device-rate sample stream
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
-window.__ohsidianInkPatch = "37";
-var OHSIDIAN_INK_REV = "37";
+window.__ohsidianInkPatch = "38";
+var OHSIDIAN_INK_REV = "38";
 (function () {
   "use strict";
+
+  // pdf.js falls back to a fake worker on the UI thread when module-worker
+  // loading fails. It only logs one warning, so keep a counter for the device
+  // probe (app:// MIME etc.).
+  (function () {
+    try {
+      var origWarn = console.warn;
+      console.warn = function () {
+        try {
+          var msg = Array.prototype.join.call(arguments, " ");
+          if (msg && msg.toLowerCase().indexOf("fake worker") >= 0) {
+            window.__ohsidianFakeWorker = (window.__ohsidianFakeWorker || 0) + 1;
+            try {
+              console.info("InkProbe fakeWorker " + window.__ohsidianFakeWorker + " " +
+                String(msg).slice(0, 160));
+            } catch (e0) {}
+          }
+        } catch (e1) {}
+        try { return origWarn.apply(console, arguments); } catch (e2) {}
+      };
+    } catch (eW) {}
+  })();
 
   var ROOT = ".obsidian/ohsidian-ink";
   var DOCS = ROOT + "/docs";
@@ -39,6 +61,7 @@ var OHSIDIAN_INK_REV = "37";
     barTimer: 0,
     lastBarSig: "",
     traceCount: 0,
+    probeCount: 0,
     quiet: true,
     blockEdge: true,
     tool: "pointer",
@@ -106,6 +129,12 @@ var OHSIDIAN_INK_REV = "37";
     pdfAutoDirty: false,
     pdfAutoFail: 0,
     pdfBackup: "",
+    pdfWriteWhen: "leave",
+    pdfStyle: "ink",
+    lastPdfWriteAt: 0,
+    pdfWriteCount: 0,
+    pdfDirty: {},
+    pdfFlushRunning: false,
     offsetX: 0,
     offsetY: 0,
     simPressure: true,
@@ -234,6 +263,55 @@ var OHSIDIAN_INK_REV = "37";
 
   function nowMs() {
     return (window.performance && performance.now) ? performance.now() : Date.now();
+  }
+
+  /**
+   * Structured device probe. The line reaches hilog as
+   * `InkUI probe:<event> {json}` through the existing inkLog IPC action, so the
+   * host agent can measure PDF loading/white pages/write latency without
+   * attaching a debugger. Kept separate from inkTrace (which is capped at 400).
+   */
+  function probe(event, data) {
+    try {
+      if (state.probeCount > 6000) return;
+      state.probeCount++;
+      if (typeof window.__ohsidianNativeSend !== "function") return;
+      window.__ohsidianNativeSend({
+        action: "inkLog",
+        event: "probe:" + String(event || ""),
+        detail: data ? JSON.stringify(data) : "",
+        ts: Date.now()
+      });
+    } catch (e) {}
+  }
+
+  function canvasWhiteSample(cv) {
+    try {
+      if (!cv || !(cv.width > 0) || !(cv.height > 0)) return null;
+      var tmp = canvasWhiteSample._cv;
+      if (!tmp) {
+        tmp = document.createElement("canvas");
+        tmp.width = 32;
+        tmp.height = 32;
+        canvasWhiteSample._cv = tmp;
+      }
+      var ctx = tmp.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return null;
+      ctx.clearRect(0, 0, 32, 32);
+      ctx.drawImage(cv, 0, 0, 32, 32);
+      var d = ctx.getImageData(0, 0, 32, 32).data;
+      var dark = 0;
+      var opaque = 0;
+      for (var i = 0; i < d.length; i += 4) {
+        if (d[i + 3] > 16) {
+          opaque++;
+          if (d[i] < 235 || d[i + 1] < 235 || d[i + 2] < 235) dark++;
+        }
+      }
+      return { white: opaque === 0 || dark < 3, dark: dark, opaque: opaque };
+    } catch (e) {
+      return null;
+    }
   }
 
   function uid() {
@@ -443,6 +521,16 @@ var OHSIDIAN_INK_REV = "37";
       setPref("inkEnabled", false);
       setPref("inkDefaultOffMigrated", true);
     }
+    if (pref("inkPdfKeepMigrated", false) !== true) {
+      // Obsidian's pdf.js renders /Ink polylines with stroke="transparent"
+      // and ships no .inkAnnotation CSS, so hiding the overlay after a write
+      // makes the ink look lost. Keep the overlay as the visible layer and
+      // treat the PDF annotation as the portable copy.
+      if (pref("inkPdfAfterBake", "hide") === "hide") {
+        setPref("inkPdfAfterBake", "keep");
+      }
+      setPref("inkPdfKeepMigrated", true);
+    }
     if (pref("inkDoubleTapMigrated", false) !== true) {
       // The old default toggled eraser. Wake the toolbar instead, which is
       // what a double-tap on the barrel is for in day-to-day writing.
@@ -500,6 +588,16 @@ var OHSIDIAN_INK_REV = "37";
     state.lastPenTool = pref("inkLastPenTool", "pen") === "highlighter" ? "highlighter" : "pen";
     state.offsetX = Number(pref("inkOffsetX", 0)) || 0;
     state.offsetY = Number(pref("inkOffsetY", 0)) || 0;
+    // "leave" is the default because replacing the file while Obsidian has it
+    // open forces a full PDF reload (white frame + re-parse) under the reader.
+    state.pdfWriteWhen = pref("inkPdfWriteWhen", "leave");
+    if (["leave", "idle", "manual"].indexOf(state.pdfWriteWhen) < 0) {
+      state.pdfWriteWhen = "leave";
+    }
+    state.pdfStyle = pref("inkPdfStyle", "polyline");
+    if (["ink", "polyline"].indexOf(state.pdfStyle) < 0) {
+      state.pdfStyle = "polyline";
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -750,6 +848,7 @@ var OHSIDIAN_INK_REV = "37";
     store.redo[key] = store.redo[key] || [];
     store.redo[key].push(entry);
     restoreSpace(doc, entry.space, entry.before);
+    markPdfPageDirty(s, entry.space);
     schedulePdfWrite(s);
     return true;
   }
@@ -768,6 +867,7 @@ var OHSIDIAN_INK_REV = "37";
     store.undo[key] = store.undo[key] || [];
     store.undo[key].push(entry);
     restoreSpace(doc, entry.space, entry.after);
+    markPdfPageDirty(s, entry.space);
     schedulePdfWrite(s);
     return true;
   }
@@ -791,6 +891,7 @@ var OHSIDIAN_INK_REV = "37";
     }
     pushHistory(doc, space, before);
     restoreSpace(doc, space, []);
+    markPdfPageDirty(s, space);
     schedulePdfWrite(s);
     inkStatus("已清除本页墨迹（可撤销）");
     return true;
@@ -1664,6 +1765,12 @@ var OHSIDIAN_INK_REV = "37";
       viewer: viewer,
       container: container,
       pages: {},
+      // Probe state (device agent reads probe:* lines from hilog).
+      openedAt: nowMs(),
+      docLoadedAt: 0,
+      reloads: 0,
+      rendered: 0,
+      pageStarts: {},
       // The overlay never needs more than 2x; 2.249 costs 26% more pixels
       // per page with no visible gain on handwriting at reading distance.
       dpr: Math.min(window.devicePixelRatio || 1, 2),
@@ -1807,7 +1914,7 @@ var OHSIDIAN_INK_REV = "37";
         if (!doc) return;
         ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
         // Read the preference once per page, not once per stroke.
-        var showBaked = pref("inkPdfAfterBake", "hide") === "keep";
+        var showBaked = pref("inkPdfAfterBake", "keep") === "keep";
         for (var i = 0; i < doc.strokes.length; i++) {
           var st = doc.strokes[i];
           if (st.space !== entry.space) continue;
@@ -1888,9 +1995,71 @@ var OHSIDIAN_INK_REV = "37";
         if (this.hooks) return;
         this.hooks = true;
         var self = this;
+        var onDocLoaded = function (e) {
+          try {
+            var ms = Math.round(nowMs() - self.openedAt);
+            if (self.docLoadedAt) {
+              self.reloads++;
+              probe("pdfReload", {
+                reloads: self.reloads,
+                ms: ms,
+                pages: e && e.pagesCount,
+                afterWrite: state.lastPdfWriteAt ? Date.now() - state.lastPdfWriteAt : -1,
+                fakeWorker: window.__ohsidianFakeWorker || 0
+              });
+            } else {
+              self.docLoadedAt = nowMs();
+              probe("pdfDocLoaded", {
+                pages: e && e.pagesCount,
+                ms: ms,
+                fakeWorker: window.__ohsidianFakeWorker || 0
+              });
+            }
+          } catch (eD) {}
+        };
+        var onPagesInit = function (e) {
+          try {
+            probe("pdfPagesInit", {
+              pages: e && e.pagesCount,
+              ms: Math.round(nowMs() - self.openedAt)
+            });
+          } catch (eP) {}
+        };
+        var onPageStart = function (e) {
+          try {
+            var pn = e && e.pageNumber;
+            var vp = e && e.source && e.source.viewport;
+            if (pn > 0) {
+              self.pageStarts[pn] = {
+                t: nowMs(),
+                w: vp ? Math.round(vp.width) : 0,
+                h: vp ? Math.round(vp.height) : 0
+              };
+            }
+          } catch (eS0) {}
+        };
         var onRendered = function (e) {
           try {
             var pageEl = e && e.source && e.source.div;
+            var pn = e && e.pageNumber;
+            if (!(pn > 0) && pageEl) pn = parseInt(pageEl.dataset.pageNumber, 10) || 0;
+            var st = pn ? self.pageStarts[pn] : null;
+            var vp = e && e.source && e.source.viewport;
+            var cv = e && e.source && e.source.canvas;
+            var white = canvasWhiteSample(cv);
+            self.rendered++;
+            probe("pdfPage", {
+              page: pn,
+              ms: st ? Math.round(nowMs() - st.t) : -1,
+              w: vp ? Math.round(vp.width) : (cv ? cv.width : 0),
+              h: vp ? Math.round(vp.height) : (cv ? cv.height : 0),
+              scale: vp ? Number(vp.scale.toFixed(3)) : 0,
+              white: white ? white.white : null,
+              dark: white ? white.dark : -1,
+              rendered: self.rendered,
+              afterWrite: state.lastPdfWriteAt ? Date.now() - state.lastPdfWriteAt : -1,
+              fakeWorker: window.__ohsidianFakeWorker || 0
+            });
             if (!pageEl) return;
             var entry = self.ensurePage(pageEl);
             if (!entry) return;
@@ -1900,16 +2069,42 @@ var OHSIDIAN_INK_REV = "37";
             self.redrawPage(entry);
           } catch (e2) {}
         };
+        var onPageChanging = function (e) {
+          try {
+            probe("pdfPageChange", {
+              from: e && e.previous,
+              to: e && e.pageNumber,
+              ms: Math.round(nowMs() - self.openedAt)
+            });
+          } catch (eC) {}
+        };
         var onScale = function () {
           if (self.scaleTimer) clearTimeout(self.scaleTimer);
           self.scaleTimer = setTimeout(function () {
             self.scaleTimer = 0;
-            try { self.refreshPages(); } catch (eS) {}
+            try {
+              probe("pdfScale", {
+                scale: self.viewer && self.viewer.currentScaleValue,
+                ms: Math.round(nowMs() - self.openedAt)
+              });
+              self.refreshPages();
+            } catch (eS) {}
           }, 120);
         };
-        this.handlers = { rendered: onRendered, scale: onScale };
+        this.handlers = {
+          rendered: onRendered,
+          scale: onScale,
+          doc: onDocLoaded,
+          pages: onPagesInit,
+          pageStart: onPageStart,
+          pageChange: onPageChanging
+        };
         try {
           this.viewer.eventBus.on("pagerendered", onRendered);
+          this.viewer.eventBus.on("pagerender", onPageStart);
+          this.viewer.eventBus.on("documentloaded", onDocLoaded);
+          this.viewer.eventBus.on("pagesinit", onPagesInit);
+          this.viewer.eventBus.on("pagechanging", onPageChanging);
           this.viewer.eventBus.on("scalechanging", onScale);
           this.viewer.eventBus.on("scalechanged", onScale);
         } catch (e) {
@@ -1922,6 +2117,10 @@ var OHSIDIAN_INK_REV = "37";
         try {
           if (this.handlers) {
             this.viewer.eventBus.off("pagerendered", this.handlers.rendered);
+            this.viewer.eventBus.off("pagerender", this.handlers.pageStart);
+            this.viewer.eventBus.off("documentloaded", this.handlers.doc);
+            this.viewer.eventBus.off("pagesinit", this.handlers.pages);
+            this.viewer.eventBus.off("pagechanging", this.handlers.pageChange);
             this.viewer.eventBus.off("scalechanging", this.handlers.scale);
             this.viewer.eventBus.off("scalechanged", this.handlers.scale);
           }
@@ -1949,6 +2148,16 @@ var OHSIDIAN_INK_REV = "37";
     surface.doc = docFor(surface);
     surface.attach();
     surface.refreshPages();
+    probe("pdfSurface", {
+      target: (leaf.view.file && leaf.view.file.path) || "",
+      pages: surface.viewer.pagesCount || 0,
+      scale: surface.viewer.currentScaleValue || "",
+      overlayPages: Object.keys(surface.pages || {}).length,
+      fakeWorker: window.__ohsidianFakeWorker || 0,
+      dpr: surface.dpr,
+      overlay: [surface.container && surface.container.clientWidth,
+        surface.container && surface.container.clientHeight]
+    });
     inkTrace("surface", {
       kind: "pdf",
       target: (leaf.view.file && leaf.view.file.path) || "",
@@ -2715,6 +2924,12 @@ var OHSIDIAN_INK_REV = "37";
             (leaf.view && existing.viewer !== leaf.view.pdfViewer))) {
           // pdf.js replaces the viewer on a document reload (our own PDF write
           // triggers one); the old event bus and page canvases are dead.
+          if (leaf.view && existing.viewer !== leaf.view.pdfViewer) {
+            probe("pdfViewerReplaced", {
+              afterWrite: state.lastPdfWriteAt ? Date.now() - state.lastPdfWriteAt : -1,
+              page: existing.currentSpace || ""
+            });
+          }
           stale = true;
         } else if (existing.kind === "canvas" &&
           (!existing.wrapper || !existing.wrapper.isConnected ||
@@ -2803,18 +3018,20 @@ var OHSIDIAN_INK_REV = "37";
       } else if (s.kind === "pdf") {
         var entry = s.surfaceAt(target);
         if (entry) return { surface: s, entry: entry };
-        try {
-          var pe = target.closest ? target.closest(".page[data-page-number]") : null;
-          if (pe) {
-            var ps = pdfEmbedSurfaceFor(s.leaf, pe, true);
-            if (ps) return { surface: ps, entry: null };
-          }
-        } catch (eP) {}
+        // Do NOT fall back to a pdfdom surface for a page that is still
+        // loading. pdfdom uses a different space; when the real page later
+        // renders, those strokes live in another doc space and appear lost
+        // (or are written to a different page). Wait until pageView.viewport
+        // exists instead.
+        return null;
       }
     }
     try {
       var al = state.app && state.app.workspace ? state.app.workspace.activeLeaf : null;
       if (al && al.view && al.view.getViewType && al.view.getViewType() === "pdf") {
+        // If the real pdf.js surface exists, a pdfdom fallback would split
+        // the page into two spaces; refuse instead.
+        if (surfaceForLeaf(al)) return null;
         var dpe = target.closest ? target.closest(".page[data-page-number]") : null;
         if (dpe) {
           var dps = pdfEmbedSurfaceFor(al, dpe, true);
@@ -3200,7 +3417,8 @@ var OHSIDIAN_INK_REV = "37";
       device: ev.pointerType === "pen" ? "pen" : (ev.pointerType || "?"),
       pts: [],
       bbox: null,
-      baked: false
+      baked: false,
+      written: false
     };
     var pr = pressureFor(surface, ev, sp[0], sp[1]);
     stroke.pts.push([sp[0], sp[1], pr.p, pr.tiltX, pr.tiltY, 0]);
@@ -3374,6 +3592,7 @@ var OHSIDIAN_INK_REV = "37";
       }
       if (a.changed && a.space && (a.space.indexOf("pdf:") === 0 ||
         a.space.indexOf("pdfdom:") === 0)) {
+        markPdfPageDirty(a.surface, a.space);
         schedulePdfWrite(a.surface);
       }
       return;
@@ -3403,6 +3622,7 @@ var OHSIDIAN_INK_REV = "37";
       });
       if (stroke.space && (stroke.space.indexOf("pdf:") === 0 ||
         stroke.space.indexOf("pdfdom:") === 0)) {
+        markPdfPageDirty(surface, stroke.space);
         schedulePdfWrite(surface);
       }
     } else if (surface.kind === "markdown" || surface.kind === "canvas" || surface.kind === "pdfembed") {
@@ -4124,7 +4344,7 @@ var OHSIDIAN_INK_REV = "37";
     } catch (e) {}
   }
 
-  function pdfWritePage(rel, abs, vaultRoot, page, strokes, mode, replace, removeIds) {
+  function pdfWritePage(rel, abs, vaultRoot, page, strokes, mode, replace, removeIds, style) {
     return new Promise(function (resolve) {
       if (!ensureIpc()) {
         resolve({ ok: false, error: "IPC 未连接" });
@@ -4136,9 +4356,12 @@ var OHSIDIAN_INK_REV = "37";
         timer: setTimeout(function () {
           if (state.pdfPending[seq]) {
             delete state.pdfPending[seq];
-            resolve({ ok: false, error: "写入超时" });
+            // Large PDFs can take far longer than 20 s in PDF Kit (parse +
+            // save + swap). Timing out early used to fire a second write while
+            // the first was still running, which stacked annotations.
+            resolve({ ok: false, error: "写入超时（90s，后台可能仍在写，请勿重复触发）" });
           }
-        }, 20000)
+        }, 90000)
       };
       var ok = sendAction({
         action: "pdfInk",
@@ -4148,6 +4371,7 @@ var OHSIDIAN_INK_REV = "37";
         path: abs,
         page: page,
         inkMode: mode || "vector",
+        inkStyle: style || state.pdfStyle,
         replace: replace === true,
         removeIds: removeIds || [],
         strokes: strokes
@@ -4159,22 +4383,72 @@ var OHSIDIAN_INK_REV = "37";
     });
   }
 
+  function markPdfPageDirty(surface, space) {
+    if (!surface || surface.kind !== "pdf") return;
+    var m = /^pdf:(\d+)$/.exec(String(space || ""));
+    if (!m) return;
+    var doc = docFor(surface);
+    var key = (doc ? doc.target : "?") + "|pdf:" + m[1];
+    state.pdfDirty[key] = { surface: surface, page: parseInt(m[1], 10) };
+  }
+
+  function pdfDirtyPages(surface) {
+    var doc = docFor(surface);
+    var target = doc ? doc.target : "?";
+    var set = {};
+    for (var key in state.pdfDirty) {
+      if (!Object.prototype.hasOwnProperty.call(state.pdfDirty, key)) continue;
+      var ent = state.pdfDirty[key];
+      if (!ent) continue;
+      if (key.indexOf(target + "|") !== 0) continue;
+      if (ent.surface && ent.surface.doc !== doc) continue;
+      set[ent.page] = 1;
+    }
+    if (doc && doc.strokes) {
+      for (var i = 0; i < doc.strokes.length; i++) {
+        var st = doc.strokes[i];
+        if (st.written === false && /^pdf:\d+$/.test(String(st.space || ""))) {
+          set[parseInt(String(st.space).slice(4), 10)] = 1;
+        }
+      }
+    }
+    var pages = [];
+    for (var p in set) if (Object.prototype.hasOwnProperty.call(set, p)) pages.push(parseInt(p, 10));
+    pages.sort(function (a, b) { return a - b; });
+    return pages;
+  }
+
+  async function inkWritePdfAll(surface) {
+    if (state.pdfFlushRunning) return;
+    var pages = pdfDirtyPages(surface);
+    if (!pages.length) return;
+    state.pdfFlushRunning = true;
+    try {
+      for (var i = 0; i < pages.length; i++) {
+        var ok = await inkWritePdf(surface, true, pages[i]);
+        if (ok === false) break;
+      }
+    } finally {
+      state.pdfFlushRunning = false;
+    }
+  }
+
   async function inkWritePdf(surface, auto, pageOverride) {
     var s = surface || state.activeSurface || activeSurfaceNow();
     var isPdf = s && s.kind === "pdf";
     var isDom = s && s.kind === "pdfembed" && s.pdfDom;
     if (!s || (!isPdf && !isDom)) {
       if (!auto) inkStatus("请先打开一个 PDF");
-      return;
+      return false;
     }
     if (state.pdfInFlight) {
       state.pdfAutoDirty = true;
-      return;
+      return false;
     }
     var file = s.leaf && s.leaf.view ? s.leaf.view.file : null;
-    if (!file) return;
+    if (!file) return false;
     var ad = adapter();
-    if (!ad || typeof ad.getFullPath !== "function") return;
+    if (!ad || typeof ad.getFullPath !== "function") return false;
     var abs = "";
     var vaultRoot = "";
     try { abs = ad.getFullPath(file.path); } catch (e) { abs = ""; }
@@ -4182,29 +4456,32 @@ var OHSIDIAN_INK_REV = "37";
       if (typeof ad.getBasePath === "function") vaultRoot = ad.getBasePath();
       else vaultRoot = ad.getFullPath("");
     } catch (e2) { vaultRoot = ""; }
-    if (!abs || !vaultRoot) return;
+    if (!abs || !vaultRoot) return false;
     var page = -1;
     var space = "";
     if (isPdf) {
-      var cur = -1;
-      try {
-        if (s.currentSpace && s.currentSpace.indexOf("pdf:") === 0) {
-          cur = parseInt(s.currentSpace.slice(4), 10);
+      if (typeof pageOverride === "number" && pageOverride >= 0) {
+        page = Math.floor(pageOverride);
+      } else {
+        var cur = -1;
+        try {
+          if (s.currentSpace && s.currentSpace.indexOf("pdf:") === 0) {
+            cur = parseInt(s.currentSpace.slice(4), 10);
+          }
+        } catch (eCur) {}
+        if (!(cur >= 0) && s.viewer && s.viewer.currentPageNumber > 0) {
+          cur = s.viewer.currentPageNumber - 1;
         }
-      } catch (eCur) {}
-      if (!(cur >= 0) && s.viewer && s.viewer.currentPageNumber > 0) {
-        cur = s.viewer.currentPageNumber - 1;
+        page = cur;
       }
-      if (!(cur >= 0) && typeof pageOverride === "number") cur = pageOverride;
-      page = cur;
       space = "pdf:" + page;
     } else {
       page = parseInt(s.pageEl.dataset.pageNumber || "1", 10) - 1;
       space = s.space;
     }
-    if (!(page >= 0)) return;
+    if (!(page >= 0)) return false;
     var doc = docFor(s);
-    if (!doc || doc._loading) return;
+    if (!doc || doc._loading) return false;
     var list = [];
     var removeIds = [];
     var totalPts = 0;
@@ -4219,7 +4496,7 @@ var OHSIDIAN_INK_REV = "37";
     }
     if (totalPts > 12000 || list.length > 400) {
       if (!auto) inkStatus("本页墨迹过多，直接写入会超出单条 IPC 限制；请分页或清除后再试", 5000);
-      return;
+      return false;
     }
     var payload = [];
     for (var j = 0; j < list.length; j++) {
@@ -4234,27 +4511,74 @@ var OHSIDIAN_INK_REV = "37";
         opacity: st2.opacity
       });
     }
+    var sample = [];
+    for (var si = 0; si < list.length && si < 3; si++) {
+      var ss = list[si];
+      sample.push({
+        id: ss.id,
+        n: ss.pts ? ss.pts.length : 0,
+        first: ss.pts && ss.pts[0] ? [ss.pts[0][0], ss.pts[0][1]] : null,
+        last: ss.pts && ss.pts.length ? [ss.pts[ss.pts.length - 1][0], ss.pts[ss.pts.length - 1][1]] : null,
+        bbox: ss.bbox || null,
+        width: ss.width,
+        color: ss.color
+      });
+    }
+    probe("pdfPayload", {
+      page: page,
+      mode: isDom ? "normalized" : "vector",
+      style: state.pdfStyle,
+      strokes: list.length,
+      pts: totalPts,
+      sample: sample
+    });
+    var writeT0 = nowMs();
+    probe("pdfWriteStart", {
+      page: page,
+      strokes: list.length,
+      pts: totalPts,
+      style: state.pdfStyle,
+      mode: isDom ? "normalized" : "vector",
+      when: state.pdfWriteWhen,
+      auto: !!auto
+    });
     state.pdfInFlight = true;
     state.pdfAutoDirty = false;
     try {
       var res = await pdfWritePage(file.path, abs, vaultRoot, page,
-        payload, isDom ? "normalized" : "vector", true, removeIds);
+        payload, isDom ? "normalized" : "vector", true, removeIds, state.pdfStyle);
+      probe("pdfWriteEnd", {
+        page: page,
+        ms: Math.round(nowMs() - writeT0),
+        ok: !!(res && res.ok),
+        error: res && res.error ? String(res.error).slice(0, 200) : "",
+        bytes: res && res.bytes ? res.bytes : 0,
+        backup: res && res.backup ? res.backup : "",
+        style: state.pdfStyle
+      });
+      if (res && res.ok) {
+        state.lastPdfWriteAt = Date.now();
+        state.pdfWriteCount++;
+      }
       if (!res || !res.ok) {
         if (!auto) notice("写入 PDF 失败：" + ((res && res.error) || "未知错误"), 7000);
         else {
           state.pdfAutoFail = (state.pdfAutoFail || 0) + 1;
           if (state.pdfAutoFail <= 2) inkStatus("PDF 自动写入失败：" + ((res && res.error) || "未知错误"), 4500);
         }
-        return;
+        return false;
       }
       state.pdfAutoFail = 0;
       if (res.backup) state.pdfBackup = res.backup;
       for (var q = 0; q < list.length; q++) list[q].written = true;
+      try { delete state.pdfDirty[doc.target + "|pdf:" + page]; } catch (eD) {}
       await saveDoc(doc);
       if (!auto) inkStatus("已写入 PDF 第 " + (page + 1) + " 页；原始文件已备份", 4500);
       else inkStatus("已直接写入 PDF 第 " + (page + 1) + " 页（原文件已备份）", 1800);
+      return true;
     } catch (eW) {
       if (!auto) notice("写入 PDF 异常：" + ((eW && eW.message) || eW), 6000);
+      return false;
     } finally {
       state.pdfInFlight = false;
       if (state.pdfAutoDirty) {
@@ -4267,10 +4591,22 @@ var OHSIDIAN_INK_REV = "37";
   function schedulePdfWrite(surface) {
     var autoOn = pref("inkPdfAuto", true);
     if (autoOn === false || autoOn === "0" || autoOn === "false") return;
+    if (state.pdfWriteWhen === "manual") return;
     if (!surface) return;
     var isPdf = surface.kind === "pdf";
     var isDom = surface.kind === "pdfembed" && surface.pdfDom;
     if (!isPdf && !isDom) return;
+    if (state.pdfWriteWhen === "leave") {
+      // Replacing the file while Obsidian has the PDF open triggers a full
+      // reload (white frame, re-parse). Remember the surface and write it only
+      // when the leaf is left or the app goes to the background.
+      state.pdfAutoSurface = surface;
+      if (state.pdfAutoTimer) {
+        clearTimeout(state.pdfAutoTimer);
+        state.pdfAutoTimer = 0;
+      }
+      return;
+    }
     var prevSurface = state.pdfAutoSurface;
     if (prevSurface && prevSurface !== surface && state.pdfAutoTimer) {
       clearTimeout(state.pdfAutoTimer);
@@ -4299,6 +4635,7 @@ var OHSIDIAN_INK_REV = "37";
   function flushPdfWrite() {
     var autoOn = pref("inkPdfAuto", true);
     if (autoOn === false || autoOn === "0" || autoOn === "false") return;
+    if (state.pdfWriteWhen === "manual") return;
     if (state.pdfAutoTimer) {
       clearTimeout(state.pdfAutoTimer);
       state.pdfAutoTimer = 0;
@@ -4307,6 +4644,13 @@ var OHSIDIAN_INK_REV = "37";
     if (!s) return;
     if (s.kind === "pdfembed" && (!s.pageEl || !s.pageEl.isConnected)) return;
     if (s.kind === "pdf" && (!s.leaf || !s.leaf.view)) return;
+    if (s.kind === "pdf") {
+      // Flush every dirty page, not just the page the user happened to leave
+      // on. Otherwise ink written on page 3 and paged away from is never
+      // persisted until the user returns to page 3.
+      try { inkWritePdfAll(s); } catch (eAll) {}
+      return;
+    }
     inkWritePdf(s, true);
   }
 
@@ -5394,6 +5738,11 @@ var OHSIDIAN_INK_REV = "37";
           (pdfStat.bytes / 1048576).toFixed(1) + " MB · dpr " +
           Number(pdfStat.dpr || 0).toFixed(2)
         : "手写笔模式关闭（0 张）"),
+      "  " + "PDF写回".padEnd(9) + "时机=" + state.pdfWriteWhen +
+        " · 样式=" + state.pdfStyle + " · 次数=" + state.pdfWriteCount +
+        " · 上次=" + (state.lastPdfWriteAt
+          ? Math.round((Date.now() - state.lastPdfWriteAt) / 1000) + "s前" : "-") +
+        " · fake worker=" + (window.__ohsidianFakeWorker || 0),
       "  " + "IPC".padEnd(11) + (state.ipcReady ? "已连接" : "未连接") +
         " · 收 " + state.ipcRecv + " / 发 " + state.ipcSent +
         " · 最近笔事件 " + age
@@ -5773,15 +6122,39 @@ var OHSIDIAN_INK_REV = "37";
 
         var pdf = ctx.newGroup("PDF 与诊断");
         var pdfCtl = ctx.itemEl(pdf, "写入 PDF 后",
-          "写入为真实 /Ink 注释后，叠加层不再重复绘制；如你的阅读器不显示注释，可重新打开该 PDF 验证。");
+          "本机 pdf.js 不绘制 /Ink 折线，默认保留叠加层以确保墨迹可见；PDF 内注释作为可移植副本。若你的阅读器能显示注释，可改为隐藏。");
         selectEl(pdfCtl, [
-          ["hide", "隐藏叠加层（默认）"],
-          ["keep", "仍由叠加层显示（会双画）"]
-        ], pref("inkPdfAfterBake", "hide"), function (v) { setPref("inkPdfAfterBake", v); });
+          ["keep", "保留叠加层（默认，确保可见）"],
+          ["hide", "隐藏叠加层（依赖阅读器）"]
+        ], pref("inkPdfAfterBake", "keep"), function (v) { setPref("inkPdfAfterBake", v); });
         ctx.toggleEl(ctx.itemEl(pdf, "直接写入 PDF（自动备份）",
-          "停顿约 3 秒后把当前页墨迹写回 PDF；首次写入前保留原文件备份。擦除/撤销/清除会重写本页注释。", true),
+          "开启后按下面的时机把当前页墨迹写回 PDF；首次写入前保留原文件备份。擦除/撤销/清除会重写本页注释。", true),
           pref("inkPdfAuto", true) !== false,
           function (on) { setPref("inkPdfAuto", !!on); if (!on && state.pdfAutoTimer) { clearTimeout(state.pdfAutoTimer); state.pdfAutoTimer = 0; } });
+        var whenCtl = ctx.itemEl(pdf, "写回时机",
+          "离开 PDF 时写回不会打断阅读；停笔 3 秒会替换正在打开的文件，Obsidian 会整页重载（白屏）。");
+        selectEl(whenCtl, [
+          ["leave", "离开 PDF 时（推荐）"],
+          ["idle", "停笔 3 秒（会重载）"],
+          ["manual", "仅手动命令"]
+        ], state.pdfWriteWhen, function (v) {
+          state.pdfWriteWhen = v;
+          setPref("inkPdfWriteWhen", v);
+          if (v !== "idle" && state.pdfAutoTimer) {
+            clearTimeout(state.pdfAutoTimer);
+            state.pdfAutoTimer = 0;
+          }
+        });
+        var styleCtl = ctx.itemEl(pdf, "注释样式",
+          "折线（/PolyLine）默认用于避免部分 PDF Kit 把 /Ink 画成填充状；墨迹（/Ink）是标准格式。");
+        selectEl(styleCtl, [
+          ["polyline", "折线（兼容，默认）"],
+          ["ink", "墨迹（标准 /Ink）"]
+        ], state.pdfStyle, function (v) {
+          state.pdfStyle = v;
+          setPref("inkPdfStyle", v);
+          inkStatus(v === "polyline" ? "PDF 注释改为折线，下次写回生效" : "PDF 注释恢复标准墨迹", 2500);
+        });
         var restoreCtl = ctx.itemEl(pdf, "恢复原始 PDF",
           "从 .obsidian/ohsidian-ink/backups 的原始备份恢复当前 PDF；会丢弃之后写入的注释。");
         var restoreBtn = document.createElement("button");
@@ -6126,6 +6499,16 @@ var OHSIDIAN_INK_REV = "37";
       warn("workspace hooks failed", e && e.message);
     }
     log("installed rev " + OHSIDIAN_INK_REV);
+    probe("boot", {
+      rev: OHSIDIAN_INK_REV,
+      dpr: window.devicePixelRatio || 1,
+      inner: [window.innerWidth || 0, window.innerHeight || 0],
+      screen: [window.screen ? screen.availWidth : 0, window.screen ? screen.availHeight : 0],
+      touch: navigator.maxTouchPoints || 0,
+      coarse: !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches),
+      fakeWorker: window.__ohsidianFakeWorker || 0,
+      enabled: state.enabled
+    });
     inkTrace("boot", {
       rev: OHSIDIAN_INK_REV,
       enabled: state.enabled,

@@ -1,0 +1,12 @@
+{
+  "name": "HarmonyOS tablet (default)",
+  "bundle": "com.mikannqaq.obsidian",
+  "ability": "EntryAbility",
+  "screen": { "cssW": 1244, "cssH": 818, "physicalW": 2800, "physicalH": 1840 },
+  "dpr": 2.249,
+  "inputScale": 1,
+  "notes": [
+    "inputScale=1 means uitest coordinates are physical px. If taps land in the wrong place, try 1/dpr.",
+    "CSS coordinates can be passed as {\"css\":[x,y]} in scenarios; they are multiplied by dpr."
+  ]
+}

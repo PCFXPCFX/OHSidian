@@ -102,3 +102,5 @@ web_engine/src/main/resources/resfile/resources/app/obsidian.asar
 # Agent / package-manager working directories (environment artifacts)
 .dsh-tmp/
 .pnpm-store/
+# Device-agent runs write screenshots/reports here; they are not source.
+reports/

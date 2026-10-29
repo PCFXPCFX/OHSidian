@@ -1,0 +1,18 @@
+{
+  "name": "pdf-scroll",
+  "description": "PDF open; scroll down/up to force page render/recycle. Coordinates are physical px for 2800x1840.",
+  "steps": [
+    { "wait": 1500 },
+    { "screenshot": "before" },
+    { "swipe": [1400, 1350, 1400, 450], "duration": 650, "after": 900 },
+    { "swipe": [1400, 1350, 1400, 450], "duration": 650, "after": 900 },
+    { "screenshot": "after-scroll" },
+    { "swipe": [1400, 450, 1400, 1350], "duration": 650, "after": 1200 }
+  ],
+  "waitAfter": 2500,
+  "expect": {
+    "maxDocLoadedMs": 4000,
+    "maxFirstPageMs": 3000,
+    "maxWhiteRate": 0.2
+  }
+}

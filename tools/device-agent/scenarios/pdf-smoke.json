@@ -1,0 +1,16 @@
+{
+  "name": "pdf-smoke",
+  "description": "Assume the PDF is already open; wait for first render and collect probes.",
+  "waitBefore": 800,
+  "steps": [
+    { "wait": 2500 },
+    { "screenshot": "pdf" }
+  ],
+  "waitAfter": 2000,
+  "expect": {
+    "maxDocLoadedMs": 4000,
+    "maxFirstPageMs": 2500,
+    "maxWhiteRate": 0.15,
+    "maxWriteMs": 15000
+  }
+}

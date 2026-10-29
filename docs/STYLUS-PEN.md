@@ -1,7 +1,7 @@
 # 手写笔（华为 M-Pencil）适配
 
-> 状态：实验功能，当前 **v37**。默认关闭，需在“设置 → 手写笔 → 手写笔模式”开启。
-> 实现与变更记录见 `docs/CHANGES-2026-10.md` 第 189–192 轮；更细的真机记录已归档到该文件的旧轮次。
+> 状态：实验功能，当前 **v38**。默认关闭，需在“设置 → 手写笔 → 手写笔模式”开启。
+> 实现与变更记录见 `docs/CHANGES-2026-10.md` 第 189–193 轮；更细的真机记录已归档到该文件的旧轮次。
 
 ## 1. 目标与边界
 
@@ -114,6 +114,9 @@ Stroke：
 - 叠层只给视口 ±1.2 屏内的页分配，离开即释放；`dpr` 封顶 2（设备 2.249 时墨迹仍清晰）。
 - `pagerendered` 只重画事件对应的单页；页表只保留仍在 DOM 的页，翻过的页不再持有 detached canvas。
 - pdf.js 自己的页 canvas 只在高 DPI 触摸设备（`dpr≥2` 且 `pointer:coarse`/触摸点）限制在一屏像素内：整窗宽 A4 约 39 MB → 21 MB；普通 PC（鼠标/触控板）保持上游 `200`，文字清晰度不变。
+- `app://` 响应补 `Content-Type`（`.mjs`/`.js`/`.wasm`/字体/PDF），让 pdf.js 的 **module worker** 真正跑在 worker 线程；否则静默退回 fake worker，表现为加载慢/白页。
+- 写回默认改到**离开 PDF 时**，避免替换正在打开的文件触发整页重载；写回按“脏页”批量处理，不再只写当前页。
+- 注释默认用 **/PolyLine**（兼容模式），并对旧注释按 `uniqueId + title/content/subject` 标记清理，避免重复叠加成“艺术画”；可在设置切回 `/Ink`。
 - 直接写入失败/不支持时仍保留叠加层。
 
 ### 5.3 内嵌 PDF
@@ -145,23 +148,28 @@ Stroke：
 12. **页表清理**：pdf.js reset 会摘掉叠层 canvas；`prunePages()` 同步删除 detached 条目，翻过的页不再占内存。
 13. **内核像素上限（仅高 DPI 触摸设备）**：`capCanvasAreaFactor` 在 `dpr≥2` 且粗指针/有触摸点时取 `0`（一页不超过一屏），否则保持上游 `200`。平板整窗宽 A4 约 39→21 MB（73% 线性），窄面板几乎无损；普通 PC 不降清晰度，高 DPI 触摸 PC 按平板处理。
 14. **关闭即停**：`inkEnabled=false` 时同时停止 ArkTS 的 `penSamplesOn` 采样流，避免笔继续唤醒应用。
+15. **worker 真线程**：`app://` 补 MIME 后，`pdf.worker.min.mjs` 以 module worker 加载；`InkProbe fakeWorker` 应保持 0。
+16. **写回不打断阅读**：默认 `leave` 时机，只在离开 PDF/切后台时替换文件；`idle` 仍可手动选（会重载）。
+17. **脏页批量写回**：按 doc 中 `!written` 的 space 与擦除/撤销/清空标记的脏页逐页写，翻过的页不会漏写。
+18. **写回前校验**：PDFKit 保存后重新 load 并检查页数，坏文件不替换；注释按标记清理，避免重复堆叠。
 
 ## 7. PDF 直接写入
 
 ### 7.1 触发
 
 - 设置“直接写入 PDF（自动备份）”默认开；
-- 停笔约 **3s**、擦除/撤销/重做/清空后，自动写当前页；
-- 翻页前 flush 前一页；blur/visibility/leaf change 也 flush；
+- **写回时机**默认“离开 PDF 时”：记录脏页，切 leaf/后台时批量写；避免读页时替换文件导致白屏重载；
+- 可选“停笔 3 秒”（会重载）或“仅手动”；
+- 擦除/撤销/重做/清空标记对应页为脏页；
 - 手动命令：`OHSidian 手写: 写入 PDF（真实注释）`。
 
 ### 7.2 写入流程
 
 1. 复制原 PDF 到 cache；
 2. PDF Kit 载入；
-3. replace 模式删除本页 `ohsidian-` 注释与 sidecar 记录的旧 id；
-4. 按当前 sidecar 重加本页所有笔画（含 `baked`）；
-5. 保存到 cache；
+3. replace 模式删除本页 `ohsidian-` 注释，以及 `title/content/subject` 以 `ohsidian-ink` 开头的旧注释；
+4. 按当前 sidecar 重加本页所有笔画（含 `baked`）；默认 `POLYLINE`，可切 `INK`；
+5. 保存到 cache；重新 `loadDocument` 校验页数（坏文件不替换）；
 6. 校验 `%PDF-`；
 7. 首次写入前创建原始备份；
 8. 复制到 PDF **同目录** `.hso-new-*.pdf`，同文件系统 swap；平台拒绝覆盖时先 `src → .hso-old-*`，再换入，失败恢复旧文件。
@@ -178,7 +186,9 @@ Stroke：
 - 加密/超大/损坏 PDF 可能失败；失败不替换原文件。
 - pdfdom 归一化写入依赖 `getWidth/getHeight`；旋转/裁切页可能偏移。
 - PDF 被其他进程锁定时最后 swap 仍可能失败；错误会带备份路径。
-- Obsidian pdf.js 不保证渲染 `/Ink`，所以叠加层保留。
+- Obsidian pdf.js 对 `/Ink`/`/PolyLine` 使用 `stroke="transparent"` 且无对应 CSS，所以叠加层默认保留；PDF 注释主要供其他阅读器/导出使用。
+- `/PolyLine` 在部分读器可能显示为折线而非笔锋；需要笔锋时可切回 `/Ink`，但部分 PDF Kit 版本会填充。
+- 真机 Agent 的 `uitest` 坐标需按设备校准；不同 HarmonyOS 版本参数可能不同。
 
 ## 8. 工具与交互
 
@@ -198,7 +208,7 @@ Stroke：
 | 输入与手势 | 掌托过滤、允许手指绘制、橡皮半径、笔杆双击、笔杆轻捏、边缘手势 |
 | 压力 | 来源（自动/强制）、预设、死区、gamma、曲线图 |
 | 颜色 | 跟随主题、自选墨色、高亮色、工具条调色盘 |
-| PDF 与诊断 | 写入后叠加层、直接写入 PDF、恢复原始 PDF、诊断 |
+| PDF 与诊断 | 写入后叠加层（默认保留）、直接写入 PDF、写回时机（离开/3s/手动）、注释样式（PolyLine/Ink）、恢复原始 PDF、诊断 |
 
 ## 10. 命令与诊断
 
@@ -226,6 +236,10 @@ PdfInk write/restore
 
 诊断面板的 `PDF叠层` 行给出：叠层 canvas 张数、页表页数、总字节、overlay `dpr`。
 关闭手写笔模式后应为 **0 张**；开启后应只随可见页数增长，而不是随文档页数增长。
+`PDF写回` 行给出时机/样式/次数/上次写回时间/fake worker 计数。
+
+真机结构化探针：`InkUI probe:<event> {json}`（`pdfDocLoaded` / `pdfPage` / `pdfReload` /
+`pdfWriteStart/End` 等），由 `tools/device-agent/agent.mjs` 采集并生成报告。
 
 ## 11. 文件
 
@@ -238,7 +252,8 @@ PdfInk write/restore
 | `scripts/patches/ohsidian-ink.js` | 渲染层：输入、surface、墨迹、工具条、设置 |
 | `scripts/patches/touch-mode.js` | 设置页/独立“手写笔”tab、IPC 端口 |
 | `scripts/update-obsidian.mjs` | 内核补丁：`capCanvasAreaFactor:0`（PDF 页 canvas 一屏上限） |
-| `scripts/verify-asar.cjs` | 校验 P0/P1 标记与 asar 语法 |
+| `scripts/verify-asar.cjs` | 校验 P0/P1/MIME 标记与 asar 语法 |
+| `tools/device-agent/` | 真机模拟点击、日志探针、报告与保守自动修复 |
 | `electron/src/main/module.json5` | VIBRATE 权限 |
 
 ## 12. 验收清单
@@ -254,3 +269,5 @@ PdfInk write/restore
 9. PDF 自动写入成功；备份位于主目录或 PDF 同目录；恢复可用。
 10. 关闭手写笔模式后完全回到普通 Obsidian：PDF 无叠层 canvas，诊断 `PDF叠层` 为 0 张。
 11. 开启后滚动/翻页只挂载可见页；长 PDF 内存不随页数线性增长，页面重渲染只重画本页。
+12. PDF 打开/翻页应无持续白页；诊断 `PDF写回` 的 `fake worker=0`，`pdfDocLoaded` 有读数。
+13. 写到第 3 页、翻到第 5 页再离开：第 3/5 页都写回；写回后叠加层仍在，页面不长时间白屏。

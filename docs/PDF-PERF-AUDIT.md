@@ -2,9 +2,10 @@
 
 > **实施状态（同日）**：P0（墨迹 PDF 叠层不启用不挂载、可见页上限、单页重绘、页表清理、dpr≤2）
 > 与 P1（高 DPI 触摸设备 `capCanvasAreaFactor:0`，PC 保持 `200`）已落地，见
-> `docs/CHANGES-2026-10.md` 第 190–191 轮、`docs/STYLUS-PEN.md` v36。
-> P2/P3 仍未做，保留为本文件后续验证项。
-> 文中 `ohsidian-ink.js` 行号为修复前（v35）位置；v36 已改动 PDF surface，定位请以函数名
+> `docs/CHANGES-2026-10.md` 第 190–191 轮、`docs/STYLUS-PEN.md` v38。
+> 第 193 轮进一步修复 `app://` 无 Content-Type 导致的 fake worker（B6 成立）、写回重载、
+> 注释重复/填充；真机探针见 `tools/device-agent/`。P2/P3 仍未做。
+> 文中 `ohsidian-ink.js` 行号为修复前（v35）位置；v38 已改动 PDF surface，定位请以函数名
 > （`createPdfSurface` / `ensurePage` / `redrawPage` / `refreshPages`）为准。
 
 > 范围：`obsidian.asar` 内 pdf.js 5.3.34 + Obsidian 的 PDF 视图胶水层 + 本仓库补丁
