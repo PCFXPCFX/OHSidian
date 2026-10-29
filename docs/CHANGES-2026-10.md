@@ -3930,8 +3930,8 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 
 | 产物 | 用途 | 大小/时间 | SHA-256 |
 |---|---|---|---|
-| `electron-default-agent.hap` | 仅真机调试（含探针） | 120,976,288 B / 2026-10-29 23:26:54 | 见构建日志 |
-| `electron-default-signed.hap` | release（无 Agent/探针） | 120,968,096 B / 2026-10-29 23:32:04 | `098C4DAB1790E6B316149F3EE0583A51581166FE55EFBC91599DA84CF73501C6` |
+| `electron-default-agent.hap` | 仅真机调试（含探针） | 120,976,288 B / 2026-10-29 23:48:43 | 见构建日志 |
+| `electron-default-signed.hap` | release（无 Agent/探针） | 120,968,095 B / 2026-10-29 23:50:34 | `B14BE6E74421612642F58256E9BE6A7BBF247065BCE79B08C9FA708581EB5C0B` |
 
 ### 四、验证
 
