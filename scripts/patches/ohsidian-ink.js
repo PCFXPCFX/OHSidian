@@ -1810,6 +1810,7 @@ var OHSIDIAN_INK_REV = "39";
       pages: {},
       renderedPages: {},
       previewTimer: 0,
+      previewPage: -1,
       previewTries: 0,
       previewRetry: 0,
       previewHold: false,
@@ -2191,11 +2192,15 @@ var OHSIDIAN_INK_REV = "39";
             // Native first-paint preview is still experimental: it is only
             // exercised by local agent builds until the overlay/z-order and
             // main-thread interaction are verified. Release keeps pdf.js only.
+            // ArkUI `Image` does not compose above the WebEngine XComponent
+            // surface (only a SURFACE XComponent does), so this stays an
+            // agent-only experiment until the preview is drawn on its own
+            // XComponent surface. Release stays pdf.js-only.
             if (window.__ohsidianAgentBuild) {
+              requestPdfPreview(self, targetPage);
               setTimeout(function () {
                 try { requestPdfPreview(self); } catch (ePV) {}
-              }, 600);
-              requestPdfPreview(self, targetPage);
+              }, 500);
             }
             // Page divs exist now; mount the overlay canvases even if the
             // surface attached before the document finished loading.
@@ -2226,6 +2231,10 @@ var OHSIDIAN_INK_REV = "39";
             if (pn > 0) {
               self.renderedPages[pn] = true;
               dropPdfPreview(self, pn - 1);
+            }
+            if (self.previewPage === pn - 1) {
+              self.previewPage = -1;
+              sendAction({ action: "pdfPreviewHide", seq: 0 });
             }
             self.rendered++;
             probeHook("pdfPage", {
@@ -2380,6 +2389,7 @@ var OHSIDIAN_INK_REV = "39";
       },
       unmount: function () {
         this.disposed = true;
+        try { sendAction({ action: "pdfPreviewHide", seq: 0 }); } catch (eHide) {}
         try {
           if (this.handlers) {
             this.viewer.eventBus.off("pagerendered", this.handlers.rendered);
@@ -4458,6 +4468,14 @@ var OHSIDIAN_INK_REV = "39";
       });
       return;
     }
+    if (msg.event === "pdfPreviewShown") {
+      probeHook("pdfPreviewShown", {
+        ok: !!msg.ok,
+        ms: msg.ms,
+        error: msg.error || ""
+      });
+      return;
+    }
     if (msg.event === "pdfPreviewResult") {
       var pp = state.pdfPreviewPending[msg.seq];
       if (!pp) return;
@@ -4799,11 +4817,6 @@ var OHSIDIAN_INK_REV = "39";
   }
 
   function requestPdfPreview(surface, pageOverride) {
-    inkTrace("previewCall", {
-      kind: surface && surface.kind,
-      leaf: !!(surface && surface.leaf),
-      file: !!(surface && surface.leaf && surface.leaf.view && surface.leaf.view.file)
-    });
     if (!surface || surface.kind !== "pdf" || !surface.leaf) return;
     var file = surface.leaf.view && surface.leaf.view.file;
     if (!file) return;
@@ -4812,62 +4825,50 @@ var OHSIDIAN_INK_REV = "39";
     else {
       try { page = Math.max(0, (surface.viewer.currentPageNumber || 1) - 1); } catch (eP) {}
     }
-    var out = pdfPreviewPath(file, page);
-    if (!out) {
-      inkTrace("previewReq", { page: page, noPath: true });
-      return;
-    }
-    // Cached PNG (from a previous open) is shown immediately; pdf.js will
-    // replace it as soon as its own canvas is ready.
-    var cached = pdfPreviewUrl(out);
-    if (cached) {
-      showPdfPreview(surface, page, cached);
-      return;
-    }
     try {
-      var ad = adapter();
-      var abs = ad.getFullPath(file.path);
-      var pv = surface.viewer.getPageView(page);
-      var vp = pv && pv.viewport;
-      var w = vp ? Math.max(1, Math.round(vp.width)) : 0;
-      var h = vp ? Math.max(1, Math.round(vp.height)) : 0;
-      if (!w || !h) {
-        // pdf.js creates the page view a moment after pagesinit. The page div
-        // already has its layout size; use it so the native render can start
-        // BEFORE pdf.js begins the 10 s page render (the UI thread is blocked
-        // while that render runs, which delays the preview to no benefit).
-        try {
-          var pe = surface.container.querySelector(
-            '.page[data-page-number="' + (page + 1) + '"]');
-          if (pe) {
-            w = Math.max(1, Math.round(pe.clientWidth || pe.offsetWidth || 0));
-            h = Math.max(1, Math.round(pe.clientHeight || pe.offsetHeight || 0));
-          }
-        } catch (ePe) {}
-      }
-      if (!w || !h) {
+      var pageEl = surface.container.querySelector(
+        '.page[data-page-number="' + (page + 1) + '"]');
+      if (!pageEl) return;
+      var r = pageEl.getBoundingClientRect();
+      if (!(r.width > 10) || !(r.height > 10)) return;
+      // At pagesinit the page div can still carry its unscaled layout width
+      // (e.g. 2559 px before page-width is applied); previewing that would
+      // cover half the window. Wait for the real page-width rect.
+      var maxW = (surface.container.clientWidth || window.innerWidth || 1247) * 1.15;
+      if (r.width > maxW) {
         var tries = surface.previewTries || 0;
-        if (tries < 12 && !surface.previewRetry) {
+        if (tries < 20 && !surface.previewRetry) {
           surface.previewTries = tries + 1;
           surface.previewRetry = setTimeout(function () {
             surface.previewRetry = 0;
-            try { requestPdfPreview(surface); } catch (eR) {}
-          }, 100);
+            try { requestPdfPreview(surface, page); } catch (eR2) {}
+          }, 200);
         }
         return;
       }
+      // Only preview a page that is actually on screen.
+      if (r.bottom < 0 || r.top > (window.innerHeight || 1)) return;
+      var ad = adapter();
+      var abs = ad.getFullPath(file.path);
       var seq = state.seq++;
-      state.pdfPreviewPending[seq] = { surface: surface, page: page, out: out };
+      state.pdfPreviewPending[seq] = { surface: surface, page: page };
+      surface.previewPage = page;
       var sent = sendAction({
         action: "pdfPreview",
         seq: seq,
         path: abs,
         page: page,
-        w: w,
-        h: h,
-        out: out
+        x: Math.round(r.left),
+        y: Math.round(r.top),
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+        dpr: window.devicePixelRatio || 1
       });
-      inkTrace("previewReq", { page: page, sent: !!sent, w: w, h: h, out: !!out });
+      inkTrace("previewReq", {
+        page: page, sent: !!sent,
+        x: Math.round(r.left), y: Math.round(r.top),
+        w: Math.round(r.width), h: Math.round(r.height)
+      });
     } catch (e) {
       inkTrace("previewReq", { page: page, error: String(e && e.message || e) });
     }

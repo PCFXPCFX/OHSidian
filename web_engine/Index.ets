@@ -17,5 +17,6 @@ export { PdfInkResult } from './src/main/ets/adapter/PdfInkWriter';
 export { PdfInkStroke } from './src/main/ets/adapter/PdfInkWriter';
 export { PdfPreviewProbeResult } from './src/main/ets/adapter/PdfInkWriter';
 export { PdfPreviewResult } from './src/main/ets/adapter/PdfInkWriter';
+export { PdfPreviewPixelResult } from './src/main/ets/adapter/PdfInkWriter';
 export { ILoginInfo } from './src/main/ets/interface/CommonInterface';
 export { ILogin } from './src/main/ets/interface/CommonInterface';

@@ -95,6 +95,15 @@ export interface PdfPreviewResult {
   error: string;
 }
 
+export interface PdfPreviewPixelResult {
+  ok: boolean;
+  ms: number;
+  w: number;
+  h: number;
+  error: string;
+  bitmap: image.PixelMap | null;
+}
+
 /**
  * Writes renderer-captured strokes into a PDF as real /Ink annotations.
  *
@@ -228,6 +237,53 @@ export class PdfInkWriter {
       result.ms = Date.now() - started;
       LogUtil.info(TAG, 'preview page=' + page + ' ms=' + result.ms +
         ' bytes=' + result.bytes + ' ok=' + result.ok + (result.error ? ' err=' + result.error : ''));
+    }
+    return result;
+  }
+
+  /**
+   * Rasterize one page directly to a PixelMap for the ArkUI first-paint
+   * overlay. Synchronous; PDF Kit renders this PDF's cover in ~300 ms.
+   */
+  static renderPreviewPixelMap(src: string, page: number, width: number,
+    height: number): PdfPreviewPixelResult {
+    const result: PdfPreviewPixelResult = {
+      ok: false, ms: 0, w: 0, h: 0, error: '', bitmap: null
+    };
+    const started: number = Date.now();
+    if (!src || page < 0 || width <= 0 || height <= 0) {
+      result.error = 'bad request';
+      return result;
+    }
+    const doc = new pdfService.PdfDocument();
+    try {
+      const parse = doc.loadDocument(src);
+      if (parse !== pdfService.ParseResult.PARSE_SUCCESS) {
+        result.error = 'parse:' + parse;
+        return result;
+      }
+      const pg = doc.getPage(page);
+      const pw: number = pg.getWidth();
+      const ph: number = pg.getHeight();
+      if (!(pw > 0) || !(ph > 0)) {
+        result.error = 'page size';
+        return result;
+      }
+      const pm: image.PixelMap | null = pg.getPagePixelMap();
+      if (pm === null) {
+        result.error = 'no pixelmap';
+        return result;
+      }
+      result.bitmap = pm;
+      result.w = width;
+      result.h = height;
+      result.ok = true;
+    } catch (e) {
+      const err = e as BusinessError;
+      result.error = 'exc:' + err.code + ' ' + err.message;
+    } finally {
+      try { doc.releaseDocument(); } catch (eR) {}
+      result.ms = Date.now() - started;
     }
     return result;
   }

@@ -29,7 +29,7 @@
 
 import { WebWindow, BackPressBridge, NativeVideoOverlay, NativeVideoTheme } from 'web_engine';
 import { StylusAdapter, StylusKind, PenSampleTap } from 'web_engine';
-import { PdfInkWriter, PdfInkRequest, PdfInkResult, PdfInkStroke, PdfPreviewProbeResult, PdfPreviewResult } from 'web_engine';
+import { PdfInkWriter, PdfInkRequest, PdfInkResult, PdfInkStroke, PdfPreviewProbeResult, PdfPreviewResult, PdfPreviewPixelResult } from 'web_engine';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { KeyCode } from '@kit.InputKit';
@@ -112,6 +112,10 @@ interface NativeVideoRequest {
   phase?: string;
   w?: number;
   h?: number;
+  // Renderer -> ArkTS: CSS rect of the PDF page for the native preview overlay.
+  x?: number;
+  y?: number;
+  cssW?: number;
   // Renderer -> ArkTS: PDF ink write-back.
   rel?: string;
   vaultRoot?: string;
@@ -267,6 +271,14 @@ struct Index {
   private nativeIpcPrimed: boolean = false;
   private nativeThumbBusy: boolean = false;
   private nativeIpcWarned: boolean = false;
+  // Native PDF first-paint preview (ArkUI Image over the Web XComponent).
+  @State private pdfPreviewMap: image.PixelMap | null = null;
+  @State private pdfPreviewX: number = 0;
+  @State private pdfPreviewY: number = 0;
+  @State private pdfPreviewW: number = 0;
+  @State private pdfPreviewH: number = 0;
+  private pdfPreviewSeq: number = 0;
+  private pdfPreviewTimer: number = -1;
   private disposed: boolean = false;
   // BUG-005: the renderer owns the overlay's lifetime (it sends 'close' on IME,
   // modal, off-screen), but it cannot send ANYTHING once its page reloads,
@@ -357,6 +369,7 @@ struct Index {
 
   aboutToDisappear() {
     this.disposed = true;
+    this.clearPdfPreview(true);
     // Never leave the system status bar hidden if the page dies mid-fullscreen.
     this.applySystemBars(false);
     this.stopNativeIpc();
@@ -746,7 +759,9 @@ struct Index {
             } else if (msg.action === 'pdfPreviewProbe') {
               this.handlePdfPreviewProbe(msg);
             } else if (msg.action === 'pdfPreview') {
-              this.handlePdfPreview(msg);
+              this.handlePdfPreviewOverlay(msg);
+            } else if (msg.action === 'pdfPreviewHide') {
+              this.clearPdfPreview(true);
             } else if (msg.action === 'pdfInkRestore') {
               this.handlePdfRestore(msg);
             } else {
@@ -1112,6 +1127,67 @@ struct Index {
     }).catch((e: Error) => {
       reply({ ok: false, ms: 0, w: 0, h: 0, error: 'task:' + e.message });
     });
+  }
+
+  private clearPdfPreview(release: boolean): void {
+    if (this.pdfPreviewTimer >= 0) {
+      clearTimeout(this.pdfPreviewTimer);
+      this.pdfPreviewTimer = -1;
+    }
+    if (release && this.pdfPreviewMap !== null) {
+      try { this.pdfPreviewMap.release(); } catch (e) {}
+    }
+    this.pdfPreviewMap = null;
+  }
+
+  /**
+   * First-paint preview for a slow PDF page. PDF Kit rasterizes the page in
+   * ~300 ms; the result is shown as an ArkUI Image above the Web XComponent,
+   * so it is visible even while pdf.js blocks the renderer main thread for
+   * the same page. The renderer hides it on `pagerendered` (or after 12 s).
+   */
+  private handlePdfPreviewOverlay(req: NativeVideoRequest): void {
+    const seq: number = typeof req.seq === 'number' ? req.seq : 0;
+    const path: string = req.path ? req.path : '';
+    const page: number = typeof req.page === 'number' ? req.page : 0;
+    const x: number = typeof req.x === 'number' ? req.x : 0;
+    const y: number = typeof req.y === 'number' ? req.y : 0;
+    const w: number = typeof req.w === 'number' ? req.w : 0;
+    const h: number = typeof req.h === 'number' ? req.h : 0;
+    const dpr: number = typeof req.dpr === 'number' && req.dpr > 0 ? req.dpr : 2;
+    const reply = (ok: boolean, ms: number, error: string): void => {
+      this.sendNativeLine(JSON.stringify({
+        event: 'pdfPreviewShown',
+        seq: seq,
+        ok: ok,
+        ms: ms,
+        error: error
+      }));
+    };
+    if (!path || w <= 0 || h <= 0) {
+      reply(false, 0, 'bad request');
+      return;
+    }
+    this.pdfPreviewSeq = seq;
+    const result: PdfPreviewPixelResult = PdfInkWriter.renderPreviewPixelMap(
+      path, page, Math.round(w * dpr), Math.round(h * dpr));
+    if (!result.ok || result.bitmap === null) {
+      reply(false, result.ms, result.error);
+      return;
+    }
+    if (this.pdfPreviewMap !== null) {
+      try { this.pdfPreviewMap.release(); } catch (eOld) {}
+    }
+    this.pdfPreviewMap = result.bitmap;
+    this.pdfPreviewX = x;
+    this.pdfPreviewY = y;
+    this.pdfPreviewW = w;
+    this.pdfPreviewH = h;
+    if (this.pdfPreviewTimer >= 0) clearTimeout(this.pdfPreviewTimer);
+    this.pdfPreviewTimer = setTimeout(() => {
+      this.clearPdfPreview(true);
+    }, 12000);
+    reply(true, result.ms, '');
   }
 
   private handlePdfPreview(req: NativeVideoRequest): void {
@@ -1775,6 +1851,17 @@ struct Index {
       .opacity(this.opacity_)
       .width('100%')
       .height('100%')
+
+      if (this.pdfPreviewMap !== null) {
+        Image(this.pdfPreviewMap)
+          .width(this.pdfPreviewW)
+          .height(this.pdfPreviewH)
+          .position({ x: this.pdfPreviewX, y: this.pdfPreviewY })
+          .objectFit(ImageFit.Fill)
+          .interpolation(ImageInterpolation.Medium)
+          .hitTestBehavior(HitTestMode.None)
+          .zIndex(9)
+      }
 
       if (this.nativeRequest !== null) {
         Stack({ alignContent: Alignment.TopStart }) {

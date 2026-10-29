@@ -3931,7 +3931,7 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 | 产物 | 用途 | 大小/时间 | SHA-256 |
 |---|---|---|---|
 | `electron-default-agent.hap` | 仅真机调试（含探针） | 120,976,288 B / 2026-10-29 23:48:43 | 见构建日志 |
-| `electron-default-signed.hap` | release（无 Agent/探针） | 121,010,094 B / 2026-10-30 00:42:41 | `B2197D419E9C0C4D778AAA025B8DAFC3FF68FD056108B5D653017730F6B3C9C2` |
+| `electron-default-signed.hap` | release（无 Agent/探针） | 121,036,026 B / 2026-10-30 00:53:46 | `0C4936344E06052900DC3D2B4783514C0554AA28213CC7D9F482123ACC180F3F` |
 
 ### 四、验证
 
@@ -3987,3 +3987,11 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
   Web 主线程）或 worker 内 JPEG 解码路径替换。
 
 以上原生预览代码目前只在 `--agent` 构建中启用，release 不请求。
+
+补充（2026-10-30 00:53）：原生 ArkUI `Image(PixelMap)` 覆盖方案也试过。PDF Kit
+确实在 **231–278 ms** 返回了 PixelMap，但把 `Image` 放进根 `Stack`（`zIndex 9`）
+后画面上仍看不到——WebEngine 的 XComponent 是独立 surface，普通 ArkUI `Image`
+不会合成到它上面；只有 `NativeVideoOverlay` 这类 **SURFACE XComponent** 才能
+盖住。下一步若要继续，应做一个最小的 SURFACE XComponent 预览层（把 PixelMap
+画进 native window），而不是继续用 `Image`。该实验目前只在 `--agent` 构建里
+请求，release 不触发。
