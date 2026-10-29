@@ -1,4 +1,9 @@
-# OHSidian 真机探针 / 自动修复 Agent
+# OHSidian 真机探针 / 自动修复 Agent（内部 / 仅操作者）
+
+> **仅开发操作者使用，不随 release 发布**：`tools/device-agent` 已标记为
+> `.gitattributes export-ignore`，release HAP 也不包含它。release app.js 不注入
+> `scripts/patches/ohsidian-probe.js`，并会在 repatch 时移除所有 `probeHook(...)` 调用。
+> 使用者只需要连接设备；Agent 的运行由维护者（我）执行。
 
 这个目录是“连上真机 → 模拟点击 → 读日志 → 看延迟/加载时间 → 定位并修复”的工具链。
 它不替代 DevEco 调试器；它把重复的真机操作固化成可重放的场景，并把渲染层/ArkTS 的

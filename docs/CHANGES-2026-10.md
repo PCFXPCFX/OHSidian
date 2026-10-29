@@ -3819,3 +3819,46 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 - 第 3 页写、翻第 5 页、离开：两页都写回。
 - `POLYLINE` 与 `INK` 两种样式在 Obsidian/系统 PDF 阅读器里的显示差异；必要时改用 Stamp PNG。
 - 真机 Agent 首次运行需校准 `uitest` 坐标（physical vs CSS）。
+
+## 第 194 轮 (2026-10-29): Agent 仅由操作者使用，release 移除全部探针
+
+**要求**：真机 Agent 由维护者（我）操控；release 版本不能包含 Agent/探针。
+
+### 一、拆分 dev probe 与 release
+
+- 新增 `scripts/patches/ohsidian-probe.js`：只包含
+  `window.__ohsidianProbeHooks.emit`、白页采样、fake-worker 计数/`console.warn` 包装。
+- `ohsidian-ink.js` 只保留一个 `probeHook(event, data)` 转发点；release 不注入 probe patch。
+- `update-obsidian.mjs` 新增 `--agent`；默认 release 走 `stripDevProbeCalls()`：
+  - 删除 `OHSIDIAN_DEV_PROBE_START/END` 块（`probeHook` 实现）；
+  - 删除所有 `probeHook(...)` 调用（引号/括号感知扫描）；
+  - 删除 `probeCount`、空 `if (__ohsidianProbeHooks)` 块。
+- Agent build 顺序：`--repatch --agent` → 构建 HAP → 复制为
+  `electron-default-agent.hap`；release 再 `--repatch`（无 --agent）→ 构建正式 HAP。
+- `scripts/verify-release.cjs` 断言 asar `app.js` 不含
+  `__ohsidianProbeHooks / probeHook / InkProbe / canvasWhiteSample / fakeWorker / probeCount`。
+
+### 二、Agent 只给操作者
+
+- `README.md` 删除公开的 Agent 链接；`tools/device-agent/README.md` 标记 **内部/仅操作者**。
+- `.gitattributes` 增加 `tools/device-agent export-ignore`，release 源码归档不带该目录；
+  release HAP 本来就不打包 `tools/`。
+- Agent 默认安装 **agent HAP**（有探针），不碰 release HAP；
+  `fixers.rebuildAndInstall()` 固定使用 `--repatch --agent` 并刷新 agent HAP；
+  `doctor` 同时显示 agent/release 两个 HAP。
+
+### 三、产物
+
+| 产物 | 用途 | 大小/时间 | SHA-256 |
+|---|---|---|---|
+| `electron-default-agent.hap` | 仅真机调试（含探针） | 120,960,689 B / 2026-10-29 18:47:56 | `C88E6582636A69C13D02FD27F00EA590CE3D3363CD322EF6C50CB54DC9B64594` |
+| `electron-default-signed.hap` | release（无 Agent/探针） | 120,956,596 B / 2026-10-29 18:48:57 | `4FD6DC1E6A489635DCC221B142848CCB95FA21015F596EB366B356D78DC5C6C9` |
+
+### 四、验证
+
+- release asar `app.js` 六个禁用串计数均为 **0**；`verify-release.cjs` →
+  `RELEASE VERIFY: OK - no device-agent probe in app.js`。
+- agent asar 保留 `probeHook`/`__ohsidianProbeHooks`，供 `--agent` 会话使用。
+- `verify-asar` 全绿；ArkTS 侧未改（沿用 v38 编译）。
+- 注意：release HAP 与 agent HAP 使用同一版本号/同一功能代码，仅探针注入不同；
+  不要把 `electron-default-agent.hap` 当 release 分发。

@@ -1,7 +1,7 @@
 # 手写笔（华为 M-Pencil）适配
 
 > 状态：实验功能，当前 **v38**。默认关闭，需在“设置 → 手写笔 → 手写笔模式”开启。
-> 实现与变更记录见 `docs/CHANGES-2026-10.md` 第 189–193 轮；更细的真机记录已归档到该文件的旧轮次。
+> 实现与变更记录见 `docs/CHANGES-2026-10.md` 第 189–194 轮；更细的真机记录已归档到该文件的旧轮次。
 
 ## 1. 目标与边界
 
@@ -253,7 +253,7 @@ PdfInk write/restore
 | `scripts/patches/touch-mode.js` | 设置页/独立“手写笔”tab、IPC 端口 |
 | `scripts/update-obsidian.mjs` | 内核补丁：`capCanvasAreaFactor:0`（PDF 页 canvas 一屏上限） |
 | `scripts/verify-asar.cjs` | 校验 P0/P1/MIME 标记与 asar 语法 |
-| `tools/device-agent/` | 真机模拟点击、日志探针、报告与保守自动修复 |
+| `tools/device-agent/` | **内部/仅操作者**：真机模拟点击、日志探针、报告与保守自动修复；不随 release 发布 |
 | `electron/src/main/module.json5` | VIBRATE 权限 |
 
 ## 12. 验收清单

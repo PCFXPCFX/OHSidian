@@ -7,6 +7,7 @@ const ROOT = path.resolve(new URL('../../../', import.meta.url).pathname.replace
 const INK = path.join(ROOT, 'scripts/patches/ohsidian-ink.js');
 const UPDATE = path.join(ROOT, 'scripts/update-obsidian.mjs');
 const HAP = path.join(ROOT, 'electron/build/default/outputs/default/electron-default-signed.hap');
+const HAP_AGENT = path.join(ROOT, 'electron/build/default/outputs/default/electron-default-agent.hap');
 
 export const FIXERS = {
   'pdf-cap-50': {
@@ -86,9 +87,12 @@ export function applyFix(id) {
 }
 
 export function rebuildAndInstall() {
-  run('node', ['scripts/update-obsidian.mjs', '--repatch']);
+  // Always build the AGENT asar for device sessions; release builds never
+  // contain probe implementations.
+  run('node', ['scripts/update-obsidian.mjs', '--repatch', '--agent']);
   run('hvigorw', ['assembleHap', '--mode', 'module', '-p', 'product=default',
     '-p', 'buildMode=debug', '--no-daemon']);
   if (!fs.existsSync(HAP)) throw new Error('HAP not found after build: ' + HAP);
-  return { hap: HAP, hdc: new Hdc({ verbose: false }) };
+  fs.copyFileSync(HAP, HAP_AGENT);
+  return { hap: HAP_AGENT, hdc: new Hdc({ verbose: false }) };
 }

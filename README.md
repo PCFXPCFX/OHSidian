@@ -65,7 +65,6 @@ hvigorw assembleHap
 - [技术架构与目录结构][architecture]
 - [功能细节与 Fork 改动][features]
 - [手写笔（华为 M-Pencil）适配方案][stylus]
-- [真机探针 / 自动修复 Agent][device-agent]
 - [发布与校验值][release]
 - [开发环境搭建][dev-env]
 
@@ -88,7 +87,6 @@ hvigorw assembleHap
 [architecture]: docs/ARCHITECTURE.md
 [features]: docs/FEATURES.md
 [stylus]: docs/STYLUS-PEN.md
-[device-agent]: tools/device-agent/README.md
 [release]: docs/RELEASE.md
 [dev-env]: docs/DEV-ENV-SETUP.md
 [license-file]: LICENSE

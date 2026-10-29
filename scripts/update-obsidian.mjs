@@ -11,6 +11,10 @@
  *   node scripts/update-obsidian.mjs 1.13.7     # update to a specific version
  *   node scripts/update-obsidian.mjs 1.13.7 --repatch   # force a rebuild
  *   node scripts/update-obsidian.mjs --repatch          # rebuild the pinned kernel
+ *   node scripts/update-obsidian.mjs --repatch --agent  # INTERNAL: device-agent probes
+ *
+ * Without --agent the release build strips the probe block and every
+ * probeHook(...) call; the release app.js has no agent hooks at all.
  *
  * A pinned kernel version (web_engine/.../app/package.json) is resolved via
  * scripts/obsidian-artifacts.json; the downloaded asar must report exactly
@@ -174,6 +178,75 @@ const TOUCH_MODE_PATCH = readPatch('touch-mode.js');
 const INK_PATCH = readPatch('ohsidian-ink.js');
 
 /**
+ * Release builds must not contain the device-agent probe implementation.
+ * Remove the marked probe-only block plus every `probeHook(...)` statement.
+ * The scanner is quote/brace aware, so strings and nested object literals in
+ * the probe payload do not confuse it.
+ */
+function stripDevProbeCalls(src) {
+  let s = String(src || '');
+  s = s.replace(/\/\* OHSIDIAN_DEV_PROBE_START \*\/[\s\S]*?\/\* OHSIDIAN_DEV_PROBE_END \*\//g, '');
+  s = s.replace(/^[ \t]*if \(!window\.__ohsidianProbeHooks\) return;\r?\n/gm, '');
+  s = s.replace(/\n[ \t]*if \(window\.__ohsidianProbeHooks\) \{\s*self\.rendered\+\+;\s*\}/g, '');
+  s = s.replace(/^[ \t]*probeCount: 0,\r?\n/gm, '');
+  let out = '';
+  let i = 0;
+  while (true) {
+    const start = s.indexOf('probeHook(', i);
+    if (start < 0) {
+      out += s.slice(i);
+      break;
+    }
+    let j = start + 'probeHook('.length;
+    let depth = 1;
+    let quote = '';
+    let esc = false;
+    for (; j < s.length; j++) {
+      const c = s[j];
+      if (quote) {
+        if (esc) { esc = false; continue; }
+        if (c === '\\') { esc = true; continue; }
+        if (c === quote) { quote = ''; }
+        continue;
+      }
+      if (c === '"' || c === "'" || c === '`') { quote = c; continue; }
+      if (c === '(') depth++;
+      else if (c === ')') {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    if (j >= s.length) {
+      out += s.slice(i);
+      break;
+    }
+    let end = j + 1;
+    while (end < s.length && (s[end] === ' ' || s[end] === '\t')) end++;
+    if (s[end] === ';') end++;
+    // Remove indentation before the statement so the release source stays tidy.
+    let lineStart = out.lastIndexOf('\n');
+    if (lineStart >= 0 && /^[ \t]*$/.test(out.slice(lineStart + 1))) {
+      out = out.slice(0, lineStart + 1);
+    }
+    out += s.slice(i, start);
+    i = end;
+  }
+  // After probeHook(...) calls are gone the surrounding if-block is empty.
+  out = out.replace(/\n[ \t]*if \(window\.__ohsidianProbeHooks\) \{\s*self\.rendered\+\+;\s*\}/g, '');
+  return out;
+}
+// DEVICE AGENT PROBE: injected only with --agent. Release builds have no
+// __ohsidianProbeHooks implementation, so probeHook() calls are no-ops.
+// Read lazily: the file is export-ignored from release source archives.
+function readProbePatch() {
+  const p = path.join(PATCH_DIR, 'ohsidian-probe.js');
+  if (!fs.existsSync(p)) {
+    throw new Error('agent build requested but scripts/patches/ohsidian-probe.js is missing');
+  }
+  return fs.readFileSync(p, 'utf8');
+}
+
+/**
  * IPC guard patch for the asar's main process (main.js):
  * wraps ipcMain.on/handle/... so handlers that touch an already-destroyed
  * BrowserWindow/WebContents (benign shutdown race, e.g. closing a window while
@@ -184,7 +257,8 @@ const MAIN_PROCESS_PATCH = readPatch('main-process.js');
 
 async function main() {
   const repatch = process.argv.includes('--repatch');
-  const versionArg = process.argv.slice(2).find(a => a !== '--repatch');
+  const agentBuild = process.argv.includes('--agent');
+  const versionArg = process.argv.slice(2).find(a => a !== '--repatch' && a !== '--agent');
   const currentVersion = readReleaseInfo();
   log(`current Obsidian version: ${currentVersion}`);
 
@@ -366,7 +440,10 @@ async function main() {
     }
   }
 
-  fs.writeFileSync(appJs, INK_PATCH + TOUCH_MODE_PATCH + appSrc);
+  const releaseInkPatch = agentBuild ? INK_PATCH : stripDevProbeCalls(INK_PATCH);
+  const probePatch = agentBuild ? readProbePatch() : '';
+  fs.writeFileSync(appJs, releaseInkPatch + probePatch + TOUCH_MODE_PATCH + appSrc);
+  log(agentBuild ? 'device agent probes ENABLED (--agent build)' : 'release build: device agent probes excluded');
 
   const asarMainJs = path.join(extractedDir, 'main.js');
   if (fs.existsSync(asarMainJs)) {

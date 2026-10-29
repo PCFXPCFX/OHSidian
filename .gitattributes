@@ -3,3 +3,6 @@
 *.dat filter=lfs diff=lfs merge=lfs -text
 *.pak filter=lfs diff=lfs merge=lfs -text
 *.asar filter=lfs diff=lfs merge=lfs -text
+# Operator-only device harness/probe: never ship in a release source archive.
+tools/device-agent export-ignore
+scripts/patches/ohsidian-probe.js export-ignore

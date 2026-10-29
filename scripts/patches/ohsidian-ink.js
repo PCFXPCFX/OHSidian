@@ -19,28 +19,6 @@ var OHSIDIAN_INK_REV = "38";
 (function () {
   "use strict";
 
-  // pdf.js falls back to a fake worker on the UI thread when module-worker
-  // loading fails. It only logs one warning, so keep a counter for the device
-  // probe (app:// MIME etc.).
-  (function () {
-    try {
-      var origWarn = console.warn;
-      console.warn = function () {
-        try {
-          var msg = Array.prototype.join.call(arguments, " ");
-          if (msg && msg.toLowerCase().indexOf("fake worker") >= 0) {
-            window.__ohsidianFakeWorker = (window.__ohsidianFakeWorker || 0) + 1;
-            try {
-              console.info("InkProbe fakeWorker " + window.__ohsidianFakeWorker + " " +
-                String(msg).slice(0, 160));
-            } catch (e0) {}
-          }
-        } catch (e1) {}
-        try { return origWarn.apply(console, arguments); } catch (e2) {}
-      };
-    } catch (eW) {}
-  })();
-
   var ROOT = ".obsidian/ohsidian-ink";
   var DOCS = ROOT + "/docs";
   var BACKUPS = ROOT + "/backups";
@@ -265,54 +243,19 @@ var OHSIDIAN_INK_REV = "38";
     return (window.performance && performance.now) ? performance.now() : Date.now();
   }
 
+  /* OHSIDIAN_DEV_PROBE_START */
   /**
-   * Structured device probe. The line reaches hilog as
-   * `InkUI probe:<event> {json}` through the existing inkLog IPC action, so the
-   * host agent can measure PDF loading/white pages/write latency without
-   * attaching a debugger. Kept separate from inkTrace (which is capped at 400).
+   * Optional dev-agent hook. Release builds do not inject
+   * scripts/patches/ohsidian-probe.js, so this is a no-op and no probe data is
+   * produced. Agent builds install window.__ohsidianProbeHooks.emit.
    */
-  function probe(event, data) {
+  function probeHook(event, data) {
     try {
-      if (state.probeCount > 6000) return;
-      state.probeCount++;
-      if (typeof window.__ohsidianNativeSend !== "function") return;
-      window.__ohsidianNativeSend({
-        action: "inkLog",
-        event: "probe:" + String(event || ""),
-        detail: data ? JSON.stringify(data) : "",
-        ts: Date.now()
-      });
+      var h = window.__ohsidianProbeHooks;
+      if (h && typeof h.emit === "function") h.emit(event, data || {});
     } catch (e) {}
   }
-
-  function canvasWhiteSample(cv) {
-    try {
-      if (!cv || !(cv.width > 0) || !(cv.height > 0)) return null;
-      var tmp = canvasWhiteSample._cv;
-      if (!tmp) {
-        tmp = document.createElement("canvas");
-        tmp.width = 32;
-        tmp.height = 32;
-        canvasWhiteSample._cv = tmp;
-      }
-      var ctx = tmp.getContext("2d", { willReadFrequently: true });
-      if (!ctx) return null;
-      ctx.clearRect(0, 0, 32, 32);
-      ctx.drawImage(cv, 0, 0, 32, 32);
-      var d = ctx.getImageData(0, 0, 32, 32).data;
-      var dark = 0;
-      var opaque = 0;
-      for (var i = 0; i < d.length; i += 4) {
-        if (d[i + 3] > 16) {
-          opaque++;
-          if (d[i] < 235 || d[i + 1] < 235 || d[i + 2] < 235) dark++;
-        }
-      }
-      return { white: opaque === 0 || dark < 3, dark: dark, opaque: opaque };
-    } catch (e) {
-      return null;
-    }
-  }
+  /* OHSIDIAN_DEV_PROBE_END */
 
   function uid() {
     return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
@@ -1996,11 +1939,12 @@ var OHSIDIAN_INK_REV = "38";
         this.hooks = true;
         var self = this;
         var onDocLoaded = function (e) {
+          if (!window.__ohsidianProbeHooks) return;
           try {
             var ms = Math.round(nowMs() - self.openedAt);
             if (self.docLoadedAt) {
               self.reloads++;
-              probe("pdfReload", {
+              probeHook("pdfReload", {
                 reloads: self.reloads,
                 ms: ms,
                 pages: e && e.pagesCount,
@@ -2009,7 +1953,7 @@ var OHSIDIAN_INK_REV = "38";
               });
             } else {
               self.docLoadedAt = nowMs();
-              probe("pdfDocLoaded", {
+              probeHook("pdfDocLoaded", {
                 pages: e && e.pagesCount,
                 ms: ms,
                 fakeWorker: window.__ohsidianFakeWorker || 0
@@ -2018,14 +1962,16 @@ var OHSIDIAN_INK_REV = "38";
           } catch (eD) {}
         };
         var onPagesInit = function (e) {
+          if (!window.__ohsidianProbeHooks) return;
           try {
-            probe("pdfPagesInit", {
+            probeHook("pdfPagesInit", {
               pages: e && e.pagesCount,
               ms: Math.round(nowMs() - self.openedAt)
             });
           } catch (eP) {}
         };
         var onPageStart = function (e) {
+          if (!window.__ohsidianProbeHooks) return;
           try {
             var pn = e && e.pageNumber;
             var vp = e && e.source && e.source.viewport;
@@ -2046,20 +1992,19 @@ var OHSIDIAN_INK_REV = "38";
             var st = pn ? self.pageStarts[pn] : null;
             var vp = e && e.source && e.source.viewport;
             var cv = e && e.source && e.source.canvas;
-            var white = canvasWhiteSample(cv);
-            self.rendered++;
-            probe("pdfPage", {
-              page: pn,
-              ms: st ? Math.round(nowMs() - st.t) : -1,
-              w: vp ? Math.round(vp.width) : (cv ? cv.width : 0),
-              h: vp ? Math.round(vp.height) : (cv ? cv.height : 0),
-              scale: vp ? Number(vp.scale.toFixed(3)) : 0,
-              white: white ? white.white : null,
-              dark: white ? white.dark : -1,
-              rendered: self.rendered,
-              afterWrite: state.lastPdfWriteAt ? Date.now() - state.lastPdfWriteAt : -1,
-              fakeWorker: window.__ohsidianFakeWorker || 0
-            });
+            if (window.__ohsidianProbeHooks) {
+              self.rendered++;
+              probeHook("pdfPage", {
+                page: pn,
+                ms: st ? Math.round(nowMs() - st.t) : -1,
+                w: vp ? Math.round(vp.width) : (cv ? cv.width : 0),
+                h: vp ? Math.round(vp.height) : (cv ? cv.height : 0),
+                scale: vp ? Number(vp.scale.toFixed(3)) : 0,
+                rendered: self.rendered,
+                afterWrite: state.lastPdfWriteAt ? Date.now() - state.lastPdfWriteAt : -1,
+                canvas: cv
+              });
+            }
             if (!pageEl) return;
             var entry = self.ensurePage(pageEl);
             if (!entry) return;
@@ -2070,8 +2015,9 @@ var OHSIDIAN_INK_REV = "38";
           } catch (e2) {}
         };
         var onPageChanging = function (e) {
+          if (!window.__ohsidianProbeHooks) return;
           try {
-            probe("pdfPageChange", {
+            probeHook("pdfPageChange", {
               from: e && e.previous,
               to: e && e.pageNumber,
               ms: Math.round(nowMs() - self.openedAt)
@@ -2083,7 +2029,7 @@ var OHSIDIAN_INK_REV = "38";
           self.scaleTimer = setTimeout(function () {
             self.scaleTimer = 0;
             try {
-              probe("pdfScale", {
+              probeHook("pdfScale", {
                 scale: self.viewer && self.viewer.currentScaleValue,
                 ms: Math.round(nowMs() - self.openedAt)
               });
@@ -2148,7 +2094,7 @@ var OHSIDIAN_INK_REV = "38";
     surface.doc = docFor(surface);
     surface.attach();
     surface.refreshPages();
-    probe("pdfSurface", {
+    probeHook("pdfSurface", {
       target: (leaf.view.file && leaf.view.file.path) || "",
       pages: surface.viewer.pagesCount || 0,
       scale: surface.viewer.currentScaleValue || "",
@@ -2925,7 +2871,7 @@ var OHSIDIAN_INK_REV = "38";
           // pdf.js replaces the viewer on a document reload (our own PDF write
           // triggers one); the old event bus and page canvases are dead.
           if (leaf.view && existing.viewer !== leaf.view.pdfViewer) {
-            probe("pdfViewerReplaced", {
+            probeHook("pdfViewerReplaced", {
               afterWrite: state.lastPdfWriteAt ? Date.now() - state.lastPdfWriteAt : -1,
               page: existing.currentSpace || ""
             });
@@ -4524,7 +4470,7 @@ var OHSIDIAN_INK_REV = "38";
         color: ss.color
       });
     }
-    probe("pdfPayload", {
+    probeHook("pdfPayload", {
       page: page,
       mode: isDom ? "normalized" : "vector",
       style: state.pdfStyle,
@@ -4533,7 +4479,7 @@ var OHSIDIAN_INK_REV = "38";
       sample: sample
     });
     var writeT0 = nowMs();
-    probe("pdfWriteStart", {
+    probeHook("pdfWriteStart", {
       page: page,
       strokes: list.length,
       pts: totalPts,
@@ -4547,7 +4493,7 @@ var OHSIDIAN_INK_REV = "38";
     try {
       var res = await pdfWritePage(file.path, abs, vaultRoot, page,
         payload, isDom ? "normalized" : "vector", true, removeIds, state.pdfStyle);
-      probe("pdfWriteEnd", {
+      probeHook("pdfWriteEnd", {
         page: page,
         ms: Math.round(nowMs() - writeT0),
         ok: !!(res && res.ok),
@@ -5741,8 +5687,7 @@ var OHSIDIAN_INK_REV = "38";
       "  " + "PDF写回".padEnd(9) + "时机=" + state.pdfWriteWhen +
         " · 样式=" + state.pdfStyle + " · 次数=" + state.pdfWriteCount +
         " · 上次=" + (state.lastPdfWriteAt
-          ? Math.round((Date.now() - state.lastPdfWriteAt) / 1000) + "s前" : "-") +
-        " · fake worker=" + (window.__ohsidianFakeWorker || 0),
+          ? Math.round((Date.now() - state.lastPdfWriteAt) / 1000) + "s前" : "-"),
       "  " + "IPC".padEnd(11) + (state.ipcReady ? "已连接" : "未连接") +
         " · 收 " + state.ipcRecv + " / 发 " + state.ipcSent +
         " · 最近笔事件 " + age
@@ -6499,7 +6444,7 @@ var OHSIDIAN_INK_REV = "38";
       warn("workspace hooks failed", e && e.message);
     }
     log("installed rev " + OHSIDIAN_INK_REV);
-    probe("boot", {
+    probeHook("boot", {
       rev: OHSIDIAN_INK_REV,
       dpr: window.devicePixelRatio || 1,
       inner: [window.innerWidth || 0, window.innerHeight || 0],

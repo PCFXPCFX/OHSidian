@@ -24,7 +24,9 @@ import { listFixers, applyFix, rebuildAndInstall } from './lib/fixers.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '../..');
-const DEFAULT_HAP = path.join(ROOT, 'electron/build/default/outputs/default/electron-default-signed.hap');
+const RELEASE_HAP = path.join(ROOT, 'electron/build/default/outputs/default/electron-default-signed.hap');
+const AGENT_HAP = path.join(ROOT, 'electron/build/default/outputs/default/electron-default-agent.hap');
+const DEFAULT_HAP = fs.existsSync(AGENT_HAP) ? AGENT_HAP : RELEASE_HAP;
 
 function parseArgs(argv) {
   const out = { _: [] };
@@ -157,7 +159,9 @@ function cmdDoctor(opts) {
   console.log('hdc:', hdc.bin);
   console.log(t.out.trim());
   console.log('bundle:', prof.bundle, 'ability:', prof.ability);
-  console.log('hap:', opts.hap || DEFAULT_HAP,
+  console.log('agent hap:', AGENT_HAP, fs.existsSync(AGENT_HAP) ? 'OK' : 'MISSING');
+  console.log('release hap:', RELEASE_HAP, fs.existsSync(RELEASE_HAP) ? 'OK' : 'MISSING');
+  console.log('install target:', opts.hap || DEFAULT_HAP,
     fs.existsSync(opts.hap || DEFAULT_HAP) ? 'OK' : 'MISSING');
   console.log('profile:', prof.name, prof.screen, 'dpr', prof.dpr);
 }
