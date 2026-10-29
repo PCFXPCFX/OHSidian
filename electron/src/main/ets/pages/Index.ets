@@ -241,6 +241,7 @@ struct Index {
   private nativeAuthorized: boolean = false;
   private nativeIpcPrimed: boolean = false;
   private nativeThumbBusy: boolean = false;
+  private nativeIpcWarned: boolean = false;
   private disposed: boolean = false;
   // BUG-005: the renderer owns the overlay's lifetime (it sends 'close' on IME,
   // modal, off-screen), but it cannot send ANYTHING once its page reloads,
@@ -302,6 +303,21 @@ struct Index {
     this.nativeWatchdog = setInterval(() => this.sweepNativeOverlay(), 1000);
     this.attachNativeWindow();
     this.startNativeIpc();
+    // @LocalStorageLink('xcomponentId') can still be empty when aboutToAppear
+    // runs on a cold start (the Web child assigns it a moment later). The old
+    // code returned early and never retried, which left the renderer without a
+    // port file: no handwriting IPC, no ink logs, no write-back.
+    if (this.nativeServer === null) {
+      let ipcTries: number = 0;
+      const ipcTimer: number = setInterval(() => {
+        ipcTries++;
+        if (this.nativeServer !== null || this.disposed || ipcTries > 40) {
+          clearInterval(ipcTimer);
+          return;
+        }
+        this.startNativeIpc();
+      }, 500);
+    }
     // Pen Kit's stylusInteraction service is process-wide; every page registers
     // a sender so the gesture lands in the window that has focus.
     try {
@@ -590,7 +606,14 @@ struct Index {
   }
 
   private startNativeIpc(): void {
-    if (this.nativeServer !== null || !this.xcomponentId) {
+    if (this.nativeServer !== null) {
+      return;
+    }
+    if (!this.xcomponentId) {
+      if (!this.nativeIpcWarned) {
+        this.nativeIpcWarned = true;
+        console.warn('NativeVideoIpc', 'waiting for xcomponentId');
+      }
       return;
     }
     try {

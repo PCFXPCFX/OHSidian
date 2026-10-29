@@ -1,6 +1,6 @@
 # 手写笔（华为 M-Pencil）适配
 
-> 状态：实验功能，当前 **v38**。默认关闭，需在“设置 → 手写笔 → 手写笔模式”开启。
+> 状态：实验功能，当前 **v39**。默认关闭，需在“设置 → 手写笔 → 手写笔模式”开启。
 > 实现与变更记录见 `docs/CHANGES-2026-10.md` 第 189–194 轮；更细的真机记录已归档到该文件的旧轮次。
 
 ## 1. 目标与边界
@@ -106,8 +106,11 @@ Stroke：
 
 ### 5.2 PDF
 
-- **真实 viewer**：`view.pdfViewer.pdfViewer`（pdf.js 内层），页码用 `pageView.viewport` 转换 PDF points；页 canvas 在 `.page` 内。
-- **DOM 回退**：`view.pdfViewer` 不可用时，用 `.page` 建立 `pdfdom` surface；页 canvas 挂在**滚动内容**（page 父节点）上，随合成器原生滚动，不用 scroll 事件追位置。
+- **真实 viewer**：Obsidian 1.13.7 的链是 `view.viewer(T1) → .child(x1) → .pdfViewer(g) → .pdfViewer(pdf.js)`；`pdfViewerChain` 逐层跟随（`.pdfViewer/.viewer/.child`），`pdfJsViewerOf` 取第一个带 `getPageView` 的对象。页码用 `pageView.viewport` 转换 PDF points；页 canvas 在 `.page` 内。
+- **真实 PDF 不再有 pdfdom 回退**：首次取 viewer 失败时 350ms 重试；pdfdom 只用于笔记内嵌 PDF。旧回退把 79 页都映射到第 1 页 rect，是“字迹变艺术画”的根因。
+- **打开时先恢复页码**：`pagesinit` 读 `pdfjs.history`（按 document fingerprint）在首帧渲染前跳到上次页；并对距当前页 >2 页的 `pagerender` 调 `cancelRendering`，避免重的封面页阻塞渲染队列约 10s。
+- **live/base 双 canvas**：`ohsidian-ink-pdf-live` 只画当前笔画，`ohsidian-ink-pdf` 只画已提交笔画；抬笔后清 live 不会清掉已提交墨迹。
+- **viewport 几何复用**：pdf.js 每次 render 都给新 viewport 对象；按 width/height/scale 比较复用 entry，避免重建 canvas 留下 ghost 笔迹。
 - 缩放用 `offsetWidth/offsetHeight`（布局尺寸），避免 transform 二次缩放。
 - 翻页时用屏幕中心 `elementFromPoint` 定位可见 `.page`，按需创建并激活。
 - **只在手写笔模式开启时挂载**；关闭后 PDF 上不保留任何叠层 canvas。
@@ -173,6 +176,10 @@ Stroke：
 6. 校验 `%PDF-`；
 7. 首次写入前创建原始备份；
 8. 复制到 PDF **同目录** `.hso-new-*.pdf`，同文件系统 swap；平台拒绝覆盖时先 `src → .hso-old-*`，再换入，失败恢复旧文件。
+
+真机实测（22.5 MB / 79 页，平板）：单页 6 笔（1866 点）**184 ms**；离开时两页批量
+233 ms + 127 ms，均 `ok=true`；写后注释计数与笔画数一致（6 笔 → 6 个 `/PolyLine`），
+无重复叠加。
 
 ### 7.3 备份与恢复
 

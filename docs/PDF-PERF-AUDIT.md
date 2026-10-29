@@ -486,3 +486,24 @@ bytes            = canvasPx * 4
 bufferBytes      = min(10, ...) * bytes
 rasterRatio(dpr) = (2.249 / dpr)^2     // 2.249 → 5.06× vs 1.0；1.38× vs 1.9125
 ```
+
+---
+
+## 7. 真机复测（2026-10-29，v39）
+
+本轮在真机（2800×1840，dpr 2.25，HarmonyOS）上把 PDF 链路跑通，结论修正了此前
+“主要瓶颈是 canvas 像素”的假设：
+
+| 现象 | 真机证据 | 根因 | 状态 |
+|---|---|---|---|
+| 打开 10+ 秒白页 | `pdfPage page:1 ms:10843`，当前页 6 被串行队列阻塞 | 该 PDF 第 1 页封面含大图，单页渲染约 10.8s；打开时 pdf.js 先排第 1 页 | 恢复页码时在 `pagesinit` 先跳页 + 对远景页 `cancelRendering`；恢复场景首屏 468ms |
+| 写回后白页/重载 | `pdfReload afterWrite:393ms`，重载后当前页 86ms 重绘 | 回退 `pdfdom` 时 79 页共用第 1 页 rect；写回坐标错 | 移除真实 PDF 的 pdfdom 回退；按 fingerprint 先跳页 |
+| 墨迹提交后消失 | 抬笔后 canvas 被 `clearLiveAfterPaint` 清空 | live 与 committed 共用一张 canvas | 拆 `ohsidian-ink-pdf-live` |
+| 平行重影笔迹 | 同一页 2–3 条偏移线 | pdf.js 每次 render 换 viewport 对象，entry/canvas 被重建，旧 canvas 未删 | 按 width/height/scale 复用 entry |
+| 写回耗时 | 6 笔 1866 点：184ms；两页批量：233+127ms | PDF Kit parse/save/swap 本身很快 | 无需再调超时/批量 |
+| 注释叠加 | `total:6, PolyLine:6` | replace + marker 清理生效 | 通过 |
+| fake worker | `fakeWorker=0` | `app://` MIME 修复生效 | 通过 |
+
+剩余内容型瓶颈：**首次打开就停在第 1 页**时，封面单页仍需约 10.8s。该耗时与画布
+尺寸无关（0.643 与 0.8 缩放均约 10.7s），更像大图解码/绘制；后续若要继续优化，
+方向是 worker 侧图片尺寸上限或封面低清预渲染，而不是继续降 canvas 像素。

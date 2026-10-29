@@ -1,4 +1,4 @@
-# OHSidian 变更记录（2026-10）
+﻿# OHSidian 变更记录（2026-10）
 
 承接 `docs/CHANGES-2026-09.md`：格式、真机取证习惯（hilog / 模式文件 / 探针）、
 六维审计标准（必要性/正确性/安全性/代码质量/架构/耗电性）与 9 月一致。
@@ -2371,8 +2371,10 @@ HEVC Main10                      1920×1080
 
 **代码推算的机制**
 1. 盒子变化 → 立刻挂遮罩，并启动 **2500ms** 兜底定时器；
-2. scheduleSurfaceResize 等 **320ms** 防抖后调 etryResize；
-3. etryResize 里有一条**纯时间去重**：Date.now() - lastRetryAt < 500 就 return。进/出全屏通常相隔不到 500ms ⇒ **这次重建被吞掉**；
+2. scheduleSurfaceResize 等 **320ms** 防抖后调 
+etryResize；
+3. 
+etryResize 里有一条**纯时间去重**：Date.now() - lastRetryAt < 500 就 return。进/出全屏通常相隔不到 500ms ⇒ **这次重建被吞掉**；
 4. 没有重建 ⇒ 没有 playing/paused 状态变化 ⇒ 遮罩**只能等 2500ms 兜底**才消失。
 
 **三处修复**
@@ -2401,7 +2403,8 @@ ativeHidden=false\、清兜底定时器、恢复系统栏、\
 otifyNativeClosed()\（渲染层据此恢复 HTML \<video>\ 与海报），并打日志 \closed for mode switch (touch<->window)\；
 - \
 ativePc\ **先更新再关闭**，保证下一次 \open/rect\ 不会重复触发关闭；
-- 关闭后仍保留 \hideNativeForResize\/\evealNative\，用于**纯窗口拖拽**（未变模式的场景）。
+- 关闭后仍保留 \hideNativeForResize\/\
+evealNative\，用于**纯窗口拖拽**（未变模式的场景）。
 
 **验收条目改写**：\docs/B-NATIVE-OVERLAY.md\ #28 由"切换后刷新矩形"改为"切换即关闭，再点重开"。
 
@@ -2411,7 +2414,8 @@ ativePc\ **先更新再关闭**，保证下一次 \open/rect\ 不会重复触发
 **用户**：从全屏回去还是要等很久的适配窗口，不好。
 
 **为什么之前必然等**
-XComponent 的尺寸是**按视频宽高比 contain 之后的框**（ideoFrameW/H），所以全屏↔内联**只是等比缩放，比例不变**。但 scheduleSurfaceResize 只判断"面积变了"，就执行 elease + 280ms + initPlayer——**每次全屏往返固定约 0.7s**，再叠上遮罩，就是"等很久的适配窗口"。
+XComponent 的尺寸是**按视频宽高比 contain 之后的框**（ideoFrameW/H），所以全屏↔内联**只是等比缩放，比例不变**。但 scheduleSurfaceResize 只判断"面积变了"，就执行 
+elease + 280ms + initPlayer——**每次全屏往返固定约 0.7s**，再叠上遮罩，就是"等很久的适配窗口"。
 
 **改法**
 | 项 | 改前 | 改后 |
@@ -2420,7 +2424,8 @@ XComponent 的尺寸是**按视频宽高比 contain 之后的框**（ideoFrameW
 | 遮罩 | 面积一变就挂 | **只在真的要重建时才挂**，并随重建结束/1.2s 兜底清除 |
 | 全屏往返 | ~700ms 遮罩 | **不重建、不遮罩**，surface 原地缩放 |
 
-**风险与兜底（如实）**：这条优化假设"ArkUI 会随组件尺寸原地缩放 surface、AVPlayer 继续往同一 buffer 画"。若某设备不满足，画面会在切换后被拉伸；届时 XComponent.onLoad（surface 被重建）仍会触发 etryResize 自愈。**若实测出现拉伸，把 spectChanged 的判据恢复为面积判据即可**（一处改动）。
+**风险与兜底（如实）**：这条优化假设"ArkUI 会随组件尺寸原地缩放 surface、AVPlayer 继续往同一 buffer 画"。若某设备不满足，画面会在切换后被拉伸；届时 XComponent.onLoad（surface 被重建）仍会触发 
+etryResize 自愈。**若实测出现拉伸，把 spectChanged 的判据恢复为面积判据即可**（一处改动）。
 
 **验证**：\BUILD SUCCESSFUL in 20 s 610 ms\；HAP **222014777 B**，SHA-256 \$sha\；字节码命中 \160\、\spectChanged\，\159\ 已不存在。
 ## 第 163 轮 (2026-10-20): 进全屏仍闪"适配窗口"——遮罩改为迟到 220ms
@@ -2428,13 +2433,19 @@ XComponent 的尺寸是**按视频宽高比 contain 之后的框**（ideoFrameW
 **用户**：从全屏到文档缩小已经好了，但放大到全屏还是有适配窗口。
 
 **为什么只有放大方向还有**
-缩小方向走面积/比例判定，比例不变 ⇒ 不重建 ⇒ 干净。而**放大到全屏会让 XComponent 的 surface 被重建**，onLoad 报告新 surfaceId ⇒ etryResize() ⇒ elease + 280ms + initPlayer；而 etryResize() 里**立刻**把 esizeCover 置真，所以面板必然闪出来。
+缩小方向走面积/比例判定，比例不变 ⇒ 不重建 ⇒ 干净。而**放大到全屏会让 XComponent 的 surface 被重建**，onLoad 报告新 surfaceId ⇒ 
+etryResize() ⇒ 
+elease + 280ms + initPlayer；而 
+etryResize() 里**立刻**把 
+esizeCover 置真，所以面板必然闪出来。
 
 **两处修复**
 | # | 改动 | 效果 |
 |---|---|---|
-| 1 | etryResize() 不再立即挂遮罩，改调 rmResizeCover()：**220ms 后才显示**，重建若在此之前完成则**完全不出现** | 快的重建不闪面板 |
-| 2 | resize 重建延迟 280ms → 160ms（etry(reason, delayMs) 带参数，错误重试仍是 280ms） | 每次往返省约 120ms |
+| 1 | 
+etryResize() 不再立即挂遮罩，改调 rmResizeCover()：**220ms 后才显示**，重建若在此之前完成则**完全不出现** | 快的重建不闪面板 |
+| 2 | resize 重建延迟 280ms → 160ms（
+etry(reason, delayMs) 带参数，错误重试仍是 280ms） | 每次往返省约 120ms |
 
 遮罩同时保留 1.2s 兜底；重建落地（playing/paused）会**取消迟到的显示**，避免"重建完了遮罩才出来"。
 
@@ -2454,15 +2465,18 @@ XComponent 的尺寸是**按视频宽高比 contain 之后的框**（ideoFrameW
 
 **改动**：删除 resize 遮罩这一整套——
 - @State resizeCover、coverTimer、coverDelayTimer、rmResizeCover() 全部移除；
-- etryResize() 与 scheduleSurfaceResize() 不再挂遮罩；
+- 
+etryResize() 与 scheduleSurfaceResize() 不再挂遮罩；
 - 遮罩条件回到**只服务换源**：\if (this.switching)\ → 文案固定 \载入中…\；
-- 圆盘的显示条件同步简化（不再判断 \esizeCover\）。
+- 圆盘的显示条件同步简化（不再判断 \
+esizeCover\）。
 
 换源遮罩保留的理由与 resize 不同：同页换视频时 surface 仍持有**上一段**的最后一帧，不盖会"闪旧片"；而 resize 只是同一个画面的尺寸变化，盖住反而制造了不存在的中断感。
 
 **代价（如实）**：resize 重建的 ~200–500ms 里，surface 显示的是上一帧或黑，而不是一块带文字的面板。按用户判断，这个观感优于面板。
 
-**验证**：\BUILD SUCCESSFUL in 21 s 871 ms\；HAP **222012381 B**，SHA-256 \$sha\；字节码命中 \164\、\载入中\，\esizeCover\ 与 \正在适配\ 均为 0。
+**验证**：\BUILD SUCCESSFUL in 21 s 871 ms\；HAP **222012381 B**，SHA-256 \$sha\；字节码命中 \164\、\载入中\，\
+esizeCover\ 与 \正在适配\ 均为 0。
 ## 第 165 轮 (2026-10-20): 窗口拖动时视频"不见了又回来"——删掉按窗口尺寸隐藏的机制
 
 **用户**：窗口模式下（视频全屏）调整窗口大小，视频会不见再重来；而且黑→白→黑，很难看。
@@ -2480,7 +2494,8 @@ XComponent 的尺寸是**按视频宽高比 contain 之后的框**（ideoFrameW
 |---|---|
 | \win.on('windowSizeChange', …hideNativeForResize)\ 监听 | 1 行 |
 | \hideNativeForResize()\ | 31 行 |
-| \evealNative()\ | 26 行 |
+| \
+evealNative()\ | 26 行 |
 | \@State nativeHidden\、\
 ativeHideAt\、\hiddenW/H/Left/Top\、\
 ativeShowTimer\ | 8 行 |
@@ -2548,11 +2563,13 @@ R152 为把探针推迟到首帧之后，做了一次全局替换 \	his.probeMed
 |---|---|
 | \
 ativeHidden / hideNativeForResize / revealNative / nativeShowTimer / Visibility.Hidden\ | **全部 0** ✅ |
-| \esizeCover / coverTimer / armResizeCover / 正在适配\ | **全部 0** ✅ |
+| \
+esizeCover / coverTimer / armResizeCover / 正在适配\ | **全部 0** ✅ |
 | \	his.theme.bg\（画面底色必须为纯黑） | **0** ✅ |
 | \closeForModeSwitch\（Index） | 3（定义 + 调用 + 注释）✅ |
 | \scheduleMediaProbe\ / \probeMedia\ | 3 / 5 ✅ |
-| \spectChanged\ / \etryResize\ / \MEDIA_VOID\ / \MEDIA_SCRIM\ / \ackgroundBlurStyle\ | 均在位 ✅ |
+| \spectChanged\ / \
+etryResize\ / \MEDIA_VOID\ / \MEDIA_SCRIM\ / \ackgroundBlurStyle\ | 均在位 ✅ |
 | **只写不读** | \
 ativePointer\（Index，3 处）、\metaOk\（Overlay，3 处）——**已删除** |
 
@@ -2592,20 +2609,30 @@ ets/modules.abc → v168 ×2（v167 已不存在）
 3. \h.vdec\ 起两次又立刻释放（720p / 1080p 10bit）⇒ 那是**缩略图取帧**，不是播放。
 
 **机理（读代码得到）**
-\ohsidianStartNativeTracking()\ 一开始就启动 rAF 循环，每帧（≈16ms）发一次 \ect\；而 \open\ 要等 ack 最多 1.2s。**在这 1.2 秒里，60fps 的 \ect\ 不断覆盖同一条请求通道**——文件通道是**一个共享 JSON**，Index 每 200ms 轮询读到的都是最新的 \ect\，\open\ 被直接跳过后又因 \seq <= lastNativeSeq\ 被判为过期。于是：Index 从未接受 open → 不写 ack → 渲染层 \
+\ohsidianStartNativeTracking()\ 一开始就启动 rAF 循环，每帧（≈16ms）发一次 \
+ect\；而 \open\ 要等 ack 最多 1.2s。**在这 1.2 秒里，60fps 的 \
+ect\ 不断覆盖同一条请求通道**——文件通道是**一个共享 JSON**，Index 每 200ms 轮询读到的都是最新的 \
+ect\，\open\ 被直接跳过后又因 \seq <= lastNativeSeq\ 被判为过期。于是：Index 从未接受 open → 不写 ack → 渲染层 \
 oack\ 关闭。
 
 **修复**
 | 层 | 改动 |
 |---|---|
-| 渲染层 | **ack 之前不发 \ect\ 心跳**（\else if(!st.opened){ /* hold */ }\），1.2s 的主题心跳同样加 \st.opened\ 条件 |
-| Index | 三处静默拒绝改为**带原因日志**：\ejected seq=… last=… action=…\、\ejected identity req=… mine=…\、\ejected open: path=… rect=…\ |
+| 渲染层 | **ack 之前不发 \
+ect\ 心跳**（\else if(!st.opened){ /* hold */ }\），1.2s 的主题心跳同样加 \st.opened\ 条件 |
+| Index | 三处静默拒绝改为**带原因日志**：\
+ejected seq=… last=… action=…\、\
+ejected identity req=… mine=…\、\
+ejected open: path=… rect=…\ |
 
 **验证**
 - \
 ode --check scripts/patches/touch-mode.js\ OK；repack → asar **25,951,167 B**；
 - 包内 asar 命中 \!st.opened\、\st.opened&&now-st.lastThemeAt\、"Hold heartbeats until ArkTS acknowledges"；
-- 包内字节码命中 \ejected seq\、\ejected identity\、\ejected open\、\169\（\168\ 已不存在）；
+- 包内字节码命中 \
+ejected seq\、\
+ejected identity\、\
+ejected open\、\169\（\168\ 已不存在）；
 - \BUILD SUCCESSFUL in 27 s\；HAP **221,997,434 B**，SHA-256 \A9B887FD364B667AE61867624F28275C22000CEC342949C11A276CF9ED934B16\。
 ## 第 170 轮 (2026-10-20): 复盘——今早的改动为什么会把"能播"变成"打不开"
 
@@ -2641,9 +2668,11 @@ git stash show -p "stash@{0}" | grep NativeVideoOverlay
 
 ### ③ 为什么表现成"打不开视频"而不是"编译失败"
 
-因为运行期还有一条**独立的**老缺陷：渲染层的 rAF 循环在 \open\ 未 ack 时就发 \ect\，把 \open\ 覆盖掉（本轮 \6995a90\ 已修）。两者叠加后：
+因为运行期还有一条**独立的**老缺陷：渲染层的 rAF 循环在 \open\ 未 ack 时就发 \
+ect\，把 \open\ 覆盖掉（本轮 \6995a90\ 已修）。两者叠加后：
 - 包状态不一致（导出被 stash、asar 又被 \268b6c6\ 重新 pin 了内核来源）；
-- \open\ 又抢不过 \ect\ ⇒ Index 从未接受 ⇒ 不写 ack ⇒ 渲染层 \
+- \open\ 又抢不过 \
+ect\ ⇒ Index 从未接受 ⇒ 不写 ack ⇒ 渲染层 \
 oack\。
 日志现象（无任何 \NativeVideoOverlay\ 行 + \close reason=noack\）与此完全吻合。
 
@@ -2667,7 +2696,8 @@ oack\。
 |---|---|
 | \13:01:13.942 NativeVideoOverlay --> transport=avplayer v169\ | 覆盖层**确实建起来了** |
 | \initialized → prepared → playing\（13.973→14.062） | **而且已经播了** |
-| \ejected seq=X last=X action=open\（反复） | 文件里是**同一条**请求，§R169 的 hold 生效，渲染层已停写 |
+| \
+ejected seq=X last=X action=open\（反复） | 文件里是**同一条**请求，§R169 的 hold 生效，渲染层已停写 |
 | \13:01:15.337 close accepted reason=noack\ | 1.2 秒后渲染层**没等到 ack**，把正在播的视频关了 |
 
 **根因：ack 文件名两侧用的字段不同**
@@ -2712,7 +2742,8 @@ ode --check\ OK；repack → asar **25,952,289 B**；
 ### 不属于 git 的（避免错误归因）
 
 以下三个是**代码缺陷**，与 git 行为无关：
-- \ect\ 心跳覆盖未 ack 的 \open\（修于 \6995a90\）
+- \
+ect\ 心跳覆盖未 ack 的 \open\（修于 \6995a90\）
 - ack 文件名两侧字段不一致（修于 \ 6f97f1\）
 - \probeMedia()\ 自我递归（修于 \ 3f62d9\）
 
@@ -3864,3 +3895,55 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 - `verify-asar` 全绿；ArkTS 侧未改（沿用 v38 编译）。
 - 注意：release HAP 与 agent HAP 使用同一版本号/同一功能代码，仅探针注入不同；
   不要把 `electron-default-agent.hap` 当 release 分发。
+
+## 第 195 轮 (2026-10-29): 真机闭环：PDF surface / IPC / 写回全链路修复（v39）
+
+**背景**：真机 agent 会话首次跑通。日志与截图暴露了三个此前无法解释的现象：
+
+1. 恢复 PDF 后手写层完全不挂载（没有 `pdfSurface` / 任何 stroke）；
+2. PDF 打开后 10+ 秒白页，滑动后才出现；
+3. 写回成功，但墨迹提交后消失，缩放/重渲染后出现平行“重影”。
+
+### 一、根因与修复
+
+| # | 根因 | 现象 | 修复 |
+|---|---|---|---|
+| 1 | Obsidian 1.13.7 的 PDF 组件链是 `view.viewer(T1) -> .child(x1) -> .pdfViewer(g) -> .pdfViewer(pdf.js)`；旧代码只走一层 `pdfViewer` | `pdfSurfaceWait hasViewer:false`，real surface 从未挂载；回退 pdfdom 后 79 页共用第 1 页 rect | `pdfViewerChain` 同时跟随 `.pdfViewer/.viewer/.child`（depth 5）；`pdfJsViewerOf` 取第一个 `getPageView` |
+| 2 | `window.app` 先于 `app.workspace` 出现；旧 `install()` 在 workspace 构造前调用 `onLayoutReady` 抛错，整块 hook/暖启动循环被跳过 | 无 toolbar、无 refresh、无 IPC | `boot()` 等 `app.workspace`；`onWorkspaceReady` 各自 try；暖启动循环先于 workspace API 启动；新增 `hooksFail` 探针 |
+| 3 | `@LocalStorageLink('xcomponentId')` 在冷启动 `aboutToAppear` 时可能仍为空；`startNativeIpc` 直接 return，永不重试 | 无 port 文件 → 渲染器无 IPC → 无日志/无写回/无压感 | ArkTS 侧 500ms × 40 重试 `startNativeIpc`；空 id 只 warn 一次 |
+| 4 | PDF 组件 `pdfViewer` 异步赋值；首次 `createPdfSurface` 失败后旧代码建 pdfdom 回退并永久占用 leaf | 写回坐标来自错误原点，笔迹成“艺术画” | 删除 pdfdom 回退；`pdfSurfaceWait` 后 350ms 重试（`pdfRetry`） |
+| 5 | 冷启动恢复到非第 1 页时，pdf.js 先排第 1 页渲染；该 PDF 封面含大图，单页 10.8s，串行队列阻塞当前页 | 打开后 10+ 秒白页；写回重载后同样 | `pagesinit` 读 `pdfjs.history` 的 fingerprint/page，**先跳页再渲染**；`pagerender` 对距当前页 >2 页的渲染 `cancelRendering` 兜底 |
+| 6 | PDF surface 只有一张 canvas：live 与 committed 共用；`clearLiveAfterPaint` 两帧后把它清空 | 笔迹提交后消失；缩放/重渲染时重影 | 新增 `ohsidian-ink-pdf-live` 独立 live canvas；`drawLive`/`clearLive` 只碰 live，`redrawPage` 只碰 base |
+| 7 | pdf.js 每次 render 都换 viewport 对象；`ensurePage` 按对象身份重建 entry/canvas；旧 canvas 因“正在写”不删除 | 同一页出现 2–3 条平行 ghost 笔迹 | 用 `width/height/scale` 几何比较复用 entry；几何变化时删除旧 canvas 再重建 |
+| 8 | release 剥离器只删 `probeHook(...)`，留下 `if (window.__ohsidianProbeHooks)` 空块 | `verify-release` 失败（探针残留） | 探针 guard 改为直接调用 `probeHook`；纯探针块用 `OHSIDIAN_DEV_PROBE_START/END` 包裹 |
+
+### 二、真机指标（HarmonyOS 平板，2800×1840，dpr 2.25）
+
+- 冷启动恢复第 41 页：`pagesInit 429ms` → `pdfPage 41 468ms`（旧路径第 1 页 10.8s 后才有首屏）。
+- 单页写回：`PdfInk page=29 strokes=6 style=polyline ms=184 ok=true`（约 0.2s，22.5MB PDF）。
+- 多页批量（离开时）：第 39 页 2 笔 233ms、第 40 页 1 笔 127ms，均 ok。
+- 注释校验：`pdfAnnoInfo { total:6, counts:{PolyLine:6} }`，无重复/无叠加。
+- 白页采样：所有 `pdfPage white:false`；写回重载后当前页 86ms 内重绘（后台期间暂停渲染不计）。
+- `fakeWorker = 0`（`app://` MIME 修复持续有效）。
+
+### 三、产物
+
+| 产物 | 用途 | 大小/时间 | SHA-256 |
+|---|---|---|---|
+| `electron-default-agent.hap` | 仅真机调试（含探针） | 120,976,288 B / 2026-10-29 23:26:54 | 见构建日志 |
+| `electron-default-signed.hap` | release（无 Agent/探针） | 120,968,096 B / 2026-10-29 23:32:04 | `098C4DAB1790E6B316149F3EE0583A51581166FE55EFBC91599DA84CF73501C6` |
+
+### 四、验证
+
+- `node --check scripts/patches/ohsidian-ink.js` OK。
+- `update-obsidian --repatch` + `verify-asar` 全绿；`verify-release` →
+  `RELEASE VERIFY: OK - no device-agent probe in app.js`。
+- Agent HAP rev39 已安装并完成上述真机测试；release HAP 由同一套源（无探针）重建。
+
+### 五、仍待办
+
+- 首次打开就是第 1 页时，该 PDF 封面单页仍需约 10.8s（内容/大图解码，非队列问题）；
+  后续可考虑 worker 侧图片尺寸上限或封面预渲染。
+- 压力/倾斜仍依赖真实 M-Pencil；本轮用 `uitest` 触摸 + agent build 的 `fingerDraw`
+  验证捕获/写回链路，压力值固定 0.92。
+- 多页批量的“擦除/撤销后重写”尚未逐项回归。

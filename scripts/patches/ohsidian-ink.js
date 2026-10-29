@@ -14,8 +14,8 @@
  * pressure is constant it asks ArkTS for the device-rate sample stream
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
-window.__ohsidianInkPatch = "38";
-var OHSIDIAN_INK_REV = "38";
+window.__ohsidianInkPatch = "39";
+var OHSIDIAN_INK_REV = "39";
 (function () {
   "use strict";
 
@@ -80,6 +80,8 @@ var OHSIDIAN_INK_REV = "38";
     activeSurface: null,
     ambientSurfaceTimer: 0,
     surfaceWaitTimer: 0,
+    pdfRetryTimer: 0,
+    pdfRetryTries: 0,
     surfaceWaitTries: 0,
     awaitGesture: null,
     blockedPointerId: null,
@@ -509,6 +511,13 @@ var OHSIDIAN_INK_REV = "38";
     }
     state.palm = pref("inkPalm", true) !== false;
     state.fingerDraw = pref("inkFingerDraw", false) === true;
+    // The device agent has no pen injection (uitest exposes touch only), so
+    // the agent build lets a slow touch swipe exercise the real capture ->
+    // overlay -> write-back path. Release builds are unchanged.
+    if (window.__ohsidianAgentBuild) {
+      state.fingerDraw = true;
+      if (state.tool === "pointer") state.tool = "pen";
+    }
     state.pressureTapPref = pref("inkPressureTap", "auto");
     state.width = Number(pref("inkWidth", 2.4)) || 2.4;
     state.hlWidth = Number(pref("inkHlWidth", 16)) || 16;
@@ -1663,55 +1672,146 @@ var OHSIDIAN_INK_REV = "38";
   // ---------------------------------------------------------------------
   // Surfaces: PDF pages
   // ---------------------------------------------------------------------
+  // Obsidian 1.13.7 nests the PDF viewer three deep:
+  //   leaf.view.viewer        -> T1, the async host component
+  //   T1.child                -> x1, the component that owns the viewer
+  //   x1.pdfViewer            -> Obsidian's pdf.js wrapper
+  //   x1.pdfViewer.pdfViewer  -> the pdf.js PDFViewer (getPageView)
+  // T1 has a `child` field, not `pdfViewer`; following only `.pdfViewer`
+  // never reaches the viewer, which is what left the surface unmounted.
+  function pdfViewerChain(view) {
+    var chain = [];
+    var seen = [];
+    function walk(obj, depth) {
+      if (!obj || typeof obj !== "object" || depth > 5 || seen.indexOf(obj) >= 0) return;
+      seen.push(obj);
+      chain.push(obj);
+      var next = [];
+      try {
+        if (obj.pdfViewer && obj.pdfViewer !== obj) next.push(obj.pdfViewer);
+        if (obj.viewer && obj.viewer !== obj) next.push(obj.viewer);
+        if (obj.child && obj.child !== obj) next.push(obj.child);
+      } catch (e) {}
+      for (var i = 0; i < next.length; i++) walk(next[i], depth + 1);
+    }
+    try {
+      walk(view.pdfViewer, 0);
+      walk(view.viewer, 0);
+      walk(view.pdfViewerComponent, 0);
+    } catch (eW) {}
+    return chain;
+  }
+
+  function pdfJsViewerOf(view) {
+    var chain = pdfViewerChain(view);
+    for (var i = 0; i < chain.length; i++) {
+      if (chain[i] && typeof chain[i].getPageView === "function") return chain[i];
+    }
+    return null;
+  }
+
+  // pdf.js keeps `pdfjs.history` in localStorage as
+  // {files:[{fingerprint,page,zoom,scrollTop,...}]}. Reading the entry for the
+  // document that is loading lets us restore the page before the render queue
+  // starts on page 1.
+  function pdfHistoryPage(viewer) {
+    try {
+      var doc = viewer && viewer.pdfDocument;
+      if (!doc) return 0;
+      var fp = (doc.fingerprints && doc.fingerprints[0]) || doc.fingerprint || "";
+      if (!fp) return 0;
+      var raw = "";
+      try { raw = localStorage.getItem("pdfjs.history") || ""; } catch (eR) { return 0; }
+      if (!raw) return 0;
+      var hist = JSON.parse(raw);
+      var files = (hist && hist.files) || [];
+      for (var i = 0; i < files.length; i++) {
+        if (files[i] && files[i].fingerprint === fp) {
+          var p = Number(files[i].page);
+          return p > 0 ? Math.floor(p) : 0;
+        }
+      }
+    } catch (e) {}
+    return 0;
+  }
+
+  function pdfContainerOf(view, chain) {
+    var i;
+    // Prefer the live view DOM: during load Obsidian builds the pdf.js DOM in
+    // a detached `loadingEl` first, and canvas mounted there is invisible.
+    // A connected .pdf-container exists before the first page is created, so
+    // the surface can attach (and hook documentloaded) earlier.
+    var root = view.containerEl;
+    if (root && root.querySelector) {
+      var names = [".pdf-container", ".pdf-viewer-container", ".pdfViewer"];
+      for (i = 0; i < names.length; i++) {
+        var el = null;
+        try { el = root.querySelector(names[i]); } catch (eQ) {}
+        if (el && el.isConnected) return el;
+      }
+    }
+    for (i = 0; i < chain.length; i++) {
+      var o = chain[i];
+      if (!o) continue;
+      var cand = o.containerEl || o.pdfContainerEl || o.viewerContainerEl ||
+        o.container || o.viewer;
+      if (cand && cand.isConnected && cand.querySelector &&
+        (cand.classList && cand.classList.contains("pdf-container") ||
+          cand.querySelector(".page[data-page-number]"))) return cand;
+    }
+    if (root && root.isConnected) return root;
+    return null;
+  }
+
   function createPdfSurface(leaf) {
     var view = leaf.view;
     if (!view || view.getViewType() !== "pdf") return null;
-    // Obsidian's PDF view exposes a wrapper whose inner `pdfViewer` is the
-    // pdf.js viewer; wrapper/container field names differ between versions, so
-    // probe all known locations and fall back to the leaf's DOM.
-    var wrapper = view.pdfViewer || view.viewer || view.pdfViewerComponent || null;
-    var viewer = wrapper ? (wrapper.pdfViewer || wrapper) : null;
-    var container = null;
-    try {
-      container = (wrapper && (wrapper.containerEl || wrapper.pdfContainerEl ||
-        wrapper.viewerContainerEl || wrapper.container || wrapper.viewer)) ||
-        (wrapper && wrapper.dom && (wrapper.dom.containerEl || wrapper.dom.pdfContainerEl ||
-          wrapper.dom.viewerContainerEl)) ||
-        (viewer && (viewer.container || viewer.viewer)) ||
-        (view.containerEl && (view.containerEl.querySelector(".pdf-container") ||
-          view.containerEl.querySelector(".pdf-viewer-container") || view.containerEl)) || null;
-    } catch (eC) {}
-    if (!container || !viewer || typeof viewer.getPageView !== "function") {
-      if (!state.pdfProbeDone) {
-        state.pdfProbeDone = true;
-        try {
-          var wkeys = wrapper ? Object.keys(wrapper).slice(0, 16).join(",") : "";
-          var ikeys = viewer ? Object.keys(viewer).slice(0, 16).join(",") : "";
-          inkTrace("pdfProbe", {
-            type: view.getViewType ? view.getViewType() : "",
-            hasWrapper: !!wrapper,
-            wrapperKeys: wkeys,
-            hasInner: !!(wrapper && wrapper.pdfViewer),
-            innerKeys: ikeys,
-            hasGetPageView: !!(viewer && typeof viewer.getPageView === "function"),
-            hasContainer: !!container,
-            containerClass: container && container.className ? String(container.className).slice(0, 60) : "",
-            pages: container && container.querySelectorAll ? container.querySelectorAll(".page[data-page-number]").length : -1
-          });
-        } catch (eP) {}
+    var chain = pdfViewerChain(view);
+    var viewer = null;
+    for (var vi = 0; vi < chain.length; vi++) {
+      if (chain[vi] && typeof chain[vi].getPageView === "function") {
+        viewer = chain[vi];
+        break;
       }
+    }
+    var container = pdfContainerOf(view, chain);
+    var pageCount = container && container.querySelectorAll
+      ? container.querySelectorAll(".page[data-page-number]").length : 0;
+    if (!viewer || !container) {
+      // The PDF component assigns .pdfViewer asynchronously; a refresh a few
+      // hundred ms later will find it. Never fall back to a whole-container
+      // DOM surface here: it writes normalized coordinates from the wrong
+      // origin and turns handwriting into abstract art.
+      inkTrace("pdfSurfaceWait", {
+        hasViewer: !!viewer,
+        hasContainer: !!container,
+        pages: pageCount,
+        component: !!(view && view.viewer),
+        chain: chain.length
+      });
       return null;
     }
+    inkTrace("pdfSurfaceEnter", {
+      depth: chain.indexOf(viewer),
+      pages: pageCount,
+      containerClass: container.className ? String(container.className).slice(0, 48) : ""
+    });
+    state.pdfRetryTries = 0;
     var surface = {
       kind: "pdf",
       leaf: leaf,
       viewer: viewer,
+      // The Obsidian component instance that owns `viewer`. On a document
+      // reload pdf.js swaps the inner viewer; comparing this is how the mount
+      // loop notices and rebuilds the surface.
+      pdfOwner: view.viewer || view,
       container: container,
       pages: {},
       // Probe state (device agent reads probe:* lines from hilog).
       openedAt: nowMs(),
       docLoadedAt: 0,
       reloads: 0,
+      annoProbed: false,
       rendered: 0,
       pageStarts: {},
       // The overlay never needs more than 2x; 2.249 costs 26% more pixels
@@ -1751,15 +1851,47 @@ var OHSIDIAN_INK_REV = "38";
           pageEl.dataset.ohsidianInkPos = "1";
         }
         var cv = ensureCanvas(pageEl, "ohsidian-ink-pdf", 4);
+        // Separate live layer: writing must not clear the committed ink on this
+        // page, and the commit must not be wiped when the live layer clears.
+        // (One shared canvas made the committed stroke vanish two frames after
+        // pen-up: clearLiveAfterPaint cleared the only canvas.)
+        var live = ensureCanvas(pageEl, "ohsidian-ink-pdf-live", 5);
         var entry = this.pages[index];
-        if (!entry || entry.pageEl !== pageEl || entry.viewport !== vp || entry.cv !== cv) {
+        // pdf.js hands out a new viewport object on every render even when the
+        // geometry is identical. Recreating the entry (and its two canvases)
+        // for that would leave the old canvas in the DOM under the active
+        // stroke, drawing ghost trails next to the committed ink.
+        var sameGeom = !!(entry && entry.viewport &&
+          Math.abs((entry.viewport.width || 0) - (vp.width || 0)) < 0.5 &&
+          Math.abs((entry.viewport.height || 0) - (vp.height || 0)) < 0.5 &&
+          Math.abs((entry.viewport.scale || 0) - (vp.scale || 0)) < 0.0001);
+        if (entry && entry.pageEl === pageEl && entry.cv === cv &&
+          entry.live === live && sameGeom) {
+          entry.viewport = vp;
+          return entry;
+        }
+        if (entry && (entry.cv !== cv || entry.live !== live)) {
+          // Geometry changed (zoom) or pdf.js replaced the page: drop the old
+          // canvases even when a stroke is active. The new entry is repainted
+          // from the document below.
+          try {
+            if (entry.cv && entry.cv.parentNode) entry.cv.parentNode.removeChild(entry.cv);
+          } catch (eOC) {}
+          try {
+            if (entry.live && entry.live.parentNode) entry.live.parentNode.removeChild(entry.live);
+          } catch (eOL) {}
+        }
+        if (!entry || entry.pageEl !== pageEl || entry.viewport !== vp ||
+          entry.cv !== cv || entry.live !== live || !sameGeom) {
           var w = Math.max(1, vp.width);
           var h = Math.max(1, vp.height);
           sizeCanvas(cv, w, h, this.dpr);
+          sizeCanvas(live, w, h, this.dpr, { alpha: true, desynchronized: true });
           entry = {
             index: index,
             pageEl: pageEl,
             cv: cv,
+            live: live,
             viewport: vp,
             space: "pdf:" + index,
             w: w,
@@ -1781,6 +1913,9 @@ var OHSIDIAN_INK_REV = "38";
         try {
           if (entry.cv && entry.cv.parentNode) entry.cv.parentNode.removeChild(entry.cv);
         } catch (e) {}
+        try {
+          if (entry.live && entry.live.parentNode) entry.live.parentNode.removeChild(entry.live);
+        } catch (eL) {}
         if (this.pages[entry.index] === entry) delete this.pages[entry.index];
       },
       dropPageEl: function (pageEl) {
@@ -1880,9 +2015,11 @@ var OHSIDIAN_INK_REV = "38";
       },
       drawLive: function (entry, stroke) {
         if (!entry) return;
-        var ctx = entry.cv.getContext("2d");
+        var layer = entry.live || entry.cv;
+        if (!layer) return;
+        var ctx = layer.getContext("2d");
         ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.clearRect(0, 0, entry.cv.width, entry.cv.height);
+        ctx.clearRect(0, 0, layer.width, layer.height);
         ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
         if (stroke) {
           drawStrokeOnCtx(ctx, stroke, {
@@ -1892,7 +2029,12 @@ var OHSIDIAN_INK_REV = "38";
         }
       },
       clearLive: function (entry) {
-        if (entry) this.drawLive(entry, null);
+        if (!entry) return;
+        var layer = entry.live;
+        if (!layer) return;
+        var ctx = layer.getContext("2d");
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, layer.width, layer.height);
       },
       observePages: function () {
         var self = this;
@@ -1944,6 +2086,7 @@ var OHSIDIAN_INK_REV = "38";
             var ms = Math.round(nowMs() - self.openedAt);
             if (self.docLoadedAt) {
               self.reloads++;
+              self.annoProbed = false;
               probeHook("pdfReload", {
                 reloads: self.reloads,
                 ms: ms,
@@ -1962,18 +2105,51 @@ var OHSIDIAN_INK_REV = "38";
           } catch (eD) {}
         };
         var onPagesInit = function (e) {
-          if (!window.__ohsidianProbeHooks) return;
           try {
             probeHook("pdfPagesInit", {
               pages: e && e.pagesCount,
               ms: Math.round(nowMs() - self.openedAt)
             });
+            // pdf.js persists {fingerprint,page,scrollTop} in localStorage.
+            // Restoring the page only after pagesinit means pdf.js has already
+            // queued a render of page 1; a heavy cover page then blocks the
+            // serialized render queue for 10+ seconds (the white first page).
+            // Jump to the stored page while the document is still initializing.
+            var jumpPage = pdfHistoryPage(self.viewer);
+            if (jumpPage > 2 && self.viewer.currentPageNumber === 1) {
+              var sc = null;
+              try { sc = self.viewer.container || null; } catch (eSC) {}
+              if (sc && sc.querySelector) {
+                var pe = sc.querySelector('.page[data-page-number="' + jumpPage + '"]');
+                if (pe && pe.offsetTop > 0) {
+                  self.forcingScroll = true;
+                  try { sc.scrollTop = pe.offsetTop; } catch (ePJ) {}
+                  setTimeout(function () { self.forcingScroll = false; }, 120);
+                }
+              }
+              try { self.viewer.currentPageNumber = jumpPage; } catch (eCJ) {}
+              probeHook("pdfPreJump", { page: jumpPage });
+            }
+            // Page divs exist now; mount the overlay canvases even if the
+            // surface attached before the document finished loading.
+            self.refreshPages();
           } catch (eP) {}
         };
         var onPageStart = function (e) {
-          if (!window.__ohsidianProbeHooks) return;
           try {
             var pn = e && e.pageNumber;
+            var cur = 0;
+            try { cur = self.viewer.currentPageNumber || 0; } catch (eC) {}
+            // pdf.js starts rendering the page that was visible before
+            // Obsidian restores the saved scroll position. A cover page with
+            // a large image can hold the (serialized) render queue for 10+
+            // seconds, leaving the real page white. Cancel renders far from
+            // the current page; pdf.js restarts them when they become visible.
+            if (pn > 0 && cur > 0 && Math.abs(pn - cur) > 2) {
+              try { if (e.source && e.source.cancelRendering) e.source.cancelRendering(); } catch (eX) {}
+              probeHook("pdfRenderCancel", { page: pn, cur: cur });
+              return;
+            }
             var vp = e && e.source && e.source.viewport;
             if (pn > 0) {
               self.pageStarts[pn] = {
@@ -1992,19 +2168,17 @@ var OHSIDIAN_INK_REV = "38";
             var st = pn ? self.pageStarts[pn] : null;
             var vp = e && e.source && e.source.viewport;
             var cv = e && e.source && e.source.canvas;
-            if (window.__ohsidianProbeHooks) {
-              self.rendered++;
-              probeHook("pdfPage", {
-                page: pn,
-                ms: st ? Math.round(nowMs() - st.t) : -1,
-                w: vp ? Math.round(vp.width) : (cv ? cv.width : 0),
-                h: vp ? Math.round(vp.height) : (cv ? cv.height : 0),
-                scale: vp ? Number(vp.scale.toFixed(3)) : 0,
-                rendered: self.rendered,
-                afterWrite: state.lastPdfWriteAt ? Date.now() - state.lastPdfWriteAt : -1,
-                canvas: cv
-              });
-            }
+            self.rendered++;
+            probeHook("pdfPage", {
+              page: pn,
+              ms: st ? Math.round(nowMs() - st.t) : -1,
+              w: vp ? Math.round(vp.width) : (cv ? cv.width : 0),
+              h: vp ? Math.round(vp.height) : (cv ? cv.height : 0),
+              scale: vp ? Number(vp.scale.toFixed(3)) : 0,
+              rendered: self.rendered,
+              afterWrite: state.lastPdfWriteAt ? Date.now() - state.lastPdfWriteAt : -1,
+              canvas: cv
+            });
             if (!pageEl) return;
             var entry = self.ensurePage(pageEl);
             if (!entry) return;
@@ -2012,14 +2186,63 @@ var OHSIDIAN_INK_REV = "38";
             // Only this page changed. The old code cleared and repainted
             // every mounted page here, i.e. N clears for each of N renders.
             self.redrawPage(entry);
+            /* OHSIDIAN_DEV_PROBE_START */
+            if (state.lastPdfWriteAt &&
+              !self.annoProbed && pn === self.viewer.currentPageNumber) {
+              self.annoProbed = true;
+              try {
+                var pp = e && e.source && e.source.pdfPage;
+                if (pp && pp.getAnnotations) {
+                  pp.getAnnotations().then(function (list) {
+                    var counts = {};
+                    for (var ai = 0; ai < list.length; ai++) {
+                      var st = list[ai].subtype || "?";
+                      counts[st] = (counts[st] || 0) + 1;
+                    }
+                    var layer = pageEl.querySelector(".annotationLayer");
+                    probeHook("pdfAnnoInfo", {
+                      page: pn,
+                      total: list.length,
+                      counts: counts,
+                      layerChildren: layer ? layer.children.length : -1,
+                      sample: list.slice(0, 3).map(function (a) {
+                        return { subtype: a.subtype || "", rect: a.rect || null };
+                      })
+                    });
+                  }).catch(function () {});
+                }
+              } catch (eAn) {}
+            }
+            /* OHSIDIAN_DEV_PROBE_END */
           } catch (e2) {}
         };
         var onPageChanging = function (e) {
-          if (!window.__ohsidianProbeHooks) return;
           try {
+            var to = e && e.pageNumber;
+            // pdf.js changes currentPageNumber before it applies the scroll.
+            // Its next view-area update then still sees the old page, starts
+            // rendering it, and a heavy cover (large images) blocks the render
+            // queue for 10+ seconds while the new page stays white. Apply the
+            // scroll synchronously for long jumps (restore / page-number jump)
+            // so the old page is never considered visible.
+            if (to > 0 && !self.forcingScroll) {
+              var scrollEl = null;
+              try { scrollEl = self.viewer.container || null; } catch (eSC) {}
+              if (scrollEl && scrollEl.querySelector) {
+                var targetEl = scrollEl.querySelector('.page[data-page-number="' + to + '"]');
+                if (targetEl) {
+                  var target = targetEl.offsetTop;
+                  if (Math.abs((scrollEl.scrollTop || 0) - target) > scrollEl.clientHeight) {
+                    self.forcingScroll = true;
+                    try { scrollEl.scrollTop = target; } catch (eFS) {}
+                    setTimeout(function () { self.forcingScroll = false; }, 80);
+                  }
+                }
+              }
+            }
             probeHook("pdfPageChange", {
               from: e && e.previous,
-              to: e && e.pageNumber,
+              to: to,
               ms: Math.round(nowMs() - self.openedAt)
             });
           } catch (eC) {}
@@ -2824,10 +3047,11 @@ var OHSIDIAN_INK_REV = "38";
     }
     var leaves = [];
     try {
-      leaves = leaves.concat(app.workspace.getLeavesOfType("markdown") || []);
-      leaves = leaves.concat(app.workspace.getLeavesOfType("pdf") || []);
-      leaves = leaves.concat(app.workspace.getLeavesOfType("canvas") || []);
-    } catch (e) {
+      var mdL = app.workspace.getLeavesOfType("markdown") || [];
+      var pdfL = app.workspace.getLeavesOfType("pdf") || [];
+      var cvL = app.workspace.getLeavesOfType("canvas") || [];
+      leaves = leaves.concat(mdL, pdfL, cvL);
+    } catch (eL) {
       return;
     }
     // Drop surfaces whose leaf vanished or whose DOM is disconnected.
@@ -2865,12 +3089,24 @@ var OHSIDIAN_INK_REV = "38";
           // The reading view was re-rendered (PDF embed/layout). Reattach the
           // same surface instead of deleting its doc/history every 500ms.
           if (!existing.rebind || !existing.rebind()) stale = true;
-        } else if (existing.kind === "pdf" &&
-          (!existing.container || !existing.container.isConnected ||
-            (leaf.view && existing.viewer !== leaf.view.pdfViewer))) {
+        } else if (existing.kind === "pdfembed" && existing.pdfDom && nowType === "pdf") {
+          // A `pdfdom` fallback created before Obsidian's async PDF component
+          // exposed the real viewer. It maps every page through the first
+          // page's rect and writes normalized coordinates from that origin,
+          // which is what turned handwriting into abstract art. Rebuild as
+          // soon as the real pdf.js viewer exists.
+          if (pdfJsViewerOf(leaf.view)) stale = true;
+        } else if (existing.kind === "pdf" && (function () {
+            if (!existing.container || !existing.container.isConnected) return true;
+            if (leaf.view && existing.pdfOwner &&
+              existing.pdfOwner !== (leaf.view.viewer || leaf.view)) return true;
+            var nowViewer = leaf.view ? pdfJsViewerOf(leaf.view) : null;
+            return !!(nowViewer && existing.viewer !== nowViewer);
+          })()) {
           // pdf.js replaces the viewer on a document reload (our own PDF write
           // triggers one); the old event bus and page canvases are dead.
-          if (leaf.view && existing.viewer !== leaf.view.pdfViewer) {
+          var freshViewer = leaf.view ? pdfJsViewerOf(leaf.view) : null;
+          if (freshViewer && existing.viewer !== freshViewer) {
             probeHook("pdfViewerReplaced", {
               afterWrite: state.lastPdfWriteAt ? Date.now() - state.lastPdfWriteAt : -1,
               page: existing.currentSpace || ""
@@ -2908,16 +3144,11 @@ var OHSIDIAN_INK_REV = "38";
         warn("surface mount failed", e && e.message);
         inkTrace("surfaceFail", { type: leaf.view ? leaf.view.getViewType() : "?", error: e && e.message });
       }
-      if (!created && leaf.view && leaf.view.getViewType() === "pdf") {
-        // Last-resort DOM surface: if this Obsidian build does not expose the
-        // pdf.js viewer object, pages are still real DOM and can be annotated
-        // with page-normalized coordinates. It keeps the handwriting layer
-        // usable even when view.pdfViewer is absent.
-        try {
-          var pdfPages = leaf.view.containerEl.querySelectorAll(".page[data-page-number]");
-          if (pdfPages && pdfPages.length) created = pdfEmbedSurfaceFor(leaf, pdfPages[0], true);
-        } catch (ePdfDom) {}
-      }
+      // Do NOT build a whole-container pdfdom fallback for a PDF leaf here.
+      // Obsidian assigns the pdf.js viewer asynchronously; the retry timer
+      // picks it up a few hundred ms later. A fallback created at this point
+      // uses the first page's rect for every page, so write-back stores
+      // normalized coordinates against the wrong origin (the "art" bug).
       if (created) {
         if (state.surfaces.indexOf(created) < 0) state.surfaces.push(created);
         inkTrace("surface", {
@@ -2935,6 +3166,28 @@ var OHSIDIAN_INK_REV = "38";
       var ps = state.surfaces[pe];
       if (ps.kind !== "pdfembed") continue;
       if (!ps.pageEl || !ps.pageEl.isConnected) removeSurface(ps);
+    }
+    // Obsidian assigns the pdf.js viewer asynchronously after the leaf is
+    // created. If a PDF leaf is still surface-less, poll briefly instead of
+    // waiting for a layout event that may never come (the first paint of the
+    // PDF does not dispatch layout-change).
+    if (state.pdfRetryTries < 40 && !state.pdfRetryTimer) {
+      var needPdf = false;
+      for (var pr = 0; pr < leaves.length; pr++) {
+        var pl = leaves[pr];
+        if (pl.view && pl.view.getViewType && pl.view.getViewType() === "pdf" &&
+          !surfaceForLeaf(pl)) {
+          needPdf = true;
+          break;
+        }
+      }
+      if (needPdf) {
+        state.pdfRetryTries++;
+        state.pdfRetryTimer = setTimeout(function () {
+          state.pdfRetryTimer = 0;
+          try { inkRefreshSurfaces(); } catch (ePR) {}
+        }, 350);
+      }
     }
     updateToolbarVisibility();
   }
@@ -6388,39 +6641,79 @@ var OHSIDIAN_INK_REV = "38";
     installPenObservers();
     window.addEventListener("ohsidian-native-message", onNativeMessageEvent);
     addCommands(app);
+    var readyDone = false;
+    function onWorkspaceReady() {
+      if (readyDone) return;
+      readyDone = true;
+      if (state.enabled) { try { inkRefreshSurfaces(); } catch (e) {} }
+      // The active reading view often mounts after onLayoutReady; refresh a
+      // few times so the first nib tap does not hit "not ready".
+      var mountDelays = [150, 400, 900, 1600];
+      for (var md = 0; md < mountDelays.length; md++) {
+        (function (delay) {
+          setTimeout(function () {
+            if (!state.enabled) return;
+            try { inkRefreshSurfaces(); } catch (e2) {}
+          }, delay);
+        })(mountDelays[md]);
+      }
+      try { buildToolbar(); } catch (eBar) { warn("toolbar build failed", eBar && eBar.message); }
+      try { updateToolbarState(); } catch (eUT) {
+        inkTrace("hooksFail", { stage: "toolbar", error: String(eUT && eUT.message || eUT) });
+      }
+      try { ensureIpc(); } catch (eIpc) {
+        inkTrace("hooksFail", { stage: "ipc", error: String(eIpc && eIpc.message || eIpc) });
+      }
+      var t = setInterval(function () {
+        try {
+          if (!state.ipcReady && window.__ohsidianNativeIpcReady) {
+            state.ipcReady = true;
+          }
+          ensureIpc();
+          // stylusInfo is one-shot right after the handshake; on a fast boot
+          // it can arrive before this layer's listener exists.
+          if (!state.stylusInfo) sendAction({ action: "stylusInfo" });
+          // Retries the penSamplesOn handshake if the socket was not ready
+          // when the pressure detector first asked for samples.
+          negotiatePressure();
+        } catch (e) {}
+      }, 3000);
+      state.ipcTimer = t;
+    }
+    // Start the mount loop before touching workspace APIs. onLayoutReady runs
+    // its callback synchronously when the layout is already ready, so one
+    // exception inside that callback used to abort the whole try block: no
+    // event hooks, no warm loop, and an invisible ink layer for the session.
+    (function warmSurfaces() {
+      var tries = 0;
+      var timer = setInterval(function () {
+        tries++;
+        if (!state.enabled) { clearInterval(timer); return; }
+        try { onWorkspaceReady(); } catch (eR0) {}
+        try { inkRefreshSurfaces(); } catch (eW) {}
+        var missing = false;
+        try {
+          var pdfLeaves = app.workspace.getLeavesOfType("pdf") || [];
+          for (var w = 0; w < pdfLeaves.length; w++) {
+            var lf = pdfLeaves[w];
+            if (lf.view && lf.view.getViewType && lf.view.getViewType() === "pdf" &&
+              !surfaceForLeaf(lf)) missing = true;
+          }
+        } catch (eL0) {}
+        if (!missing && tries > 3) clearInterval(timer);
+        else if (tries >= 30) clearInterval(timer);
+      }, 700);
+    })();
     try {
-      app.workspace.onLayoutReady(function () {
-        if (state.enabled) { try { inkRefreshSurfaces(); } catch (e) {} }
-        // The active reading view often mounts after onLayoutReady; refresh a
-        // few times so the first nib tap does not hit "not ready".
-        var mountDelays = [150, 400, 900, 1600];
-        for (var md = 0; md < mountDelays.length; md++) {
-          (function (delay) {
-            setTimeout(function () {
-              if (!state.enabled) return;
-              try { inkRefreshSurfaces(); } catch (e2) {}
-            }, delay);
-          })(mountDelays[md]);
-        }
-        try { buildToolbar(); } catch (eBar) { warn("toolbar build failed", eBar && eBar.message); }
-        updateToolbarState();
-        ensureIpc();
-        var t = setInterval(function () {
-          try {
-            if (!state.ipcReady && window.__ohsidianNativeIpcReady) {
-              state.ipcReady = true;
-            }
-            ensureIpc();
-            // stylusInfo is one-shot right after the handshake; on a fast boot
-            // it can arrive before this layer's listener exists.
-            if (!state.stylusInfo) sendAction({ action: "stylusInfo" });
-            // Retries the penSamplesOn handshake if the socket was not ready
-            // when the pressure detector first asked for samples.
-            negotiatePressure();
-          } catch (e) {}
-        }, 3000);
-        state.ipcTimer = t;
+      app.workspace.onLayoutReady(onWorkspaceReady);
+    } catch (eReady) {
+      inkTrace("hooksFail", {
+        stage: "ready",
+        error: String(eReady && eReady.message || eReady)
       });
+    }
+    setTimeout(onWorkspaceReady, 1200);
+    try {
       app.workspace.on("layout-change", onLayoutChange);
       app.workspace.on("active-leaf-change", onActiveLeafChange);
       app.workspace.on("file-open", onLayoutChange);
@@ -6440,8 +6733,11 @@ var OHSIDIAN_INK_REV = "38";
         if (!ev.target || !ev.target.closest) return;
         if (!ev.target.closest("#" + TOOLBAR_ID) && !ev.target.closest("#" + MENU_ID)) closeMenu();
       }, true);
-    } catch (e) {
-      warn("workspace hooks failed", e && e.message);
+    } catch (eHooks) {
+      inkTrace("hooksFail", {
+        stage: "events",
+        error: String(eHooks && eHooks.message || eHooks)
+      });
     }
     log("installed rev " + OHSIDIAN_INK_REV);
     probeHook("boot", {
@@ -6468,7 +6764,11 @@ var OHSIDIAN_INK_REV = "38";
   function boot() {
     if (state.installed) return true;
     try {
-      if (window.app) {
+      // window.app appears a tick before app.workspace is constructed. The old
+      // check installed too early: onLayoutReady/on threw ("undefined"), the
+      // whole hook block was skipped, and the ink layer stayed invisible for
+      // the session. Wait for the workspace object itself.
+      if (window.app && window.app.workspace) {
         var ok = install(window.app);
         if (ok) window.__ohsidianInkInstalled = true;
         return ok;
