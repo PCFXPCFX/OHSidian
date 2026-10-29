@@ -130,6 +130,11 @@ jobs:
       - name: Verify patched asar (syntax + patch markers)
         run: node scripts/verify-asar.cjs
 
+      # The device-agent probe is maintainer-local (gitignored). A clean
+      # checkout must never contain it; fail if a stray commit re-adds it.
+      - name: Verify release has no device-agent probe
+        run: node scripts/verify-release.cjs
+
       - name: Resolve command-line-tools URL
         id: cli
         run: |

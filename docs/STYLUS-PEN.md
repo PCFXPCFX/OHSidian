@@ -148,7 +148,7 @@ Stroke：
 12. **页表清理**：pdf.js reset 会摘掉叠层 canvas；`prunePages()` 同步删除 detached 条目，翻过的页不再占内存。
 13. **内核像素上限（仅高 DPI 触摸设备）**：`capCanvasAreaFactor` 在 `dpr≥2` 且粗指针/有触摸点时取 `0`（一页不超过一屏），否则保持上游 `200`。平板整窗宽 A4 约 39→21 MB（73% 线性），窄面板几乎无损；普通 PC 不降清晰度，高 DPI 触摸 PC 按平板处理。
 14. **关闭即停**：`inkEnabled=false` 时同时停止 ArkTS 的 `penSamplesOn` 采样流，避免笔继续唤醒应用。
-15. **worker 真线程**：`app://` 补 MIME 后，`pdf.worker.min.mjs` 以 module worker 加载；`InkProbe fakeWorker` 应保持 0。
+15. **worker 真线程**：`app://` 补 MIME 后，`pdf.worker.min.mjs` 以 module worker 加载，不再退回主线程 fake worker。
 16. **写回不打断阅读**：默认 `leave` 时机，只在离开 PDF/切后台时替换文件；`idle` 仍可手动选（会重载）。
 17. **脏页批量写回**：按 doc 中 `!written` 的 space 与擦除/撤销/清空标记的脏页逐页写，翻过的页不会漏写。
 18. **写回前校验**：PDFKit 保存后重新 load 并检查页数，坏文件不替换；注释按标记清理，避免重复堆叠。
@@ -238,9 +238,6 @@ PdfInk write/restore
 关闭手写笔模式后应为 **0 张**；开启后应只随可见页数增长，而不是随文档页数增长。
 `PDF写回` 行给出时机/样式/次数/上次写回时间/fake worker 计数。
 
-真机结构化探针：`InkUI probe:<event> {json}`（`pdfDocLoaded` / `pdfPage` / `pdfReload` /
-`pdfWriteStart/End` 等），由 `tools/device-agent/agent.mjs` 采集并生成报告。
-
 ## 11. 文件
 
 | 文件 | 作用 |
@@ -253,7 +250,7 @@ PdfInk write/restore
 | `scripts/patches/touch-mode.js` | 设置页/独立“手写笔”tab、IPC 端口 |
 | `scripts/update-obsidian.mjs` | 内核补丁：`capCanvasAreaFactor:0`（PDF 页 canvas 一屏上限） |
 | `scripts/verify-asar.cjs` | 校验 P0/P1/MIME 标记与 asar 语法 |
-| `tools/device-agent/` | **内部/仅操作者**：真机模拟点击、日志探针、报告与保守自动修复；不随 release 发布 |
+| `scripts/verify-release.cjs` | 断言 release `app.js` 不含设备探针 |
 | `electron/src/main/module.json5` | VIBRATE 权限 |
 
 ## 12. 验收清单

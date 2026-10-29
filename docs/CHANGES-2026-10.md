@@ -3841,8 +3841,10 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 ### 二、Agent 只给操作者
 
 - `README.md` 删除公开的 Agent 链接；`tools/device-agent/README.md` 标记 **内部/仅操作者**。
-- `.gitattributes` 增加 `tools/device-agent export-ignore`，release 源码归档不带该目录；
-  release HAP 本来就不打包 `tools/`。
+- `.gitignore` 排除 `tools/device-agent/` 与 `scripts/patches/ohsidian-probe.js`，并从 git index 移除；
+  GitHub Actions checkout 看不到这两个路径，release 构建也不需要它们（`readProbePatch` 惰性读取）。
+- GitHub Actions 的 `build-release.yml` 在 `verify-asar` 后新增 `node scripts/verify-release.cjs`，
+  即使有人误提交 probe 也会在 CI 失败。
 - Agent 默认安装 **agent HAP**（有探针），不碰 release HAP；
   `fixers.rebuildAndInstall()` 固定使用 `--repatch --agent` 并刷新 agent HAP；
   `doctor` 同时显示 agent/release 两个 HAP。

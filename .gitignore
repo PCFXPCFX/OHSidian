@@ -104,3 +104,8 @@ web_engine/src/main/resources/resfile/resources/app/obsidian.asar
 .pnpm-store/
 # Device-agent runs write screenshots/reports here; they are not source.
 reports/
+
+# Operator-only device agent: kept on the maintainer's machine, never checked
+# out by GitHub Actions and never present in a release build.
+/tools/device-agent/
+/scripts/patches/ohsidian-probe.js
