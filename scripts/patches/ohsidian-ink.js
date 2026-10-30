@@ -516,8 +516,16 @@ var OHSIDIAN_INK_REV = "39";
     // the agent build lets a slow touch swipe exercise the real capture ->
     // overlay -> write-back path. Release builds are unchanged.
     if (window.__ohsidianAgentBuild) {
-      state.fingerDraw = true;
-      if (state.tool === "pointer") state.tool = "pen";
+      // Gesture-test mode: hand tool, no finger ink, so horizontal swipes reach
+      // Obsidian instead of drawing. Set __ohsidianAgentPen=true to restore the
+      // pen/finger-draw test override.
+      if (window.__ohsidianAgentPen === true) {
+        state.fingerDraw = true;
+        if (state.tool === "pointer") state.tool = "pen";
+      } else {
+        state.fingerDraw = false;
+        state.tool = "pointer";
+      }
     }
     state.pressureTapPref = pref("inkPressureTap", "auto");
     state.width = Number(pref("inkWidth", 2.4)) || 2.4;
@@ -7292,6 +7300,26 @@ var OHSIDIAN_INK_REV = "39";
       setTimeout(function () { mdPlainTest(); }, 5000);
       setTimeout(function () { mdScrollTest(); }, 14000);
     }
+    // One-shot gesture sample: starts once a horizontal swipe actually travels,
+    // so a tap that closes a drawer does not consume it.
+    try {
+      var gStart = null;
+      var gDone = false;
+      var onDown = function (e) {
+        if (gDone) return;
+        gStart = { x: e.clientX, y: e.clientY };
+      };
+      var onMove = function (e) {
+        if (gDone || !gStart) return;
+        if (Math.abs(e.clientX - gStart.x) < 120) return;
+        gDone = true;
+        document.removeEventListener("pointerdown", onDown, true);
+        document.removeEventListener("pointermove", onMove, true);
+        perfRafSample("gesture", 2500);
+      };
+      document.addEventListener("pointerdown", onDown, true);
+      document.addEventListener("pointermove", onMove, true);
+    } catch (eG) {}
     try {
       if (typeof PerformanceObserver === "function") {
         var seen = {};
