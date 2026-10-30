@@ -758,10 +758,6 @@ struct Index {
               this.handlePdfInk(msg);
             } else if (msg.action === 'pdfPreviewProbe') {
               this.handlePdfPreviewProbe(msg);
-            } else if (msg.action === 'pdfPreview') {
-              this.handlePdfPreviewOverlay(msg);
-            } else if (msg.action === 'pdfPreviewHide') {
-              this.clearPdfPreview(true);
             } else if (msg.action === 'pdfInkRestore') {
               this.handlePdfRestore(msg);
             } else {
@@ -1851,17 +1847,6 @@ struct Index {
       .opacity(this.opacity_)
       .width('100%')
       .height('100%')
-
-      if (this.pdfPreviewMap !== null) {
-        Image(this.pdfPreviewMap)
-          .width(this.pdfPreviewW)
-          .height(this.pdfPreviewH)
-          .position({ x: this.pdfPreviewX, y: this.pdfPreviewY })
-          .objectFit(ImageFit.Fill)
-          .interpolation(ImageInterpolation.Medium)
-          .hitTestBehavior(HitTestMode.None)
-          .zIndex(9)
-      }
 
       if (this.nativeRequest !== null) {
         Stack({ alignContent: Alignment.TopStart }) {

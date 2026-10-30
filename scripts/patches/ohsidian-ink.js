@@ -2187,21 +2187,6 @@ var OHSIDIAN_INK_REV = "39";
               try { self.viewer.currentPageNumber = jumpPage; } catch (eCJ) {}
               probeHook("pdfPreJump", { page: jumpPage });
             }
-            var targetPage = 0;
-            try { targetPage = Math.max(0, (self.viewer.currentPageNumber || 1) - 1); } catch (eT) {}
-            // Native first-paint preview is still experimental: it is only
-            // exercised by local agent builds until the overlay/z-order and
-            // main-thread interaction are verified. Release keeps pdf.js only.
-            // ArkUI `Image` does not compose above the WebEngine XComponent
-            // surface (only a SURFACE XComponent does), so this stays an
-            // agent-only experiment until the preview is drawn on its own
-            // XComponent surface. Release stays pdf.js-only.
-            if (window.__ohsidianAgentBuild) {
-              requestPdfPreview(self, targetPage);
-              setTimeout(function () {
-                try { requestPdfPreview(self); } catch (ePV) {}
-              }, 500);
-            }
             // Page divs exist now; mount the overlay canvases even if the
             // surface attached before the document finished loading.
             self.refreshPages();
@@ -2231,10 +2216,6 @@ var OHSIDIAN_INK_REV = "39";
             if (pn > 0) {
               self.renderedPages[pn] = true;
               dropPdfPreview(self, pn - 1);
-            }
-            if (self.previewPage === pn - 1) {
-              self.previewPage = -1;
-              sendAction({ action: "pdfPreviewHide", seq: 0 });
             }
             self.rendered++;
             probeHook("pdfPage", {
@@ -2389,7 +2370,6 @@ var OHSIDIAN_INK_REV = "39";
       },
       unmount: function () {
         this.disposed = true;
-        try { sendAction({ action: "pdfPreviewHide", seq: 0 }); } catch (eHide) {}
         try {
           if (this.handlers) {
             this.viewer.eventBus.off("pagerendered", this.handlers.rendered);

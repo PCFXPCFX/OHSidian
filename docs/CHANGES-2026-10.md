@@ -3931,7 +3931,7 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 | 产物 | 用途 | 大小/时间 | SHA-256 |
 |---|---|---|---|
 | `electron-default-agent.hap` | 仅真机调试（含探针） | 120,976,288 B / 2026-10-29 23:48:43 | 见构建日志 |
-| `electron-default-signed.hap` | release（无 Agent/探针） | 121,036,026 B / 2026-10-30 00:53:46 | `0C4936344E06052900DC3D2B4783514C0554AA28213CC7D9F482123ACC180F3F` |
+| `electron-default-signed.hap` | release（无 Agent/探针） | 121,021,395 B / 2026-10-30 12:18:51 | `1ACA738ABF71171D707428B26FCE26CA490AFA8D72DDF6DBC1A2EB6A45AE0211` |
 
 ### 四、验证
 
@@ -3995,3 +3995,8 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 盖住。下一步若要继续，应做一个最小的 SURFACE XComponent 预览层（把 PixelMap
 画进 native window），而不是继续用 `Image`。该实验目前只在 `--agent` 构建里
 请求，release 不触发。
+
+补充（2026-10-30 12:20）：图片解码的封顶/OffscreenCanvas/shim 全部真机试过，
+要么无收益，要么把 SMask alpha 合成弄坏成白页，均已回滚。第 1 页 release
+仍约 8.8 s；跳过图片时 58 ms，证明瓶颈 100% 在 pdf.js 的 JS JPEG+SMask 解码。
+安全结论见 `PDF-PERF-AUDIT.md` 第 9 节：不预降采样或换栅格器就没有优化空间。

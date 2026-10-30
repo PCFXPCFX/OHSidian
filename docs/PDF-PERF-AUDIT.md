@@ -535,3 +535,38 @@ rasterRatio(dpr) = (2.249 / dpr)^2     // 2.249 → 5.06× vs 1.0；1.38× vs 1.
 结论：要修“首次就停在第 1 页”，必须让预览**不依赖 Web 主线程**——用 ArkUI
 原生 `Image` + PDF Kit `PixelMap` 覆盖在 XComponent 上；或者替换 pdf.js 的
 JPEG 解码路径。纯 JS 层覆盖已被真机数据证伪。
+
+---
+
+## 9. 图片解码：能试的都试完了（2026-10-30 真机）
+
+第 1 页在 release 下 `pdfPageRendered` 约 **8.8 s**，第 2 页 **0.3–0.7 s**。
+把 worker 的 `buildPaintImageXObject` 直接 return（所有图片跳过）后，第 1 页
+**58 ms**、第 2 页 **64 ms**——慢的 100% 是图片，不是文字/字体/画布/IO。
+
+逐项真机结果：
+
+| 改动 | 第 1 页 | 画面 |
+|---|---:|---|
+| 基线 | 8.8 s | 正确 |
+| `drawWidth` 封顶 2048（等比） | 9.2 s | 正确但无收益 |
+| 再加 SMask base 按 2048 解码 | 5.8 s | **白页/图坏**（alpha 合成尺寸不匹配） |
+| 忽略 SMask（诊断） | 4.0 s | 图可见但无透明 |
+| worker 前置 `ImageDecoder` shim（`createImageBitmap`） | 4.1 s | 无收益，worker 里拿不到原生解码 |
+| 打开 `isOffscreenCanvasSupported` | 11.4 s | 正确但更慢 |
+| 跳过所有图片（诊断） | 58 ms | 图缺失 |
+
+结论：pdf.js 在 worker 里用**纯 JS `JpegImage` + 逐像素 SMask 合成**处理
+`5816×2044 / DCTDecode / SMask`，439 KB 的 JPEG 仍要熵解码 12M 系数，约 4 s；
+SMask 合成再加约 0.8 s。封顶尺寸会破坏 alpha，不能上线；worker 没有原生
+`ImageDecoder`/`createImageBitmap`，shim 也不生效。
+
+在“不换渲染器、不预处理 PDF”的前提下，没有安全的优化空间。要真正解决只有
+两条路：
+
+1. **一次性预处理**：用 ImageKit 原生解码大图，降采样后重写 image XObject
+   流（或生成显示用副本），保留原文件做写回；
+2. **换栅格器**：用 PDF Kit 按屏幕分辨率/瓦片渲染页面，替换 pdf.js 的图片
+   解码与绘制。
+
+以上实验补丁均已回滚，release 保持“正确但首屏慢”。
