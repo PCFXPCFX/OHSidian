@@ -3931,7 +3931,7 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 | 产物 | 用途 | 大小/时间 | SHA-256 |
 |---|---|---|---|
 | `electron-default-agent.hap` | 仅真机调试（含探针） | 120,976,288 B / 2026-10-29 23:48:43 | 见构建日志 |
-| `electron-default-signed.hap` | release（无 Agent/探针） | 121,021,395 B / 2026-10-30 12:18:51 | `1ACA738ABF71171D707428B26FCE26CA490AFA8D72DDF6DBC1A2EB6A45AE0211` |
+| `electron-default-signed.hap` | release（无 Agent/探针） | 121,025,491 B / 2026-10-30 12:50:23 | `F37A508C08640E70027C2BBDD3E78E0F16A4F643A57831A8B700D36242934828` |
 
 ### 四、验证
 
@@ -4000,3 +4000,12 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 要么无收益，要么把 SMask alpha 合成弄坏成白页，均已回滚。第 1 页 release
 仍约 8.8 s；跳过图片时 58 ms，证明瓶颈 100% 在 pdf.js 的 JS JPEG+SMask 解码。
 安全结论见 `PDF-PERF-AUDIT.md` 第 9 节：不预降采样或换栅格器就没有优化空间。
+
+### Obsidian 整体性能体检（2026-10-30）
+
+- 空闲 60fps、PDF 滚动 60fps；PDF 掉帧已由“无墨迹页不分配叠加层”修掉。
+- Markdown 编辑滚动：纯文本 1200 行笔记约 52fps（p95 33ms），最大真实笔记约
+  45fps（p95 100ms）。编辑模式没有手写画布，关闭手写层仍有卡顿，说明是
+  Obsidian/CM6 的内容渲染成本，不是补丁层。
+- 阅读模式滚动与真实笔输入延迟没有拿到干净样本，未改动。
+- 详细数据见 `APP-PERF-AUDIT.md`。

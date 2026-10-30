@@ -7090,6 +7090,155 @@ var OHSIDIAN_INK_REV = "39";
     requestAnimationFrame(tick);
   }
 
+  function mdScrollSample(label, el, ms) {
+    return new Promise(function (resolve) {
+      var t0 = nowMs(), last = 0, frames = 0, deltas = [], max = 0, jank = 0;
+      var origin = el.scrollTop;
+      function tick(ts) {
+        if (last) {
+          var d = ts - last;
+          deltas.push(d);
+          if (d > max) max = d;
+          if (d > 50) jank++;
+        }
+        last = ts;
+        frames++;
+        el.scrollTop += 40;
+        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2) el.scrollTop = 0;
+        if (nowMs() - t0 < ms) {
+          requestAnimationFrame(tick);
+        } else {
+          try { el.scrollTop = origin; } catch (eR) {}
+          deltas.sort(function (a, b) { return a - b; });
+          var sum = 0;
+          for (var i = 0; i < deltas.length; i++) sum += deltas[i];
+          probeHook("mdscroll", {
+            label: label,
+            frames: frames,
+            avg: deltas.length ? Number((sum / deltas.length).toFixed(1)) : 0,
+            p50: deltas.length ? Number(deltas[Math.floor(deltas.length * 0.5)].toFixed(1)) : 0,
+            p95: deltas.length ? Number(deltas[Math.floor(deltas.length * 0.95)].toFixed(1)) : 0,
+            max: Number(max.toFixed(1)),
+            jank: jank,
+            contentH: el.scrollHeight,
+            viewH: el.clientHeight
+          });
+          resolve();
+        }
+      }
+      requestAnimationFrame(tick);
+    });
+  }
+
+  function mdScroller() {
+    var sels = [".markdown-preview-view", ".cm-scroller", ".markdown-reading-view"];
+    for (var s = 0; s < sels.length; s++) {
+      var list = document.querySelectorAll(sels[s]);
+      for (var i = 0; i < list.length; i++) {
+        var el = list[i];
+        if (!el || el.clientHeight < 80) continue;
+        if (el.scrollHeight < el.clientHeight + 40) continue;
+        return el;
+      }
+    }
+    return null;
+  }
+
+  function mdScrollTest() {
+    try {
+      var app = state.app || window.app;
+      if (!app || !app.workspace || !app.vault) return;
+      var prev = app.workspace.getActiveFile ? app.workspace.getActiveFile() : null;
+      var files = app.vault.getMarkdownFiles ? app.vault.getMarkdownFiles() : [];
+      var best = null;
+      for (var i = 0; i < files.length; i++) {
+        var f = files[i];
+        if (!f || !f.stat || !(f.stat.size > 0)) continue;
+        if (!best || f.stat.size > best.stat.size) best = f;
+      }
+      if (!best) { probeHook("mdscroll", { label: "none", files: files.length }); return; }
+      var leaf = app.workspace.getLeaf(true);
+      Promise.resolve(leaf.openFile(best)).then(function () {
+        setTimeout(function () {
+          var el = mdScroller();
+          if (!el) { probeHook("mdscroll", { label: "missing" }); return; }
+          var isEdit = el.classList.contains("cm-scroller");
+          var label = isEdit ? "mdedit" : "mdread";
+          mdScrollSample(label, el, 3000).then(function () {
+            try { state.enabled = false; inkRefreshSurfaces(); } catch (eOff) {}
+            setTimeout(function () {
+              var el2 = mdScroller();
+              if (!el2) return;
+              mdScrollSample(label + "_noink", el2, 3000).then(function () {
+                try { state.enabled = true; inkRefreshSurfaces(); } catch (eOn) {}
+                var view = leaf.view;
+                try {
+                  if (leaf.setViewState) {
+                    leaf.setViewState({
+                      type: "markdown",
+                      state: { file: best.path, mode: "preview" }
+                    });
+                  } else if (view && view.setState && view.getState) {
+                    var st = view.getState();
+                    st.mode = "preview";
+                    view.setState(st);
+                  }
+                } catch (eMode) {}
+                setTimeout(function () {
+                  var el3 = mdScroller();
+                  function finish() {
+                    if (prev && prev.path !== best.path) {
+                      try { app.workspace.getLeaf(false).openFile(prev); } catch (eBack) {}
+                    }
+                  }
+                  if (!el3) { finish(); return; }
+                  mdScrollSample("mdpreview", el3, 3000).then(finish);
+                }, 1500);
+              });
+            }, 500);
+          });
+        }, 1500);
+      }).catch(function (eOpen) {
+        probeHook("mdscroll", { label: "openFail", error: String(eOpen && eOpen.message || eOpen) });
+      });
+    } catch (eMd) {
+      probeHook("mdscroll", { label: "error", error: String(eMd && eMd.message || eMd) });
+    }
+  }
+
+  function mdPlainTest() {
+    try {
+      var app = state.app || window.app;
+      if (!app || !app.vault || !app.workspace) return;
+      var prev = app.workspace.getActiveFile ? app.workspace.getActiveFile() : null;
+      var lines = [];
+      for (var i = 0; i < 1200; i++) {
+        lines.push("line " + i + " - the quick brown fox jumps over the lazy dog 0123456789");
+      }
+      var name = "_ohsidian_perf_plain_" + Date.now().toString(36) + ".md";
+      var file = null;
+      function cleanup() {
+        try { if (file) app.vault.delete(file); } catch (eD) {}
+        if (prev) { try { app.workspace.getLeaf(false).openFile(prev); } catch (eR) {} }
+      }
+      Promise.resolve(app.vault.create(name, lines.join("\n"))).then(function (f) {
+        file = f;
+        var leaf = app.workspace.getLeaf(true);
+        return Promise.resolve(leaf.openFile(f)).then(function () {
+          setTimeout(function () {
+            var el = mdScroller();
+            if (!el) { probeHook("mdplain", { label: "missing" }); cleanup(); return; }
+            mdScrollSample("mdplain_edit", el, 2500).then(cleanup);
+          }, 700);
+        });
+      }).catch(function (eC) {
+        probeHook("mdplain", { label: "error", error: String(eC && eC.message || eC) });
+      });
+    } catch (e) {
+      probeHook("mdplain", { label: "error", error: String(e && e.message || e) });
+    }
+  }
+
   function installPerfProbes() {
     if (!window.__ohsidianAgentBuild) return;
     try {
@@ -7137,6 +7286,12 @@ var OHSIDIAN_INK_REV = "39";
         }, 3500);
       } catch (eS) {}
     }, 12000);
+    // Opt-in markdown audit: it opens a temporary plain note and the largest
+    // real note, so it must never run during a normal session.
+    if (window.__ohsidianMdPerf === true) {
+      setTimeout(function () { mdPlainTest(); }, 5000);
+      setTimeout(function () { mdScrollTest(); }, 14000);
+    }
     try {
       if (typeof PerformanceObserver === "function") {
         var seen = {};
