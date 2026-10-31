@@ -29,7 +29,7 @@
 
 OHsidian 是 Obsidian 在 HarmonyOS 上的非官方移植。它不重写 Obsidian，而是用 ArkTS 适配层加 C++ 原生库把 HarmonyOS 的能力包装成 Electron 兼容接口，直接运行官方 `obsidian.asar`（构建时注入少量兼容补丁）。
 
-本项目是 [HanversionOvO/OHSidian][upstream] 的 Fork：移除了华为云同步、华为账号登录与 AGC 初始化，并修复了窗口布局、触摸输入、拖拽与分享、删除安全等问题。
+本项目基于 [HanversionOvO/OHSidian][upstream] 移除了华为云同步、华为账号登录与 AGC 初始化，并修复了窗口布局、触摸输入、拖拽与分享、删除安全等问题。
 
 `com.mikannqaq.obsidian` · 1.4.2（versionCode 1040002）· HarmonyOS 6.0.2 起（compatible API 22 / target API 24）· 平板 / 2in1
 
