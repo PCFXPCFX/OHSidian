@@ -4401,7 +4401,7 @@ controlEl.createEl("label", {cls:"checkbox-container", attr:{tabIndex:0}}, e => 
    `docs/STYLUS-PEN.md:13`），属设计行为，请用手指；如需设置面板接受笔点，需另行
    修改该策略（一行判定），本轮未动。
 
-## 第 203 轮 (2026-11-02): 工具条精简 / 颜色收敛 / 一笔成形正方形修复（v53）
+## 第 203 轮 (2026-11-02): 工具条精简 / 颜色收敛 / 一笔成形正方形修复（v54）
 
 ### 一、工具条精简与可配置
 
@@ -4433,6 +4433,8 @@ controlEl.createEl("label", {cls:"checkbox-container", attr:{tabIndex:0}}, e => 
   改成 `1000 × round(1000*h/w)`，让引擎在正确的坐标系里判定形状。
 - 若鸿蒙把闭合方框识别成“折线（type 3）”，现在会检测首尾闭合并按矩形重建；
   type 0 的闭合笔画也走同一兜底。
+- 原生回调晚于抬笔时，渲染层还有一层**本地兜底**：闭合且四个角都有笔迹 → 矩形；
+  闭合且径向方差小 → 圆/椭圆。这样即使鸿蒙没来得及回调，正方形也不会还原成手绘。
 - 保留 `shapeString` 未解析的现状：目前只用原生 `shapeType` 分类，几何在本地重建。
 
 ### 四、代码审计发现并修复
@@ -4451,7 +4453,7 @@ controlEl.createEl("label", {cls:"checkbox-container", attr:{tabIndex:0}}, e => 
 
 | 产物 | 大小/时间 | SHA-256 |
 |---|---|---|
-| `electron-default-signed.hap`（ink v53） | 121,107,198 B / 2026-11-02 19:57:47 | `4EE2CB0D8283C956AA015B88C6FC0F9D5894038A7F3F0909607E800A072676B5` |
+| `electron-default-signed.hap`（ink v54） | 121,111,296 B / 2026-11-02 20:03:11 | `5F0F27C1CFB39739C7260312164E7DD7804150902D28C14FE73FB315DD2A6980` |
 
 - `node --check`、`update-obsidian --repatch`、`verify-asar`、`verify-release` 全绿。
 - 按你的要求未安装、未操作设备；以下项需真机确认：

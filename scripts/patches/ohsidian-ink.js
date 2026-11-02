@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "53";
+var OHSIDIAN_INK_REV = "54";
 (function () {
   "use strict";
 
@@ -1385,6 +1385,52 @@ var OHSIDIAN_INK_REV = "53";
     var dx = pts[pts.length - 1][0] - pts[0][0];
     var dy = pts[pts.length - 1][1] - pts[0][1];
     return Math.sqrt(dx * dx + dy * dy) <= Math.max(8, diag * 0.3);
+  }
+
+  function localShapeGuess(pts) {
+    if (!isClosedStroke(pts)) return 0;
+    var rax = minAreaRect(pts);
+    if (!rax) return 0;
+    var cu = (rax.maxU + rax.minU) / 2;
+    var cv = (rax.maxV + rax.minV) / 2;
+    var hu = (rax.maxU - rax.minU) / 2;
+    var hv = (rax.maxV - rax.minV) / 2;
+    if (hu < 3 || hv < 3) return 0;
+    var corners = [
+      [cu - hu, cv - hv], [cu + hu, cv - hv],
+      [cu + hu, cv + hv], [cu - hu, cv + hv]
+    ];
+    var cornerTol = Math.min(hu, hv) * 0.35;
+    var hitCorners = 0;
+    for (var c = 0; c < 4; c++) {
+      var hit = false;
+      for (var i = 0; i < pts.length; i++) {
+        var u = pts[i][0] * rax.c + pts[i][1] * rax.s;
+        var v = -pts[i][0] * rax.s + pts[i][1] * rax.c;
+        var ddx = u - corners[c][0];
+        var ddy = v - corners[c][1];
+        if (ddx * ddx + ddy * ddy <= cornerTol * cornerTol) { hit = true; break; }
+      }
+      if (hit) hitCorners++;
+    }
+    // Four clustered corners is a square/rectangle; a triangle only hits three.
+    if (hitCorners >= 4) return 6;
+    // Closed and radially even -> circle/ellipse.
+    var sum = 0, sum2 = 0;
+    for (var j = 0; j < pts.length; j++) {
+      var pu = pts[j][0] * rax.c + pts[j][1] * rax.s;
+      var pv = -pts[j][0] * rax.s + pts[j][1] * rax.c;
+      var ru = (pu - cu) / hu;
+      var rv = (pv - cv) / hv;
+      var rr = Math.sqrt(ru * ru + rv * rv);
+      sum += rr;
+      sum2 += rr * rr;
+    }
+    var n = pts.length;
+    var mean = sum / n;
+    var variance = Math.max(0, sum2 / n - mean * mean);
+    if (mean > 0.7 && mean < 1.3 && Math.sqrt(variance) < 0.16) return 2;
+    return 0;
   }
 
   function applyNativeShape(type) {
@@ -4766,6 +4812,21 @@ var OHSIDIAN_INK_REV = "53";
     }
     var stroke = a.stroke;
     if (!stroke.pts.length) return;
+    // If Pen Kit did not call back before the lift, still make a closed square
+    // or circle into a clean shape. This is a local fallback, not a second
+    // recognizer for arbitrary doodles.
+    if (state.shapeMode && !a.shapeApplied && stroke.tool === "pen") {
+      var guess = localShapeGuess(stroke.pts);
+      if (guess) {
+        var gpts = buildShapePoints(guess, stroke.pts, stroke);
+        if (gpts) {
+          stroke.shape = guess;
+          stroke.pts = gpts;
+          stroke.bbox = bboxOf(gpts);
+          inkTrace("shapeLocal", { type: guess, points: gpts.length });
+        }
+      }
+    }
     // Persist the snapped geometry, not the wobbly samples: the sidecar and
     // the PDF annotation must both show the straight line the user saw.
     if (stroke.straight === true && stroke.pts.length > 2) straightenStroke(stroke);
