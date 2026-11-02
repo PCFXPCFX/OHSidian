@@ -105,6 +105,12 @@ web_engine/src/main/resources/resfile/resources/app/obsidian.asar
 # Device-agent runs write screenshots/reports here; they are not source.
 reports/
 
+# stylus-eval artifacts (recordings, GIFs, reports) are regenerated locally.
+artifacts/
+
+# Machine-specific harness config: hdc serial + device vault path.
+scripts/stylus-eval/config.local.json
+
 # Operator-only device agent: kept on the maintainer's machine, never checked
 # out by GitHub Actions and never present in a release build.
 /tools/device-agent/

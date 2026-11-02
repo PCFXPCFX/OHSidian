@@ -4522,3 +4522,61 @@ PDF 写回 payload 也把高亮笔排到最前面，外部阅读器里高亮注�
   1. 荧光笔盖住黑色笔迹时黑色不再变淡；
   2. PDF 写回后笔迹与注释是否重合；
   3. 旧页面重写后是否归位。
+
+## 第 205 轮 (2026-11-02): 手写特性回归评测 + 宣传素材流水线（ink v58）
+
+### 一、目标
+
+发版前手动跑一遍，确认增量代码没有破坏既有手写功能；同时把每个功能录成
+MP4 + GIF，自动生成酷安/B 站可直接用的文案与素材清单。
+
+### 二、实现
+
+新增 `scripts/stylus-eval/`：
+
+| 文件 | 作用 |
+|---|---|
+| `run.mjs` | CLI：`list` / `capture` / `gate` / `--selftest`；人工引导逐场景录制 |
+| `manifest.mjs` | 12 个场景：原版行为、我们的行为、操作步骤、探针、断言、宣传文案 |
+| `lib/device.mjs` | hdc 封装：设备发现、launch/force-stop、install、file send/recv、时钟偏差、能力探测 |
+| `lib/capture.mjs` | 录制策略：`screenrecord` / `snapshot_display` 帧 / fixture；切片、GIF、封面 |
+| `lib/logs.mjs` | hilog 解析：`probe:<name> {json}` + `PdfInk` 等原生行，按 `_ts` 归档 |
+| `lib/checks.mjs` | 声明式断言：count / value / ratio / exists / absent / sequence / manual |
+| `lib/report.mjs` | `REPORT.md`（技术报告）+ `PROMO.md`（酷安/B 站文案与素材清单） |
+| `fixtures/` | 测试仓库：空白练习页 + 手写生成的上半页印刷黑字 PDF |
+
+### 三、新增探针（release 构建由 stripDevProbeCalls 剥离）
+
+`inkStroke`（压力/线宽/点数/时长/straight/shape/predict/blend）、`inkErase`
+（mode/removed/changed/ms）、`inkShape` + `inkShapeGuess`、`inkLasso` +
+`inkLassoAction`、`inkPredict`、`inkTool`、`inkPref`、`pdfBlend`、
+`pdfEmbedBlend`；`pdfPayload` 补 `hl`/`tools`/`originX/Y`。
+
+`probeHook()` 统一写入 `_ts`（渲染层 `Date.now()`），解决 hilog 前缀只有
+秒级设备时间、无法把事件映射到场景窗口的问题。
+
+### 四、门禁与基线
+
+- 断言只写不变量（压力到达渲染层、线宽比 >1.35、整笔橡皮 removed>=1、
+  PDF 载荷 hl>=1 且写回 ok=true 等），绝对值只进报告。
+- 缺探针直接失败：防止装错 release 构建或改动删掉探测点。
+- `--bless` 记录 `baseline.json`，之后 gate 对偏差 >50% 打警告；
+  `--strict-drift` 升级为失败。
+- 录制自动降级：无 `screenrecord` 时用截图帧（带真实时间戳），
+  GIF >9.5MB 自动降分辨率重编。
+
+### 五、验证
+
+- `node scripts/stylus-eval/run.mjs --selftest`：合成 120 帧 + 伪造 10 条探针，
+  跑通“解析 → 断言 → 切片 → GIF → 报告”，负向用例按预期失败 → `SELFTEST PASS`。
+  产物 `artifacts/stylus-eval/selftest/`（仅链路验证，不能宣传）。
+- 场景清单与断言见 `scripts/stylus-eval/manifest.mjs`；使用说明见
+  `docs/STYLUS-EVAL.md`。
+- 按你的要求**没有联机设备**：真机 `--mode capture` / `--mode gate` 尚未执行。
+
+### 六、注意
+
+- `docs/RELEASE.md` 的发布步骤已加入手写回归门禁。
+- `artifacts/` 与 `scripts/stylus-eval/config.local.json` 已 gitignore。
+- 本轮只改了探针与评测脚本，未重新构建 HAP；发版前仍需按常规流程构建，
+  并用 `verify-release.cjs` 确认 release asar 无探针残留。

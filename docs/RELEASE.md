@@ -95,14 +95,18 @@ Get-FileHash .\OHSidian-v1.2.0-*-icon-unsigned.hap -Algorithm MD5
 
 1. 本地按 `docs/CHANGES-2026-09.md` 的提交计划完成 commit
    (可用 `bash scripts/make-commits.sh` 分批执行);
-2. `git push origin main`(或当前分支);
-3. 确认 GitHub Actions 里的 `build-release`(workflow_dispatch)能跑通;
-4. `git tag v1.2.0 && git push origin v1.2.0` —— **tag 就是版本号**:
+2. **手写回归门禁**(改到 `ohsidian-ink.js` / Pen Kit / PDF 写回时必跑):
+   `node scripts/stylus-eval/run.mjs --mode gate`。它按提示逐项验证压感、荧光笔、
+   橡皮、一笔成形、套索等功能，失败退出码 1。详见 `docs/STYLUS-EVAL.md`；
+   需要宣传素材时用 `--mode capture` 生成 MP4/GIF 与 `PROMO.md`；
+3. `git push origin main`(或当前分支);
+4. 确认 GitHub Actions 里的 `build-release`(workflow_dispatch)能跑通;
+5. `git tag v1.2.0 && git push origin v1.2.0` —— **tag 就是版本号**:
    CI 以 tag 为准(自动把 versionName/versionCode 写入 app.json5 再
    构建,versionCode = 主*1e6+次*1e4+修订,如 1.2.1→1020001),
    app.json5 里的值只是 workflow_dispatch 无 tag 构建时的回退;
-5. Actions 自动构建并创建 Release,检查附件(hap + 两个哈希文件);
-6. Release 正文由 `scripts/ci/release-notes-template.md` 渲染生成
+6. Actions 自动构建并创建 Release,检查附件(hap + 两个哈希文件);
+7. Release 正文由 `scripts/ci/release-notes-template.md` 渲染生成
    (想改文案直接编辑该模板,`{{HAP_TABLE}}`/`{{SHA256}}`/`{{MD5}}`/
    `{{VERSION}}` 为自动填充的占位符);如需补充单次发布的已知问题等,
    在 Release 页面上手动编辑即可。

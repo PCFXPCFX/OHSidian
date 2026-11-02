@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "57";
+var OHSIDIAN_INK_REV = "58";
 (function () {
   "use strict";
 
@@ -278,7 +278,13 @@ var OHSIDIAN_INK_REV = "57";
   function probeHook(event, data) {
     try {
       var h = window.__ohsidianProbeHooks;
-      if (h && typeof h.emit === "function") h.emit(event, data || {});
+      if (h && typeof h.emit === "function") {
+        // The renderer clock travels with the payload: native hilog prefixes
+        // carry device time but seconds-level `date` is all hdc gives us, and
+        // the harness needs per-event ordering across scene windows.
+        if (data && typeof data === "object") data._ts = Date.now();
+        h.emit(event, data || {});
+      }
     } catch (e) {}
   }
   /* OHSIDIAN_DEV_PROBE_END */
@@ -494,6 +500,7 @@ var OHSIDIAN_INK_REV = "57";
   function setPref(key, value) {
     var p = readPrefs();
     p[key] = value;
+    probeHook("inkPref", { key: key, value: value });
     return writePrefs(p);
   }
 
@@ -1442,8 +1449,11 @@ var OHSIDIAN_INK_REV = "57";
     if (!stroke || stroke.tool !== "pen") return false;
     // Pen Kit sometimes labels a closed hand-drawn square as a polyline.
     // A closed stroke is much more useful as the minimum-area rectangle than
-    // as an untouched freehand polygon.
-    if ((type === 3 || type === 0) && isClosedStroke(stroke.pts)) type = 6;
+    // as an untouched freehand polygon — unless the local radial test says it
+    // is a circle, in which case forcing a rectangle was visibly wrong.
+    if ((type === 3 || type === 0) && isClosedStroke(stroke.pts)) {
+      type = localShapeGuess(stroke.pts) === 2 ? 2 : 6;
+    }
     var out = buildShapePoints(type, stroke.pts, stroke);
     if (!out || out.length < 2) {
       inkTrace("shapeReject", { type: type, points: stroke.pts.length });
@@ -1472,6 +1482,12 @@ var OHSIDIAN_INK_REV = "57";
     state.shapeApplied++;
     inkStatus("已成形", 600);
     inkTrace("shape", { type: type, points: out.length });
+    probeHook("inkShape", {
+      source: "native",
+      type: type,
+      points: out.length,
+      closed: isClosedStroke(out)
+    });
     return true;
   }
 
@@ -2766,6 +2782,12 @@ var OHSIDIAN_INK_REV = "57";
           if (entry.live && entry.live.style.mixBlendMode !== bm) {
             entry.live.style.mixBlendMode = bm;
           }
+          if (entry._blendProbe !== bm || !entry._blendProbeAt ||
+            nowMs() - entry._blendProbeAt > 500) {
+            entry._blendProbe = bm;
+            entry._blendProbeAt = nowMs();
+            probeHook("pdfBlend", { page: entry.index, mode: bm });
+          }
         } catch (eBlend) {}
         var ctx = entry.cv.getContext("2d");
         ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -3708,6 +3730,12 @@ var OHSIDIAN_INK_REV = "57";
           var bm = pdfEntryDark(this.pageEl) ? "normal" : "multiply";
           if (this.base && this.base.style.mixBlendMode !== bm) this.base.style.mixBlendMode = bm;
           if (this.live && this.live.style.mixBlendMode !== bm) this.live.style.mixBlendMode = bm;
+          if (this._blendProbe !== bm || !this._blendProbeAt ||
+            nowMs() - this._blendProbeAt > 500) {
+            this._blendProbe = bm;
+            this._blendProbeAt = nowMs();
+            probeHook("pdfEmbedBlend", { mode: bm });
+          }
         } catch (eBm) {}
         var ctx = this.base.getContext("2d");
         ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -4842,6 +4870,7 @@ var OHSIDIAN_INK_REV = "57";
           schedulePdfWrite(a.surface);
         }
         inkStatus("已移动选中墨迹", 900);
+        probeHook("inkLassoAction", { action: "move", n: a.ids ? a.ids.length : 0 });
       }
       redrawEraseSurface(a.surface, a.entry);
       updateSelectionBox();
@@ -4871,6 +4900,14 @@ var OHSIDIAN_INK_REV = "57";
         markPdfPageDirty(a.surface, a.space);
         schedulePdfWrite(a.surface);
       }
+      probeHook("inkErase", {
+        mode: a.immediate ? (state.eraserOnlyHl ? "hl" : "stroke") : "partial",
+        changed: a.changed === true,
+        removed: a.removed || 0,
+        points: a.erasePts ? a.erasePts.length : 0,
+        visual: a.visualErased === true,
+        ms: Math.round(nowMs() - (a.t0 || nowMs()))
+      });
       return;
     }
     var stroke = a.stroke;
@@ -4880,6 +4917,7 @@ var OHSIDIAN_INK_REV = "57";
     // recognizer for arbitrary doodles.
     if (state.shapeMode && !a.shapeApplied && stroke.tool === "pen") {
       var guess = localShapeGuess(stroke.pts);
+      probeHook("inkShapeGuess", { type: guess, points: stroke.pts.length });
       if (guess) {
         var gpts = buildShapePoints(guess, stroke.pts, stroke);
         if (gpts) {
@@ -4887,6 +4925,12 @@ var OHSIDIAN_INK_REV = "57";
           stroke.pts = gpts;
           stroke.bbox = bboxOf(gpts);
           inkTrace("shapeLocal", { type: guess, points: gpts.length });
+          probeHook("inkShape", {
+            source: "local",
+            type: guess,
+            points: gpts.length,
+            closed: true
+          });
         }
       }
     }
@@ -4894,8 +4938,54 @@ var OHSIDIAN_INK_REV = "57";
     // the PDF annotation must both show the straight line the user saw.
     if (stroke.straight === true && stroke.pts.length > 2) straightenStroke(stroke);
     stroke.bbox = bboxOf(stroke.pts);
+    stroke.predict = a.predictCount || 0;
     finishStroke(a.surface, a.entry, stroke);
   }
+
+  /* OHSIDIAN_DEV_PROBE_START */
+  /**
+   * Compact metrics for the device-agent probe. scripts/stylus-eval turns
+   * these into pass/fail checks; keep the payload small enough for one hilog
+   * line (the probe drops events after 6000 per session).
+   */
+  function inkStrokeStats(stroke, surface, entry) {
+    var pts = stroke.pts || [];
+    var step = Math.max(1, Math.floor(pts.length / 48));
+    var pmin = 1, pmax = 0, wmin = 1e9, wmax = 0;
+    for (var i = 0; i < pts.length; i += step) {
+      var p = pts[i][2];
+      if (typeof p !== "number" || !isFinite(p)) p = 1;
+      var w = widthFor(stroke, p);
+      if (p < pmin) pmin = p;
+      if (p > pmax) pmax = p;
+      if (w < wmin) wmin = w;
+      if (w > wmax) wmax = w;
+    }
+    var blend = "";
+    try {
+      if (surface && surface.kind === "pdf" && entry && entry.cv) {
+        blend = entry.cv.style.mixBlendMode || "";
+      }
+    } catch (eBlendStats) {}
+    return {
+      tool: stroke.tool || "pen",
+      space: stroke.space || "",
+      device: stroke.device || "",
+      points: pts.length,
+      pressureMin: Math.round(pmin * 1000) / 1000,
+      pressureMax: Math.round(pmax * 1000) / 1000,
+      widthMin: Math.round(wmin * 100) / 100,
+      widthMax: Math.round(wmax * 100) / 100,
+      width: Math.round((stroke.width || 0) * 100) / 100,
+      color: stroke.color || "",
+      ms: Math.round(nowMs() - (state.strokeT0 || nowMs())),
+      straight: stroke.straight === true,
+      shape: stroke.shape || 0,
+      predict: stroke.predict || 0,
+      blend: blend
+    };
+  }
+  /* OHSIDIAN_DEV_PROBE_END */
 
   function finishStroke(surface, entry, stroke) {
     // Do NOT clear the live canvas first: it is a desynchronized layer and its
@@ -4905,6 +4995,7 @@ var OHSIDIAN_INK_REV = "57";
     negotiatePressure();
     if (inkAddStroke(surface, stroke)) {
       clearLiveAfterPaint(surface, entry);
+      probeHook("inkStroke", inkStrokeStats(stroke, surface, entry));
       inkTrace("commit", {
         kind: surface.kind,
         space: stroke.space,
@@ -4966,6 +5057,14 @@ var OHSIDIAN_INK_REV = "57";
     if (!isFinite(x) || !isFinite(y)) return;
     state.penPredict = { x: x, y: y, t: nowMs(), id: a.pointerId };
     state.predictEvents++;
+    if (!a.predictCount) {
+      a.predictCount = 1;
+      probeHook("inkPredict", {
+        firstMs: Math.round(nowMs() - (a.t0 || nowMs()))
+      });
+    } else {
+      a.predictCount++;
+    }
     if (state.predictClearTimer) clearTimeout(state.predictClearTimer);
     state.predictClearTimer = setTimeout(function () {
       state.predictClearTimer = 0;
@@ -5063,6 +5162,7 @@ var OHSIDIAN_INK_REV = "57";
     var whole = state.eraserMode === "stroke";
     var onlyHl = state.eraserOnlyHl === true;
     var changed = false;
+    var removed = 0;
     var out = [];
     for (var i = 0; i < doc.strokes.length; i++) {
       var st = doc.strokes[i];
@@ -5094,6 +5194,7 @@ var OHSIDIAN_INK_REV = "57";
         // Drop the whole stroke; write-back replaces the page's annotations
         // from the remaining sidecar strokes.
         changed = true;
+        removed++;
         continue;
       }
       var runs = [];
@@ -5115,6 +5216,7 @@ var OHSIDIAN_INK_REV = "57";
         continue;
       }
       changed = true;
+      removed++;
       for (var k = 0; k < runs.length; k++) {
         var ns = {};
         for (var sk in st) {
@@ -5128,7 +5230,10 @@ var OHSIDIAN_INK_REV = "57";
     }
     if (!changed) return 0;
     doc.strokes = out;
-    if (active) active.changed = true;
+    if (active) {
+      active.changed = true;
+      active.removed = (active.removed || 0) + removed;
+    }
     return 1;
   }
 
@@ -5450,6 +5555,7 @@ var OHSIDIAN_INK_REV = "57";
     if (sel.space.indexOf("pdf:") === 0) markPdfPageDirty(sel.surface, sel.space);
     if (sel.surface.kind === "pdf" || sel.surface.kind === "pdfembed") schedulePdfWrite(sel.surface);
     inkStatus("已复制 " + newIds.length + " 笔", 1100);
+    probeHook("inkLassoAction", { action: "duplicate", n: newIds.length });
   }
 
   function deleteSelection() {
@@ -5476,6 +5582,7 @@ var OHSIDIAN_INK_REV = "57";
     redrawEraseSurface(sel.surface, sel.entry);
     if (sel.space.indexOf("pdf:") === 0) markPdfPageDirty(sel.surface, sel.space);
     if (sel.surface.kind === "pdf" || sel.surface.kind === "pdfembed") schedulePdfWrite(sel.surface);
+    probeHook("inkLassoAction", { action: "delete", n: removed });
     clearSelection();
     inkStatus("已删除 " + removed + " 笔", 1100);
   }
@@ -5488,6 +5595,10 @@ var OHSIDIAN_INK_REV = "57";
       return;
     }
     selectStrokes(a.surface, a.entry, pts);
+    probeHook("inkLasso", {
+      points: pts.length,
+      selected: state.selection && state.selection.ids ? state.selection.ids.length : 0
+    });
   }
 
   // Palm rejection: a full-screen guard exists only while the pen is down.
@@ -6590,11 +6701,20 @@ var OHSIDIAN_INK_REV = "57";
         color: ss.color
       });
     }
+    var toolCount = {};
+    for (var tj = 0; tj < list.length; tj++) {
+      var tName = list[tj].tool || "pen";
+      toolCount[tName] = (toolCount[tName] || 0) + 1;
+    }
     probeHook("pdfPayload", {
       page: page,
       mode: isDom ? "normalized" : "vector",
       style: state.pdfStyle,
       strokes: list.length,
+      hl: toolCount.highlighter || 0,
+      tools: toolCount,
+      originX: Math.round(originX * 100) / 100,
+      originY: Math.round(originY * 100) / 100,
       pts: totalPts,
       sample: sample
     });
@@ -7590,6 +7710,16 @@ var OHSIDIAN_INK_REV = "57";
     }
     state.tool = tool;
     inkToolMode(tool);
+    probeHook("inkTool", {
+      tool: tool,
+      width: Math.round((state.width || 0) * 100) / 100,
+      hlWidth: state.hlWidth || 0,
+      shape: state.shapeMode === true,
+      shapeSupported: state.shapeSupported === true,
+      predict: state.predictWanted === true,
+      eraserMode: state.eraserMode,
+      onlyHl: state.eraserOnlyHl === true
+    });
     if (tool !== "pointer" && !activeSurfaceNow()) {
       state.pendingTool = tool;
       inkStatus("手写层准备中…", 1800);
