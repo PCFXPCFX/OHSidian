@@ -8,6 +8,17 @@ MP4 + GIF，直接用于酷安/B 站宣传。
 - 产物：`artifacts/stylus-eval/<时间>-<版本>/`（已 gitignore）
 - 不需要设备也能验证链路：`node scripts/stylus-eval/run.mjs --selftest`
 
+## 术语
+
+| 叫法 | 指什么 |
+|---|---|
+| **原版 Obsidian** | 官方 Obsidian（桌面/移动端），没有鸿蒙平板适配，也没有手写层 |
+| **平板适配版** | 本项目早期只做触摸/窗口/避让的提交（`initial` … `window frame update`） |
+| **手写魔改版** | 当前版本：在平板适配之上加了 M-Pencil、PDF 写回、一笔成形等（ink v58） |
+
+报告里的“原版”列统一指**原版 Obsidian**；仓库里的 commit 都是我们的平板魔改，
+不再用某个旧 tag 冒充原版。
+
 ## 一、为什么这样设计
 
 手写功能没法用纯单元测试覆盖：输入是笔尖压力、倾斜、设备采样率，输出是画布像素、

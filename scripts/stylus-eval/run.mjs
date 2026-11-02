@@ -120,8 +120,8 @@ function printSceneHeader(scene, index) {
   out("");
   out(C.bold(`──────────────────────────────────────────────────────────────`));
   out(C.bold(`${String(index + 1).padStart(2, "0")} · ${scene.title}`) + C.dim(`  [${scene.group}]`));
-  out(C.dim(`原版 OHsidian：${scene.stock}`));
-  out(C.dim(`平板魔改版：${scene.ours}`));
+  out(C.dim(`原版 Obsidian：${scene.stock}`));
+  out(C.dim(`手写魔改版：${scene.ours}`));
   if (scene.setup && scene.setup.length) {
     out(C.cyan("准备："));
     for (const s of scene.setup) out("  · " + s);
