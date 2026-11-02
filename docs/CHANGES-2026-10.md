@@ -4139,3 +4139,66 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 - 风险点：若 WebEngine 在笔尖完全静止时不派发 `pointermove`，压力只在按下瞬间可读；
   灵敏度调低/调高可绕过，后续可接入 ArkTS 压力样本做兜底。
 - 本次审计的源改动**不单独出包**，随下一版功能构建一起出 HAP 并补哈希。
+
+## 第 199 轮 (2026-11-02): 整笔橡皮 + 一笔成形（鸿蒙）+ 点预测（v44）
+
+### 一、整笔橡皮
+
+- 新增 `inkEraserMode`（`partial` / `stroke`）与 `inkEraserOnlyHl`：
+  - **局部擦除**：沿用原来的按半径切分笔迹；
+  - **整笔擦除**：橡皮圆碰到哪一笔，整条删除（华为笔记的“擦除整个笔划”）；
+  - **仅擦荧光笔**：以上两种模式都只作用于 highlighter。
+- **整笔 / 仅荧光笔**模式不再用 `destination-out` 只挖一个圆（那会暂时擦掉下面不该动的笔迹）：按下/移动时直接改 `doc.strokes` 并重绘当前页，
+  抬笔时统一写历史；撤销、PDF 脏页、离开时写回都复用原链路。
+- 压感橡皮（按住变橡皮）也读取该模式；整笔模式下同样即时删除整笔。
+- 设置：`输入与手势 → 擦除方式 / 仅擦荧光笔`；诊断里显示 `橡皮 方式=整笔 · 仅荧光笔=否 · 半径=…`。
+
+### 二、一笔成形（接入鸿蒙 Pen Kit）
+
+- 原生 `electron/src/main/ets/pages/Index.ets`：
+  - 新增 `InstantShapeGenerator`（`@kit.Penkit`，API 12+），`setPauseTime(500)`；
+  - 只在 renderer 打开 shape 模式时把 `onPageTouch` 的笔事件喂给 `processTouchEvent`；
+  - `onShapeRecognized` 只把 **`shapeType`** 通过 IPC `{event:'shape'}` 发回，避免把 ArkUI
+    的 `Path2D` 塞进 Web 层；
+  - `aboutToDisappear` 时 `release()`；`stylusInfo` 新增 `shape` 支持位。
+- 渲染层新增 `buildShapePoints()`：根据 `shapeType` + 当前笔画点集重建几何，支持
+  **直线、圆/椭圆、矩形、平行四边形、菱形、等腰/等边三角形、五角星、五边形、抛物线、
+  单/双箭头直线、单/双箭头抛物线**（type 1/2/6/7/9/10/11/12/13/14/15–20）。
+  - 矩形/椭圆用 PCA 求主轴，支持倾斜；
+  - 图形宽度统一（`widthFor` 对 `stroke.shape` 返回固定宽度），不再受压力影响；
+  - 识别后 `a.shapeApplied=true`，后续移动不再追加自由点；抬笔按普通笔画提交，
+    sidecar 与 PDF 写回都是标准折线；
+  - shape 模式与“停留变直”“压感橡皮”互斥：驻留手势留给鸿蒙识别，避免同一停顿触发两种行为。
+- 入口：工具条新增 **△ 一笔成形** 按钮（可随时开关），设置里同一开关；默认关闭。
+- 诊断：`一笔成形=开/事件数`、`系统 … 一笔成形=支持/不支持`。
+
+### 三、点预测（PointPredictor）
+
+- 原生 `PointPredictor`（`@kit.Penkit`）：笔移动时按 ≥12 ms 节流取预测点，IPC 发
+  `{event:'penPredict', x, y}`；`predict` 支持位随 `stylusInfo` 上报。
+- 渲染层只在 **live 层** 画预测尾巴：
+  - 由 `requestLiveFrame` 把预测点转成 surface 坐标后拼在真实点后临时绘制；
+  - 上限 18 surface 单位、后退方向丢弃、80 ms 过期自动清掉；
+  - **不写入** `stroke.pts` / sidecar / PDF，实点到达即被真实笔迹替换；
+  - `pdfembed`（归一化坐标）暂不启用，避免单位混用。
+- 设置：`输入与手势 → 笔迹预测（实验）`，默认关闭；诊断显示 `预测=开/事件数`。
+
+### 四、构建与验证
+
+- `node --check` OK；`update-obsidian --repatch` + `verify-asar` + `verify-release` 全绿。
+- HAP（release，无探针）：
+
+| 产物 | 大小/时间 | SHA-256 |
+|---|---|---|
+| `electron-default-signed.hap`（ink v46） | 121,065,492 B / 2026-11-02 16:14:06 | `F3924351281AC4C1E4D928A7ED2DB42160D0C5BFF9DD62707E7A2EF3236092D1` |
+
+- 设备仍离线（10.0.0.104 不通），**未装机验证**。
+
+### 五、待真机确认
+
+1. 整笔橡皮：局部/整笔/仅荧光笔三种组合，撤销与 PDF 写回是否一致。
+2. 一笔成形：△ 打开后画线/圆/矩形/箭头，停顿半秒是否变标准图形；若原生识别不出，
+   看诊断 `一笔成形` 事件数是否增加（增加=分类到了但几何被拒；不增加=引擎没回调）。
+3. 点预测：打开后跟手是否改善、是否出现回弹/尾巴滞后；不好用就保持关闭。
+4. 已知限制：几何由本地拟合而非原生 `shapeString`，旋转矩形/椭圆已用 PCA，但三角形/星形
+   仍是正立；如需完全复刻鸿蒙形状，后续再解析 `shapeString`。

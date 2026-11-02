@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "41";
+var OHSIDIAN_INK_REV = "46";
 (function () {
   "use strict";
 
@@ -51,8 +51,19 @@ var OHSIDIAN_INK_REV = "41";
     hlWidth: 16,
     hlStraight: true,
     holdStraight: true,
+    shapeMode: false,
+    shapeSupported: false,
+    shapeEvents: 0,
+    shapeApplied: 0,
+    predictWanted: false,
+    predictSupported: false,
+    predictEvents: 0,
+    penPredict: null,
+    predictClearTimer: 0,
     pressureEraser: true,
     pressureEraserSens: 60,
+    eraserMode: "partial",
+    eraserOnlyHl: false,
     curve: "linear",
     palm: true,
     fingerDraw: false,
@@ -559,8 +570,12 @@ var OHSIDIAN_INK_REV = "41";
     state.hlWidth = Number(pref("inkHlWidth", 16)) || 16;
     state.hlStraight = pref("inkHlStraight", true) !== false;
     state.holdStraight = pref("inkHoldStraight", true) !== false;
+    state.shapeMode = pref("inkShapeMode", false) === true;
+    state.predictWanted = pref("inkPredict", false) === true;
     state.pressureEraser = pref("inkPressureEraser", true) !== false;
     state.pressureEraserSens = clamp(Number(pref("inkPressureEraserSens", 60)) || 0, 0, 100);
+    state.eraserMode = pref("inkEraserMode", "partial") === "stroke" ? "stroke" : "partial";
+    state.eraserOnlyHl = pref("inkEraserOnlyHl", false) === true;
     state.color = pref("inkColor", "#1f1f1f");
     state.hlColor = pref("inkHlColor", "#ffd54a");
     state.colorAuto = pref("inkColorAuto", true) !== false;
@@ -928,6 +943,8 @@ var OHSIDIAN_INK_REV = "41";
     // constant no matter how hard the pen presses, otherwise a line of text
     // gets darker/thicker bands wherever the hand happens to press harder.
     if (stroke.tool === "highlighter") return Math.max(0.35, stroke.width);
+    // Recognized shapes (一笔成形) use one uniform width like a stencil.
+    if (stroke.shape) return Math.max(0.35, stroke.width);
     var w = stroke.width * (0.35 + 1.65 * pressureCurve(p));
     return Math.max(0.35, w);
   }
@@ -976,6 +993,10 @@ var OHSIDIAN_INK_REV = "41";
   function armStraightenTimer(a) {
     if (!a || a.kind !== "stroke" || !a.stroke || a.stroke.tool === "highlighter") return;
     if (state.holdStraight === false) return;
+    // In shape mode the native InstantShapeGenerator owns the pause; letting
+    // the straightening timer also fire would race it and flatten curves. If
+    // the device has no shape engine, keep the straightening fallback.
+    if (state.shapeMode && state.shapeSupported) return;
     if (a.holdTimer) clearTimeout(a.holdTimer);
     a.holdTimer = setTimeout(function () {
       a.holdTimer = 0;
@@ -987,6 +1008,270 @@ var OHSIDIAN_INK_REV = "41";
       straightenStroke(a.stroke);
       requestLiveFrame();
     }, 430);
+  }
+
+  // ---------------------------------------------------------------------
+  // Instant shape (Huawei Notes "一笔成形")
+  // ---------------------------------------------------------------------
+  // Classification comes from Pen Kit's InstantShapeGenerator; the geometry
+  // is rebuilt here in surface space so the result stays a normal stroke that
+  // can be undone and written back as a PDF polyline.
+  function shapeP(x, y) {
+    return [x, y, 0.55, 0, 0, 0];
+  }
+
+  function principalAxes(pts) {
+    var n = pts.length;
+    var cx = 0, cy = 0;
+    for (var i = 0; i < n; i++) { cx += pts[i][0]; cy += pts[i][1]; }
+    if (n > 0) { cx /= n; cy /= n; }
+    var sxx = 0, syy = 0, sxy = 0;
+    for (var j = 0; j < n; j++) {
+      var dx = pts[j][0] - cx;
+      var dy = pts[j][1] - cy;
+      sxx += dx * dx;
+      syy += dy * dy;
+      sxy += dx * dy;
+    }
+    var theta = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+    var c = Math.cos(theta);
+    var s = Math.sin(theta);
+    var minU = 1e9, maxU = -1e9, minV = 1e9, maxV = -1e9;
+    for (var k = 0; k < n; k++) {
+      var u = (pts[k][0] - cx) * c + (pts[k][1] - cy) * s;
+      var v = -(pts[k][0] - cx) * s + (pts[k][1] - cy) * c;
+      if (u < minU) minU = u;
+      if (u > maxU) maxU = u;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+    return {
+      cx: cx, cy: cy, c: c, s: s,
+      minU: minU, maxU: maxU, minV: minV, maxV: maxV
+    };
+  }
+
+  function axesPoint(ax, u, v) {
+    return shapeP(ax.cx + u * ax.c - v * ax.s, ax.cy + u * ax.s + v * ax.c);
+  }
+
+  function ellipseShape(ax) {
+    var rx = (ax.maxU - ax.minU) / 2;
+    var ry = (ax.maxV - ax.minV) / 2;
+    if (rx < 2 || ry < 2) return null;
+    var cu = (ax.maxU + ax.minU) / 2;
+    var cv = (ax.maxV + ax.minV) / 2;
+    var out = [];
+    for (var i = 0; i <= 64; i++) {
+      var t = (i / 64) * Math.PI * 2;
+      out.push(axesPoint(ax, cu + Math.cos(t) * rx, cv + Math.sin(t) * ry));
+    }
+    return out;
+  }
+
+  function closedShape(points) {
+    if (!points || points.length < 2) return null;
+    var out = points.slice();
+    out.push(shapeP(points[0][0], points[0][1]));
+    return out;
+  }
+
+  function arrowLineShape(s, e, startArrow, endArrow, stroke) {
+    var dx = e[0] - s[0], dy = e[1] - s[1];
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 2) return null;
+    var ux = dx / len, uy = dy / len;
+    var px = -uy, py = ux;
+    var hl = Math.min(len * 0.28, Math.max(7, (Number(stroke.width) || 2.4) * 5));
+    var out = [shapeP(s[0], s[1]), shapeP(e[0], e[1])];
+    if (endArrow) {
+      out.push(shapeP(e[0] - ux * hl + px * hl * 0.55, e[1] - uy * hl + py * hl * 0.55));
+      out.push(shapeP(e[0], e[1]));
+      out.push(shapeP(e[0] - ux * hl - px * hl * 0.55, e[1] - uy * hl - py * hl * 0.55));
+    }
+    if (startArrow) {
+      out.push(shapeP(s[0], s[1]));
+      out.push(shapeP(s[0] + ux * hl + px * hl * 0.55, s[1] + uy * hl + py * hl * 0.55));
+      out.push(shapeP(s[0], s[1]));
+      out.push(shapeP(s[0] + ux * hl - px * hl * 0.55, s[1] + uy * hl - py * hl * 0.55));
+    }
+    return out;
+  }
+
+  function parabolaShape(s, e, pts, startArrow, endArrow, stroke) {
+    var dx = e[0] - s[0], dy = e[1] - s[1];
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 4) return null;
+    var ux = dx / len, uy = dy / len;
+    var px = -uy, py = ux;
+    // Signed maximum deviation from the chord decides which way the arc bows.
+    var dev = 0;
+    for (var i = 1; i < pts.length - 1; i++) {
+      var vx = pts[i][0] - s[0];
+      var vy = pts[i][1] - s[1];
+      var d = vx * px + vy * py;
+      if (Math.abs(d) > Math.abs(dev)) dev = d;
+    }
+    if (Math.abs(dev) < 2) dev = len * 0.18;
+    var ctrlX = (s[0] + e[0]) / 2 + px * dev * 2;
+    var ctrlY = (s[1] + e[1]) / 2 + py * dev * 2;
+    var out = [];
+    for (var k = 0; k <= 32; k++) {
+      var t = k / 32;
+      var a = (1 - t) * (1 - t);
+      var b = 2 * (1 - t) * t;
+      var c = t * t;
+      out.push(shapeP(a * s[0] + b * ctrlX + c * e[0],
+        a * s[1] + b * ctrlY + c * e[1]));
+    }
+    var headLen = Math.min(len * 0.22, Math.max(7, (Number(stroke.width) || 2.4) * 5));
+    if (endArrow) {
+      var tx = e[0] - ctrlX, ty = e[1] - ctrlY;
+      var tl = Math.sqrt(tx * tx + ty * ty) || 1;
+      var eux = tx / tl, euy = ty / tl;
+      out.push(shapeP(e[0] - eux * headLen - euy * headLen * 0.55,
+        e[1] - euy * headLen + eux * headLen * 0.55));
+      out.push(shapeP(e[0], e[1]));
+      out.push(shapeP(e[0] - eux * headLen + euy * headLen * 0.55,
+        e[1] - euy * headLen - eux * headLen * 0.55));
+    }
+    if (startArrow) {
+      var sx = ctrlX - s[0], sy = ctrlY - s[1];
+      var sl = Math.sqrt(sx * sx + sy * sy) || 1;
+      var sux = sx / sl, suy = sy / sl;
+      out.push(shapeP(s[0], s[1]));
+      out.push(shapeP(s[0] + sux * headLen - suy * headLen * 0.55,
+        s[1] + suy * headLen + sux * headLen * 0.55));
+      out.push(shapeP(s[0], s[1]));
+      out.push(shapeP(s[0] + sux * headLen + suy * headLen * 0.55,
+        s[1] + suy * headLen - sux * headLen * 0.55));
+    }
+    return out;
+  }
+
+  function buildShapePoints(type, pts, stroke) {
+    if (!pts || pts.length < 3) return null;
+    var bb = bboxOf(pts);
+    var w = bb[2] - bb[0];
+    var h = bb[3] - bb[1];
+    if (w < 5 && h < 5) return null;
+    var s = pts[0];
+    var e = pts[pts.length - 1];
+    var ax = principalAxes(pts);
+    var cx = (bb[0] + bb[2]) / 2;
+    var cy = (bb[1] + bb[3]) / 2;
+    var i;
+    switch (type) {
+      case 1: // straight line
+        return [shapeP(s[0], s[1]), shapeP(e[0], e[1])];
+      case 2: // circle / ellipse
+        return ellipseShape(ax);
+      case 6: { // rectangle (oriented bounding box)
+        var cu = (ax.maxU + ax.minU) / 2;
+        var cv = (ax.maxV + ax.minV) / 2;
+        var hu = (ax.maxU - ax.minU) / 2;
+        var hv = (ax.maxV - ax.minV) / 2;
+        if (hu < 2 || hv < 2) return null;
+        return closedShape([
+          axesPoint(ax, cu - hu, cv - hv),
+          axesPoint(ax, cu + hu, cv - hv),
+          axesPoint(ax, cu + hu, cv + hv),
+          axesPoint(ax, cu - hu, cv + hv)
+        ]);
+      }
+      case 7: { // parallelogram
+        var dxp = w * 0.22;
+        return closedShape([
+          shapeP(bb[0] + dxp, bb[1]),
+          shapeP(bb[2], bb[1]),
+          shapeP(bb[2] - dxp, bb[3]),
+          shapeP(bb[0], bb[3])
+        ]);
+      }
+      case 9: // rhombus
+        return closedShape([
+          shapeP(cx, bb[1]), shapeP(bb[2], cy),
+          shapeP(cx, bb[3]), shapeP(bb[0], cy)
+        ]);
+      case 10: // isosceles triangle
+      case 11: // equilateral triangle
+        return closedShape([
+          shapeP(cx, bb[1]), shapeP(bb[2], bb[3]), shapeP(bb[0], bb[3])
+        ]);
+      case 12: { // pentagram
+        var rOut = Math.min(w, h) * 0.5;
+        var rIn = rOut * 0.42;
+        var star = [];
+        for (i = 0; i < 10; i++) {
+          var ra = -Math.PI / 2 + i * Math.PI / 5;
+          var rr = (i & 1) ? rIn : rOut;
+          star.push(shapeP(cx + Math.cos(ra) * rr, cy + Math.sin(ra) * rr));
+        }
+        return closedShape(star);
+      }
+      case 13: { // pentagon
+        var rp = Math.min(w, h) * 0.5;
+        var pent = [];
+        for (i = 0; i < 5; i++) {
+          var pa = -Math.PI / 2 + i * Math.PI * 2 / 5;
+          pent.push(shapeP(cx + Math.cos(pa) * rp, cy + Math.sin(pa) * rp));
+        }
+        return closedShape(pent);
+      }
+      case 14: // parabola
+        return parabolaShape(s, e, pts, false, false, stroke);
+      case 15:
+        return arrowLineShape(s, e, true, false, stroke);
+      case 16:
+        return arrowLineShape(s, e, false, true, stroke);
+      case 17:
+        return arrowLineShape(s, e, true, true, stroke);
+      case 18:
+        return parabolaShape(s, e, pts, true, false, stroke);
+      case 19:
+        return parabolaShape(s, e, pts, false, true, stroke);
+      case 20:
+        return parabolaShape(s, e, pts, true, true, stroke);
+      default:
+        return null;
+    }
+  }
+
+  function applyNativeShape(type) {
+    if (!state.shapeMode || !(type > 0)) return false;
+    var a = state.active;
+    if (!a || a.kind !== "stroke" || a.shapeApplied) return false;
+    var stroke = a.stroke;
+    if (!stroke || stroke.tool !== "pen") return false;
+    var out = buildShapePoints(type, stroke.pts, stroke);
+    if (!out || out.length < 2) {
+      inkTrace("shapeReject", { type: type, points: stroke.pts.length });
+      return false;
+    }
+    stopPressureEraserWatch(a);
+    if (a.holdTimer) {
+      clearTimeout(a.holdTimer);
+      a.holdTimer = 0;
+    }
+    stroke.shape = type;
+    stroke.straight = false;
+    stroke.pts = out;
+    stroke.bbox = bboxOf(out);
+    a.shapeApplied = true;
+    a.liveDrawn = out.length;
+    clearPenPredict();
+    try {
+      if (a.surface.kind === "markdown" || a.surface.kind === "canvas" ||
+        a.surface.kind === "pdfembed") {
+        a.surface.drawLive(stroke);
+      } else {
+        a.surface.drawLive(a.entry, stroke);
+      }
+    } catch (e) {}
+    state.shapeApplied++;
+    inkStatus("已成形", 600);
+    inkTrace("shape", { type: type, points: out.length });
+    return true;
   }
 
   // ---------------------------------------------------------------------
@@ -1006,6 +1291,10 @@ var OHSIDIAN_INK_REV = "41";
 
   function pressureEraserArmed(a, pr) {
     if (state.pressureEraser === false) return false;
+    // Shape mode owns the pause gesture; triggering both at ~500 ms would
+    // randomly erase instead of drawing a shape. Without a native shape engine
+    // there is no such conflict, so keep pressure erase available.
+    if (state.shapeMode && state.shapeSupported) return false;
     if (!a || a.kind !== "stroke" || !a.stroke) return false;
     if (a.stroke.device !== "pen") return false;
     if (a.stroke.tool !== "pen" && a.stroke.tool !== "highlighter") return false;
@@ -1069,6 +1358,7 @@ var OHSIDIAN_INK_REV = "41";
       changed: false,
       erasePts: [[sp[0], sp[1]]],
       visualErased: false,
+      immediate: state.eraserMode === "stroke" || state.eraserOnlyHl === true,
       pointerId: a.pointerId,
       t0: nowMs(),
       lastSampleAt: nowMs(),
@@ -1076,7 +1366,10 @@ var OHSIDIAN_INK_REV = "41";
     };
     state.active = st;
     drawCursor(cx, cy, surface, true);
-    if (typeof surface.erasePreview === "function") {
+    if (st.immediate) {
+      eraseAt(surface, entry, sp[0], sp[1], st);
+      if (st.changed) redrawEraseSurface(surface, entry);
+    } else if (typeof surface.erasePreview === "function") {
       surface.erasePreview(cx, cy, Number(state.eraserPx) || 12, entry);
       st.visualErased = true;
     } else {
@@ -3632,6 +3925,16 @@ var OHSIDIAN_INK_REV = "41";
     }
   }
 
+  function sendShapeMode() {
+    if (!state.ipcReady) return;
+    sendAction({ action: "shapeMode", on: state.shapeMode === true });
+  }
+
+  function sendPredictMode() {
+    if (!state.ipcReady) return;
+    sendAction({ action: "predictMode", on: state.predictWanted === true });
+  }
+
   /**
    * Only DOM pressure feeds the real/fake classification. ArkTS samples are
    * the fallback, not evidence about the engine: counting them would make
@@ -3876,15 +4179,22 @@ var OHSIDIAN_INK_REV = "41";
         changed: false,
         erasePts: [[sp[0], sp[1]]],
         visualErased: false,
+        immediate: state.eraserMode === "stroke" || state.eraserOnlyHl === true,
         pointerId: ev.pointerId,
         t0: state.strokeT0,
         lastSampleAt: state.strokeT0
       };
       palmOn();
       inkWritingChrome(true);
-      inkTrace("eraseDown", { space: eraseSpace });
+      inkTrace("eraseDown", { space: eraseSpace, mode: state.eraserMode });
       drawCursor(ev.clientX, ev.clientY, surface, true);
-      if (typeof surface.erasePreview === "function") {
+      if (state.active.immediate) {
+        // Whole-stroke and highlighter-only modes must remove the affected
+        // strokes immediately; destination-out would hide all ink under the
+        // circle (including pen strokes that must survive), then repaint.
+        eraseAt(surface, entry, sp[0], sp[1], state.active);
+        if (state.active.changed) redrawEraseSurface(surface, entry);
+      } else if (typeof surface.erasePreview === "function") {
         surface.erasePreview(ev.clientX, ev.clientY, Number(state.eraserPx) || 12, entry);
         state.active.visualErased = true;
       } else {
@@ -3910,6 +4220,7 @@ var OHSIDIAN_INK_REV = "41";
       screenWidth: pxWidth ? baseWidth : 0,
       opacity: tool === "highlighter" ? 0.38 : 1,
       straight: tool === "highlighter" && state.hlStraight !== false,
+      shape: 0,
       device: ev.pointerType === "pen" ? "pen" : (ev.pointerType || "?"),
       pts: [],
       bbox: null,
@@ -3954,6 +4265,7 @@ var OHSIDIAN_INK_REV = "41";
     if (surface.kind === "markdown" || surface.kind === "canvas" || surface.kind === "pdfembed") surface.drawLive(stroke);
     else surface.drawLive(entry, stroke);
     state.active.liveDrawn = stroke.pts.length;
+    clearPenPredict();
     requestLiveFrame();
     startPressureEraserWatch(state.active, pr);
   }
@@ -3997,13 +4309,23 @@ var OHSIDIAN_INK_REV = "41";
         ? a.surface.toSpaceOn(a.entry, ev.clientX, ev.clientY)
         : a.surface.toSpace(ev.clientX, ev.clientY);
       drawCursor(ev.clientX, ev.clientY, a.surface, true);
-      if (a.erasePts && typeof a.surface.erasePreview === "function") {
+      if (a.immediate) {
+        if (a.erasePts) a.erasePts.push([sp[0], sp[1]]);
+        var removedNow = eraseAt(a.surface, a.entry, sp[0], sp[1], a);
+        if (removedNow) redrawEraseSurface(a.surface, a.entry);
+      } else if (a.erasePts && typeof a.surface.erasePreview === "function") {
         a.erasePts.push([sp[0], sp[1]]);
         a.surface.erasePreview(ev.clientX, ev.clientY, Number(state.eraserPx) || 12, a.entry);
         a.visualErased = true;
       } else {
         eraseAt(a.surface, a.entry, sp[0], sp[1], a);
       }
+      return;
+    }
+    if (a.shapeApplied) {
+      // The native recognizer has already replaced this stroke with the ideal
+      // shape; further pen movement must not append freehand points to it.
+      a.lastSampleAt = nowMs();
       return;
     }
     var list = [ev];
@@ -4088,6 +4410,7 @@ var OHSIDIAN_INK_REV = "41";
     if (ev.preventDefault) ev.preventDefault();
     if (ev.stopPropagation) ev.stopPropagation();
     state.active = null;
+    clearPenPredict();
     if (a.holdTimer) {
       clearTimeout(a.holdTimer);
       a.holdTimer = 0;
@@ -4102,11 +4425,11 @@ var OHSIDIAN_INK_REV = "41";
       points: a.stroke && a.stroke.pts ? a.stroke.pts.length : 0
     });
     if (a.kind === "erase") {
-      // The visible holes were cleared directly on the base canvas while the
-      // pen moved. Apply the path to the document once, at pen-up, then repaint
-      // once. This removes the per-move full-page redraw that made erasing
-      // feel like 1–2 fps.
-      if (a.erasePts && a.erasePts.length &&
+      // Partial mode clears pixels on the base canvas while the pen moves and
+      // applies the path to the document once, at pen-up. Whole-stroke mode
+      // already removed each touched stroke in the move handler, so it must
+      // not replay the points here (the strokes are gone).
+      if (!a.immediate && a.erasePts && a.erasePts.length &&
         typeof a.surface.erasePreview === "function") {
         for (var ei = 0; ei < a.erasePts.length; ei++) {
           eraseAt(a.surface, a.entry, a.erasePts[ei][0], a.erasePts[ei][1], a);
@@ -4117,8 +4440,7 @@ var OHSIDIAN_INK_REV = "41";
         saveSoon(a.doc);
       }
       if (a.changed || a.visualErased) {
-        if (a.surface && typeof a.surface.scheduleRedraw === "function") a.surface.scheduleRedraw();
-        else if (a.surface && typeof a.surface.redraw === "function") a.surface.redraw();
+        redrawEraseSurface(a.surface, a.entry);
         updateToolbarState();
       }
       if (a.changed && a.space && (a.space.indexOf("pdf:") === 0 ||
@@ -4189,6 +4511,32 @@ var OHSIDIAN_INK_REV = "41";
     return [x0, y0, x1, y1];
   }
 
+  function clearPenPredict() {
+    if (state.predictClearTimer) {
+      clearTimeout(state.predictClearTimer);
+      state.predictClearTimer = 0;
+    }
+    state.penPredict = null;
+  }
+
+  function handlePenPredict(msg) {
+    if (!state.predictWanted) return;
+    var a = state.active;
+    if (!a || a.kind !== "stroke" || a.shapeApplied) return;
+    var x = Number(msg.x) + (Number(state.offsetX) || 0);
+    var y = Number(msg.y) + (Number(state.offsetY) || 0);
+    if (!isFinite(x) || !isFinite(y)) return;
+    state.penPredict = { x: x, y: y, t: nowMs(), id: a.pointerId };
+    state.predictEvents++;
+    if (state.predictClearTimer) clearTimeout(state.predictClearTimer);
+    state.predictClearTimer = setTimeout(function () {
+      state.predictClearTimer = 0;
+      state.penPredict = null;
+      requestLiveFrame();
+    }, 80);
+    requestLiveFrame();
+  }
+
   var liveFrame = 0;
   function requestLiveFrame() {
     if (liveFrame) return;
@@ -4200,14 +4548,54 @@ var OHSIDIAN_INK_REV = "41";
         state.lastLatency = nowMs() - state.latencyT0;
         state.latencyCaptured = true;
       }
-      if (a.surface.drawLiveIncremental && a.liveDrawn) {
+      // Point prediction only extends the live layer; the committed stroke and
+      // its sidecar never see the predicted point.
+      var drawStroke = a.stroke;
+      var pred = state.penPredict;
+      if (pred && !a.shapeApplied && a.surface.kind !== "pdfembed" &&
+        nowMs() - pred.t < 80) {
+        try {
+          var xy = a.surface.kind === "pdf"
+            ? a.surface.toSpaceOn(a.entry, pred.x, pred.y)
+            : a.surface.toSpace(pred.x, pred.y);
+          if (xy) {
+            var pts = a.stroke.pts;
+            var last = pts[pts.length - 1];
+            var pdx = xy[0] - last[0];
+            var pdy = xy[1] - last[1];
+            var pd = Math.sqrt(pdx * pdx + pdy * pdy);
+            if (pd > 0.6 && pts.length >= 2) {
+              var prev = pts[pts.length - 2];
+              var fdx = last[0] - prev[0];
+              var fdy = last[1] - prev[1];
+              // A predictor sometimes overshoots backwards at a sharp turn;
+              // drawing that tail looks like a rubber band, so drop it.
+              if (pdx * fdx + pdy * fdy < 0) pd = 0;
+            }
+            if (pd > 0.6) {
+              var maxTail = 18;
+              if (pd > maxTail) {
+                var k = maxTail / pd;
+                xy = [last[0] + pdx * k, last[1] + pdy * k];
+              }
+              var clone = {};
+              for (var ck in a.stroke) {
+                if (Object.prototype.hasOwnProperty.call(a.stroke, ck)) clone[ck] = a.stroke[ck];
+              }
+              clone.pts = pts.concat([[xy[0], xy[1], last[2], last[3], last[4], last[5]]]);
+              drawStroke = clone;
+            }
+          }
+        } catch (ePred) {}
+      }
+      if (drawStroke === a.stroke && a.surface.drawLiveIncremental && a.liveDrawn) {
         a.surface.drawLiveIncremental(a.stroke, a.liveDrawn);
         a.liveDrawn = a.stroke.pts ? a.stroke.pts.length : 0;
       } else if (a.surface.kind === "markdown" || a.surface.kind === "canvas" || a.surface.kind === "pdfembed") {
-        a.surface.drawLive(a.stroke);
+        a.surface.drawLive(drawStroke);
         a.liveDrawn = a.stroke.pts ? a.stroke.pts.length : 0;
       } else {
-        a.surface.drawLive(a.entry, a.stroke);
+        a.surface.drawLive(a.entry, drawStroke);
         a.liveDrawn = a.stroke.pts ? a.stroke.pts.length : 0;
       }
     });
@@ -4221,10 +4609,11 @@ var OHSIDIAN_INK_REV = "41";
   }
 
   // Eraser: remove touched parts of strokes on one space, split into runs.
-  // History is recorded by the caller once per eraser stroke, not per move.
+  // "stroke" mode removes the whole stroke that the eraser touches; "partial"
+  // splits it. History is recorded by the caller once per eraser stroke.
   function eraseAt(surface, entry, x, y, active) {
     var doc = docFor(surface);
-    if (!doc) return;
+    if (!doc) return 0;
     var space = inkSpaceOf(surface, entry);
     var eraserScale = surface.kind === "pdf"
       ? (surface.widthScaleOn(entry) || 1)
@@ -4233,6 +4622,8 @@ var OHSIDIAN_INK_REV = "41";
     var eraserPx = Number(state.eraserPx) || 12;
     var r = eraserPx / (eraserScale || 1);
     var r2 = r * r;
+    var whole = state.eraserMode === "stroke";
+    var onlyHl = state.eraserOnlyHl === true;
     var changed = false;
     var out = [];
     for (var i = 0; i < doc.strokes.length; i++) {
@@ -4241,10 +4632,30 @@ var OHSIDIAN_INK_REV = "41";
         out.push(st);
         continue;
       }
+      if (onlyHl && st.tool !== "highlighter") {
+        out.push(st);
+        continue;
+      }
       var bb = st.bbox;
       if (bb && (x < bb[0] - r || x > bb[2] + r ||
         y < bb[1] - r || y > bb[3] + r)) {
         out.push(st);
+        continue;
+      }
+      if (whole) {
+        var hitWhole = false;
+        for (var wj = 0; wj < st.pts.length; wj++) {
+          var wp = st.pts[wj];
+          var wdx = wp[0] - x, wdy = wp[1] - y;
+          if (wdx * wdx + wdy * wdy <= r2) { hitWhole = true; break; }
+        }
+        if (!hitWhole) {
+          out.push(st);
+          continue;
+        }
+        // Drop the whole stroke; write-back replaces the page's annotations
+        // from the remaining sidecar strokes.
+        changed = true;
         continue;
       }
       var runs = [];
@@ -4277,9 +4688,22 @@ var OHSIDIAN_INK_REV = "41";
         out.push(ns);
       }
     }
-    if (!changed) return;
+    if (!changed) return 0;
     doc.strokes = out;
     if (active) active.changed = true;
+    return 1;
+  }
+
+  function redrawEraseSurface(surface, entry) {
+    try {
+      if (surface.kind === "pdf" && entry && typeof surface.redrawPage === "function") {
+        surface.redrawPage(entry);
+      } else if (typeof surface.scheduleRedraw === "function") {
+        surface.scheduleRedraw();
+      } else if (typeof surface.redraw === "function") {
+        surface.redraw();
+      }
+    } catch (e) {}
   }
 
   // Palm rejection: a full-screen guard exists only while the pen is down.
@@ -4312,6 +4736,7 @@ var OHSIDIAN_INK_REV = "41";
     var a = state.active;
     state.active = null;
     state.penNativeActive = false;
+    clearPenPredict();
     try {
       if (a) {
         if (a.holdTimer) {
@@ -4326,7 +4751,7 @@ var OHSIDIAN_INK_REV = "41";
         } else if (a.kind === "erase" && a.changed && a.doc && a.before) {
           pushHistory(a.doc, a.space, a.before);
           saveSoon(a.doc);
-        } else if (a.kind === "erase" && a.erasePts && a.surface &&
+        } else if (!a.immediate && a.kind === "erase" && a.erasePts && a.surface &&
           typeof a.surface.erasePreview === "function") {
           for (var efi = 0; efi < a.erasePts.length; efi++) {
             eraseAt(a.surface, a.entry, a.erasePts[efi][0], a.erasePts[efi][1], a);
@@ -4661,10 +5086,25 @@ var OHSIDIAN_INK_REV = "41";
         supported: !!msg.supported,
         subscribed: !!msg.subscribed,
         error: msg.error || "",
-        pdf: !!msg.pdf
+        pdf: !!msg.pdf,
+        shape: !!msg.shape,
+        predict: !!msg.predict
       };
+      state.shapeSupported = !!msg.shape;
+      state.predictSupported = !!msg.predict;
       state.ipcReady = true;
       negotiatePressure();
+      sendShapeMode();
+      sendPredictMode();
+      return;
+    }
+    if (msg.event === "shape") {
+      state.shapeEvents++;
+      if (state.shapeMode) applyNativeShape(Number(msg.shapeType) || 0);
+      return;
+    }
+    if (msg.event === "penPredict") {
+      handlePenPredict(msg);
       return;
     }
     if (msg.event === "penSamples") {
@@ -5727,6 +6167,7 @@ var OHSIDIAN_INK_REV = "41";
       pen: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/>',
       highlighter: '<path d="M9 11l-5 5v4h4l5-5"/><path d="M14 4l6 6-4 4-6-6 4-4z"/>',
       eraser: '<path d="M7 21h13"/><path d="M5 15l6-6 5 5-6 6H6l-1-5z"/>',
+      shape: '<path d="M12 4l8 15H4L12 4z"/><path d="M8.5 14h7"/>',
       undo: '<path d="M9 14l-4-4 4-4"/><path d="M5 10h9a5 5 0 010 10h-3"/>',
       redo: '<path d="M15 14l4-4-4-4"/><path d="M19 10h-9a5 5 0 000 10h3"/>',
       more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
@@ -6005,6 +6446,7 @@ var OHSIDIAN_INK_REV = "41";
     bar.appendChild(mkBtn("pointer", "↖", "指针（选择文字/PDF 高亮）"));
     bar.appendChild(mkBtn("pen", "✎", "笔"));
     bar.appendChild(mkBtn("highlighter", "▤", "高亮笔"));
+    bar.appendChild(mkBtn("shape", "△", "一笔成形（鸿蒙识别）"));
     bar.appendChild(mkBtn("eraser", "⌫", "橡皮（整笔/局部）"));
     bar.appendChild(mkBtn("undo", "↶", "撤销墨迹"));
     bar.appendChild(mkBtn("redo", "↷", "重做墨迹"));
@@ -6193,6 +6635,17 @@ var OHSIDIAN_INK_REV = "41";
       inkTrace("nib", { expanded: true, tool: state.tool, surface: !!activeSurfaceNow() });
       return;
     }
+    if (act === "shape") {
+      state.shapeMode = !state.shapeMode;
+      setPref("inkShapeMode", state.shapeMode);
+      sendShapeMode();
+      if (state.shapeMode && state.tool !== "pen") setTool("pen");
+      inkStatus(state.shapeMode
+        ? (state.shapeSupported ? "一笔成形：画完停顿约半秒" : "一笔成形：本机笔服务不支持")
+        : "一笔成形已关闭", 1800);
+      updateToolbarState();
+      return;
+    }
     if (act === "pointer" || act === "pen" || act === "highlighter" || act === "eraser") {
       setTool(act);
       if (state.barExpanded) scheduleBarHide();
@@ -6273,7 +6726,8 @@ var OHSIDIAN_INK_REV = "41";
     for (var i = 0; i < btns.length; i++) {
       var b = btns[i];
       var act = b.getAttribute("data-act");
-      var on = (act === state.tool) || (act === "more" && state.menuOpen);
+      var on = (act === state.tool) || (act === "more" && state.menuOpen) ||
+        (act === "shape" && state.shapeMode === true);
       if (on) b.classList.add("is-active");
       else b.classList.remove("is-active");
     }
@@ -6538,11 +6992,19 @@ var OHSIDIAN_INK_REV = "41";
       "  " + "手写笔".padEnd(8) + "v" + OHSIDIAN_INK_REV + " 点=" + (pt || "?") + " · 压力档=" + pvals +
         " · 模式=" + state.pressureMode + " · 旁路=" + (state.pressureTapOn ? "开" : "关") +
         " · 压感橡皮=" + (state.pressureEraser ? Math.round(state.pressureEraserSens) : "关") +
+        " · 一笔成形=" + (state.shapeMode ? "开" : "关") + "/" + (state.shapeEvents) +
         " · 首帧=" + Math.round(state.lastLatency) + "ms · 合帧=" + state.coalescedMax,
+      "  " + "橡皮".padEnd(9) + "方式=" + (state.eraserMode === "stroke" ? "整笔" : "局部") +
+        " · 仅荧光笔=" + (state.eraserOnlyHl ? "是" : "否") +
+        " · 半径=" + Math.round(Number(state.eraserPx) || 12) + "px",
       "  " + "视图".padEnd(9) + viewInfo + " · 工具条=" + barInfo + " · 手写层=" +
         (surface ? surface.kind : "无"),
       "  " + "最近笔".padEnd(9) + detail,
-      "  " + "系统".padEnd(10) + "笔服务=" + svc + " · PDFKit=" + pdfKit,
+      "  " + "系统".padEnd(10) + "笔服务=" + svc + " · PDFKit=" + pdfKit +
+        " · 一笔成形=" + (info && info.shape ? "支持" : "不支持") +
+        " · 预测=" + (info && info.predict ? "支持" : "不支持"),
+      "  " + "预测".padEnd(9) + (state.predictWanted ? "开" : "关") +
+        " · 事件=" + state.predictEvents,
       "  " + "手势".padEnd(10) + "最近=" + (state.lastGesture || "无") + "(" + gAge + ") · 共 " +
         state.gestureCount + " 次",
       "  " + "墨迹".padEnd(10) + "层=" + (surface ? surface.kind : "无") +
@@ -6698,6 +7160,19 @@ var OHSIDIAN_INK_REV = "41";
           if (state.tool === "eraser") clearCursor();
         });
         ersCtl.appendChild(ersInput);
+        var erModeCtl = ctx.itemEl(input, "擦除方式",
+          "局部擦除按橡皮半径切掉笔迹；整笔擦除碰到哪一笔就删掉整笔（华为笔记的“擦除整个笔划”）。");
+        selectEl(erModeCtl, [
+          ["partial", "局部擦除（默认）"],
+          ["stroke", "整笔擦除"]
+        ], state.eraserMode, function (v) {
+          state.eraserMode = v === "stroke" ? "stroke" : "partial";
+          setPref("inkEraserMode", state.eraserMode);
+        });
+        ctx.toggleEl(ctx.itemEl(input, "仅擦荧光笔",
+          "打开后橡皮只擦高亮笔迹，普通笔迹不受影响。", true),
+          state.eraserOnlyHl === true,
+          function (on) { state.eraserOnlyHl = !!on; setPref("inkEraserOnlyHl", !!on); });
         ctx.toggleEl(ctx.itemEl(input, "压感橡皮擦",
           "与华为笔记一致：笔尖用力按住并停顿约半秒，暂时变成橡皮；移动擦除，抬笔继续书写。笔画一旦移动过就不会触发，避免把写完的线条擦掉。", true),
           pref("inkPressureEraser", true) !== false,
@@ -6964,6 +7439,24 @@ var OHSIDIAN_INK_REV = "41";
           "笔尖在笔画末端停住约 0.4 秒，接近直线的笔画会自动拉直；写字时停顿不会触发。", true),
           pref("inkHoldStraight", true) !== false,
           function (on) { state.holdStraight = !!on; setPref("inkHoldStraight", !!on); });
+        ctx.toggleEl(ctx.itemEl(color, "一笔成形（鸿蒙识别）",
+          "打开后画完一笔停顿约半秒，由鸿蒙笔服务识别并替换为直线/圆/矩形/三角/箭头等标准图形；也可点工具条上的 △ 快速开关。", true),
+          pref("inkShapeMode", false) === true,
+          function (on) {
+            state.shapeMode = !!on;
+            setPref("inkShapeMode", !!on);
+            sendShapeMode();
+            if (state.shapeMode && state.tool !== "pen") setTool("pen");
+            updateToolbarState();
+          });
+        ctx.toggleEl(ctx.itemEl(color, "笔迹预测（实验）",
+          "用鸿蒙 Pen Kit 的 PointPredictor 只在 live 层多画一个“预测点”，实点到达即替换，用来降低跟手延迟；关闭后完全走真实事件。", true),
+          pref("inkPredict", false) === true,
+          function (on) {
+            state.predictWanted = !!on;
+            setPref("inkPredict", !!on);
+            sendPredictMode();
+          });
 
         var pdf = ctx.newGroup("PDF 与诊断");
         var pdfCtl = ctx.itemEl(pdf, "写入 PDF 后",

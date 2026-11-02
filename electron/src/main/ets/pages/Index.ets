@@ -29,6 +29,7 @@
 
 import { WebWindow, BackPressBridge, NativeVideoOverlay, NativeVideoTheme } from 'web_engine';
 import { StylusAdapter, StylusKind, PenSampleTap } from 'web_engine';
+import { InstantShapeGenerator, ShapeInfo, PointPredictor } from '@kit.Penkit';
 import { PdfInkWriter, PdfInkRequest, PdfInkResult, PdfInkStroke, PdfPreviewProbeResult, PdfPreviewResult, PdfPreviewPixelResult } from 'web_engine';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -305,6 +306,19 @@ struct Index {
   private penPhase: string = 'move';
   private penSampleSent: number = 0;
   private penProbeLogged: number = 0;
+  // Instant shape ("一笔成形"): Pen Kit recognizes the stroke after a pause and
+  // the renderer rebuilds the geometry in its own canvas space. The generator
+  // is fed only while the renderer's shape mode is on.
+  private shapeGen: InstantShapeGenerator | null = null;
+  private shapeModeWanted: boolean = false;
+  private shapeSupported: boolean = false;
+  private shapeForwarded: number = 0;
+  // Pen Kit point prediction: an extra "ahead" point for the renderer's live
+  // layer only. Off by default; the renderer asks for it explicitly.
+  private predictor: PointPredictor | null = null;
+  private predictWanted: boolean = false;
+  private predictAt: number = 0;
+  private predictSent: number = 0;
   private penOwnerXid: string = '';
   private stylusForwarded: number = 0;
   // While a pen is writing (and briefly after), finger hit-testing is blocked
@@ -365,6 +379,47 @@ struct Index {
     } catch (e) {
       console.warn('StylusIpc', 'register failed: ' + JSON.stringify(e));
     }
+    // Pen Kit's instant-shape engine. API 12+; unsupported devices simply leave
+    // shapeSupported=false and the renderer's △ button explains why.
+    try {
+      this.shapeSupported = canIUse('SystemCapability.Stylus.Handwrite');
+      if (this.shapeSupported) {
+        this.shapeGen = new InstantShapeGenerator();
+        this.shapeGen.setPauseTime(500);
+        // Only the classification (shapeType) is consumed; the area mainly
+        // scales the native Path2D, which we do not use.
+        this.shapeGen.notifyAreaChange(1000, 1000);
+        this.shapeGen.onShapeRecognized((info: ShapeInfo) => {
+          if (this.disposed || !this.shapeModeWanted) {
+            return;
+          }
+          this.shapeForwarded++;
+          try {
+            this.sendNativeLine(JSON.stringify({
+              event: 'shape',
+              shapeType: info.shapeType,
+              ts: Date.now()
+            }));
+          } catch (eS) {
+            console.warn('ShapeIpc', 'send failed: ' + JSON.stringify(eS));
+          }
+        });
+        console.info('ShapeIpc', 'instant shape ready');
+      }
+    } catch (eShape) {
+      this.shapeSupported = false;
+      this.shapeGen = null;
+      console.warn('ShapeIpc', 'init failed: ' + JSON.stringify(eShape));
+    }
+    // Point prediction is independent of shape recognition. It is created
+    // lazily per page; failures only disable the feature.
+    try {
+      this.predictor = new PointPredictor();
+      console.info('PredictIpc', 'predictor ready');
+    } catch (ePred) {
+      this.predictor = null;
+      console.warn('PredictIpc', 'init failed: ' + JSON.stringify(ePred));
+    }
   }
 
   aboutToDisappear() {
@@ -376,6 +431,13 @@ struct Index {
     try {
       StylusAdapter.unregister(this.xcomponentId);
     } catch (e) {
+    }
+    try {
+      if (this.shapeGen !== null) {
+        this.shapeGen.release();
+        this.shapeGen = null;
+      }
+    } catch (eShape) {
     }
     if (this.penFlushTimer >= 0) {
       clearTimeout(this.penFlushTimer);
@@ -745,6 +807,12 @@ struct Index {
             // no rect, and must not disturb the overlay state machine.
             if (msg.action === 'penSamplesOn') {
               this.setPenSamplesWanted(msg.on === true);
+            } else if (msg.action === 'shapeMode') {
+              this.setShapeModeWanted(msg.on === true);
+            } else if (msg.action === 'predictMode') {
+              this.predictWanted = msg.on === true;
+              console.info('PredictIpc', 'mode ' + (this.predictWanted ? 'on' : 'off') +
+                ' ready=' + (this.predictor !== null));
             } else if (msg.action === 'stylusInfo') {
               this.sendStylusInfo();
             } else if (msg.action === 'inkLog') {
@@ -842,7 +910,9 @@ struct Index {
       supported: StylusAdapter.isSupported(),
       subscribed: StylusAdapter.isSubscribed(),
       error: StylusAdapter.errorText(),
-      pdf: PdfInkWriter.available()
+      pdf: PdfInkWriter.available(),
+      shape: this.shapeSupported,
+      predict: this.predictor !== null
     }));
   }
 
@@ -909,6 +979,17 @@ struct Index {
     if (this.disposed || event.sourceTool !== SourceTool.Pen) {
       return;
     }
+    // Feed the pen stream to Pen Kit's instant-shape engine only while the
+    // renderer has shape mode on. processTouchEvent must run from onTouch.
+    if (this.shapeGen !== null && this.shapeModeWanted) {
+      try {
+        this.shapeGen.processTouchEvent(event);
+      } catch (eShape) {
+        if (this.shapeForwarded < 3) {
+          console.warn('ShapeIpc', 'process failed: ' + JSON.stringify(eShape));
+        }
+      }
+    }
     // Extend the pen guard on down/move/up; finger contacts during this window
     // are blocked in onPageTouchIntercept before the web engine sees them.
     this.penGuardUntil = Date.now() + 1200;
@@ -926,6 +1007,30 @@ struct Index {
       this.sendNativeLine(JSON.stringify({ event: 'penActive', active: false }));
     } else if (this.penPhase === 'down') {
       this.penPhase = 'move';
+    }
+    if (this.predictWanted && this.predictor !== null && this.penPhase !== 'up') {
+      const now: number = Date.now();
+      if (now - this.predictAt >= 12) {
+        this.predictAt = now;
+        try {
+          const pp = this.predictor.getPredictionPoint(event);
+          const px: number = Number(pp.x);
+          const py: number = Number(pp.y);
+          if (Number.isFinite(px) && Number.isFinite(py)) {
+            this.predictSent++;
+            this.sendNativeLine(JSON.stringify({
+              event: 'penPredict',
+              x: px,
+              y: py,
+              ts: now
+            }));
+          }
+        } catch (ePred) {
+          if (this.predictSent === 0) {
+            console.warn('PredictIpc', 'failed: ' + JSON.stringify(ePred));
+          }
+        }
+      }
     }
     if (this.penId < 0) {
       return;
@@ -1009,6 +1114,14 @@ struct Index {
       this.penFlushTimer = -1;
     }
     console.info('StylusIpc', 'pen samples ' + (on ? 'on' : 'off') + ' xid=' + this.xcomponentId);
+  }
+
+  private setShapeModeWanted(on: boolean): void {
+    if (this.shapeModeWanted === on) {
+      return;
+    }
+    this.shapeModeWanted = on;
+    console.info('ShapeIpc', 'mode ' + (on ? 'on' : 'off') + ' supported=' + this.shapeSupported);
   }
 
   /**
