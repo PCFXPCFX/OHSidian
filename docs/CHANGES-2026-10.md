@@ -4580,3 +4580,54 @@ MP4 + GIF，自动生成酷安/B 站可直接用的文案与素材清单。
 - `artifacts/` 与 `scripts/stylus-eval/config.local.json` 已 gitignore。
 - 本轮只改了探针与评测脚本，未重新构建 HAP；发版前仍需按常规流程构建，
   并用 `verify-release.cjs` 确认 release asar 无探针残留。
+
+## 第 206 轮 (2026-11-02): 平板全屏窗口被浮窗记忆尺寸撑不满（BUG-003）
+
+### 一、现象
+
+真机（BKY-W10，2800×1840，dpr 2.25）冷启动后 Obsidian 只占左上
+`1960×1593` 物理像素，右侧和下方露出桌面；顶部只剩系统浮窗的三点手柄，
+没有标题栏/最大化按钮。用户描述为“画面不全屏”。
+
+### 二、诊断（hilog + WMS + 文件）
+
+- `window_pcmode_switch_status` 读出 `false`，所以 ArkTS 走触摸分支：
+  `layout fullscreen true applied for pcMode=false`、`decor=none`、隐藏系统标题栏。
+- 但 WMS 明确是自由多窗：`NotifyFreeMultiWindowModeResume: IsPcMode 1`。
+- 引擎把 BrowserWindow 尺寸记在 `<filesDir>/<vaultId>.json`：
+  `{"x":142,"y":137,"width":869,"height":706,"isMaximized":false}`。
+  869×706 是 **DIP**，×2.25 正好是 1955×1588 ≈ 1960×1593。
+- 引擎启动时 `setBounds skipped: window 1 is fullscreen on touch form factor`，
+  于是窗口矩形是 2800×1840、内容却按记忆的 869×706 DIP 创建；
+  ArkUI `windowRect` 与 `getWindowStatus()` 都报全屏，掩盖了真实内容尺寸。
+
+### 三、修复
+
+1. 新增 `inWindowForm()`：`pcModeEnabled || getWindowStatus() 为
+   FLOATING/SPLIT_SCREEN`。decor、视口、`forceFullscreenWindow()`、
+   `setWindowLayoutFullScreen()`、`ohsidian-mode.json` 的 `systemMode`
+   全部改为按这个形态判断，避免“系统是浮窗、我们按触摸全屏处理”。
+2. 新增 `repairTouchWindowState()`：在 `loadContent` 启动引擎**之前**，
+   仅当 `deviceType=tablet`、非 PC 模式、窗口状态不是 FLOATING/SPLIT 时，
+   把**当前打开仓库**的 `<vaultId>.json` 校正为
+   `x/y=0`、`width=display.width/dpr`、`height=display.height/dpr`、
+   `isMaximized=true`。这里必须写 DIP：上一版误写 2800×1840，
+   引擎按 2800 CSS px 建页，`innerWidth=2800 @dpr 2.25`，整个 UI 被放大裁切。
+3. 自由窗口形态下跳过 `enforceFrameStyle()` 的 1s 复位，系统标题栏
+   （拖动/最大化入口）不会被应用自绘边框样式重新藏掉。
+
+### 四、验证
+
+- 冷启动 hilog：
+  `touch window state repaired: 2800x1840 -> 1244x818 dip (2800x1840 px @2.25)`
+  → `InkUI boot ... "viewport":[1244,820],"dpr":2.25`
+- 截图：内容铺满 2800×1840，文字尺寸恢复正常，桌面不再露出。
+- 连续两次冷启动均正常（状态文件已是 `1244x818/isMaximized:true`）。
+- HAP：121,129,970 B / 2026-11-02 22:52:22，
+  SHA-256 `31FF899A15F2A060A7DEB0CD5771B1394531599F23B9586BA8F4964E889E7C64`。
+
+### 五、注意
+
+- 该状态文件是 Electron 的 DIP 单位；以后改窗口尺寸不要写物理像素。
+- 真正的自由窗口（`getWindowStatus()` = FLOATING）不校正，保留用户尺寸。
+- 本轮 HAP 仍是 release 构建（探针被剥离）；手写回归需要另做 `--agent` 构建。

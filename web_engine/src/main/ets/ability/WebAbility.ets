@@ -69,6 +69,24 @@ interface AvailableAreaRect {
   height: number;
 }
 
+// BUG-003: shapes of the engine's per-vault window record + vault registry
+// (both live in <filesDir>, written by Electron's BrowserWindow state code).
+interface VaultRecord {
+  path?: string;
+  open?: boolean;
+  ts?: number;
+}
+
+interface WindowStateRecord {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  isMaximized?: boolean;
+  devTools?: boolean;
+  zoom?: number;
+}
+
 export class WebAbility extends WebBaseAbility {
   private static WINDOW_CLOSE: number = 1000;
   // Share / 碰一碰 cold-start handoff: the share want arrives in onCreate,
@@ -250,7 +268,7 @@ export class WebAbility extends WebBaseAbility {
   //    UI". The viewport is now the full edge-to-edge rect and the renderer
   //    avoids the bars with CSS - one avoidance path for every form factor.
   private computeViewportBound(prop: window.WindowProperties): WindowBound {
-    const full = !this.pcModeEnabled;
+    const full = !this.inWindowForm();
     if (full || !this.mainWindow) {
       return {
         left: prop.windowRect.left,
@@ -650,7 +668,7 @@ export class WebAbility extends WebBaseAbility {
     // drag surface until the rect landed. The caption APIs now run only in
     // window mode, once per caption state (see ensureSystemCaption).
     let decor: string = 'none';
-    if (this.pcModeEnabled) {
+    if (this.inWindowForm()) {
       try {
         // Caption presence is a FULL-DISPLAY question (round 92): an
         // available-area-maximized free window still shows the caption with
@@ -663,7 +681,7 @@ export class WebAbility extends WebBaseAbility {
             rect.height >= displayClass.height;
         }
         if (winObj !== undefined && !captionless) {
-          if (this.ensureSystemCaption(winObj)) {
+          if (this.ensureSystemCaption(winObj, this.freeWindowForm())) {
             decor = 'system';
           }
         } else {
@@ -690,13 +708,17 @@ export class WebAbility extends WebBaseAbility {
   // re-issuing them per event is pure churn. Returns false when the device
   // rejects the caption (this tablet answers 801), so the caller can keep
   // decor='none' and let the renderer keep its own .titlebar as drag surface.
-  private ensureSystemCaption(winObj: window.Window): boolean {
+  private ensureSystemCaption(winObj: window.Window, forceCaption: boolean = false): boolean {
     // Round 178 (BUG-002): the frame style is checked BEFORE the latch. It used
     // to be checked after it, and because captionApplied was already true from a
     // boot that ran before the renderer had published 窗口边框样式, 隐藏 /
     // Obsidian 风格 never got past the latch: the system caption stayed up next
     // to Obsidian's own titlebar - the "two sets of window buttons" report.
-    if (this.appDrawsFrame()) {
+    //
+    // BUG-003 (2026-11-02): a free/multi-window on a tablet needs the system
+    // caption even when the app-drawn frame style is active - otherwise the
+    // floating window has no drag surface and no maximize button at all.
+    if (this.appDrawsFrame() && !forceCaption) {
       this.frameEnforceAt = 0;   /* force one enforcement pass */
       this.enforceFrameStyle();
       return false;
@@ -747,6 +769,12 @@ export class WebAbility extends WebBaseAbility {
   // log and the round-trip budget, not correctness.
   private enforceFrameStyle(): void {
     if (!this.mainWindow) {
+      return;
+    }
+    // BUG-003: in a free window the system caption owns drag/maximize; letting
+    // the app-drawn frame style hide it again would re-create the control-less
+    // floating window on the next 1 s tick.
+    if (this.freeWindowForm()) {
       return;
     }
     if (!this.appDrawsFrame()) {
@@ -1157,7 +1185,7 @@ export class WebAbility extends WebBaseAbility {
       return;
     }
     const winObj = this.mainWindow;
-    if (!winObj || !this.pcModeEnabled) {
+    if (!winObj || !this.inWindowForm()) {
       return;
     }
     try {
@@ -1279,8 +1307,126 @@ export class WebAbility extends WebBaseAbility {
   // The window form is excluded by the pcModeEnabled guard below (round 102);
   // 2in1 must stay untouched (its pcModeEnabled is false because the boot read
   // is skipped - H15 - but it is a desktop window, not a touch one).
+  // [OHSidian] Free-window form detection (BUG-003, 2026-11-02).
+  //
+  // `window_pcmode_switch_status` is only the PC-mode switch. HarmonyOS tablets
+  // also expose "自由多窗" (free multi-window) with the switch OFF: WMS logs
+  // `NotifyFreeMultiWindowModeResume: IsPcMode 1`, the app is shown as a
+  // floating 1960x1593 window, yet our boot read says pcMode=false. The old
+  // code then took the touch branch, hid the system caption (`decor=none`),
+  // and skipped forceFullscreenWindow() - leaving a floating window with no
+  // title bar or maximize button and a viewport smaller than the display.
+  //
+  // The window status is the authoritative form-factor signal. Treat FLOATING
+  // and SPLIT_SCREEN as the window form even when the PC switch is off.
+  private windowStatusType(): number {
+    try {
+      if (this.mainWindow) {
+        return this.mainWindow.getWindowStatus() as number;
+      }
+    } catch (eStatus) {
+    }
+    return -1;
+  }
+
+  private freeWindowForm(): boolean {
+    const st: number = this.windowStatusType();
+    return st === window.WindowStatusType.FLOATING ||
+      st === window.WindowStatusType.SPLIT_SCREEN;
+  }
+
+  private inWindowForm(): boolean {
+    return this.pcModeEnabled || this.freeWindowForm();
+  }
+
+  // BUG-003: the engine's remembered BrowserWindow rect lives in
+  // <filesDir>/<vaultId>.json (`{"x":142,"y":137,"width":869,"height":706,
+  // "isMaximized":false}` on this tablet). On a touch tablet the ArkUI window
+  // is FULL_SCREEN, but the engine still creates its surface at the stored
+  // floating size and then refuses setBounds ("window 1 is fullscreen on touch
+  // form factor") - the visible "app content does not fill the screen".
+  // Rewrite that one record for the ACTIVE vault, and only when the window is
+  // really fullscreen (a genuine free window keeps its own rect).
+  private repairTouchWindowState(winObj: window.Window): void {
+    if (deviceInfo.deviceType !== 'tablet' || this.pcModeEnabled) {
+      return;
+    }
+    try {
+      const st: number = winObj.getWindowStatus() as number;
+      if (st === window.WindowStatusType.FLOATING ||
+        st === window.WindowStatusType.SPLIT_SCREEN) {
+        return;
+      }
+    } catch (eStatus) {
+      return;
+    }
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const regPath: string = filesDir + '/obsidian.json';
+      if (!fileIo.accessSync(regPath)) {
+        return;
+      }
+      const reg = JSON.parse(fileIo.readTextSync(regPath)) as Record<string, Object>;
+      const vaults = reg['vaults'] as Record<string, VaultRecord>;
+      if (!vaults) {
+        return;
+      }
+      let active: string = '';
+      const keys: string[] = Object.keys(vaults);
+      for (let i = 0; i < keys.length; i++) {
+        const v = vaults[keys[i]];
+        if (v && v.open === true) {
+          active = keys[i];
+          break;
+        }
+      }
+      if (!active) {
+        return;
+      }
+      const statePath: string = filesDir + '/' + active + '.json';
+      if (!fileIo.accessSync(statePath)) {
+        return;
+      }
+      const state = JSON.parse(fileIo.readTextSync(statePath)) as WindowStateRecord;
+      const disp = display.getDefaultDisplaySync();
+      // The engine's window record is in CSS/DIP units (Electron BrowserWindow
+      // bounds), not physical pixels. Writing the physical 2800x1840 made the
+      // renderer lay out a 2800 CSS-px page at dpr 2.25: innerWidth became
+      // 2800 and the whole UI was clipped/doubled. 869x706 stored on this
+      // tablet * 2.25 = 1955x1588, which is exactly the old content box.
+      const dpr: number = disp.densityPixels > 0 ? disp.densityPixels : 1;
+      const dipW: number = Math.round(disp.width / dpr);
+      const dipH: number = Math.round(disp.height / dpr);
+      const w: number = state.width !== undefined ? state.width : 0;
+      const h: number = state.height !== undefined ? state.height : 0;
+      const maximized: boolean = state.isMaximized === true;
+      if (w === dipW && h === dipH && maximized) {
+        return;
+      }
+      state.x = 0;
+      state.y = 0;
+      state.width = dipW;
+      state.height = dipH;
+      state.isMaximized = true;
+      const out: Record<string, Object> = {};
+      out['x'] = 0;
+      out['y'] = 0;
+      out['width'] = dipW;
+      out['height'] = dipH;
+      out['isMaximized'] = true;
+      out['devTools'] = state.devTools === true;
+      out['zoom'] = state.zoom !== undefined ? state.zoom : 0;
+      this.publishModeFileAtomic(statePath, out);
+      LogUtil.info(TAG, '[OHSidian] touch window state repaired: ' + w + 'x' + h +
+        ' -> ' + dipW + 'x' + dipH + ' dip (' + disp.width + 'x' + disp.height +
+        ' px @' + dpr + ', vault ' + active + ')');
+    } catch (eRepair) {
+      LogUtil.warn(TAG, '[OHSidian] touch window state repair failed: ' + JSON.stringify(eRepair));
+    }
+  }
+
   private forceFullscreenWindow(): void {
-    if (this.pcModeEnabled) {
+    if (this.inWindowForm()) {
       // Window form factor: forcing the display rect is the TOUCH-only
       // correction (docs/window-state-machine.md §1/§2). On a window-mode
       // window it overrides the remembered floating rect and races the
@@ -1350,8 +1496,9 @@ export class WebAbility extends WebBaseAbility {
     this.fullscreenRetryCount++;
     this.fullscreenRetryTimer = setTimeout(() => {
       this.fullscreenRetryTimer = -1;
-      if (this.pcModeEnabled) {
-        // The user is back in window mode - the display rect would be wrong.
+      if (this.inWindowForm()) {
+        // The user is back in window mode (or a free window) - the display
+        // rect would be wrong.
         return;
       }
       LogUtil.info(TAG, 'retrying forced fullscreen rect after 1300002');
@@ -2466,6 +2613,14 @@ export class WebAbility extends WebBaseAbility {
     }
 
     this.mainWindow = windowStage.getMainWindowSync();
+    // BUG-003 (2026-11-02): the engine restores its BrowserWindow bounds from
+    // <filesDir>/<vaultId>.json. When the system hands us a FULL_SCREEN window
+    // but the stored vault state is a small floating rect (869x706 CSS px on
+    // this tablet), the engine keeps that size and skips setBounds because
+    // "window 1 is fullscreen on touch form factor" - the content then sits in
+    // a 1960x1593 box with desktop wallpaper around it. Repair the stored rect
+    // for the active vault BEFORE loadContent starts the engine process.
+    this.repairTouchWindowState(this.mainWindow);
     // Round 99: capture the window id at the only moment it is guaranteed to
     // be readable (see ownerWindowId - the destroy-time query throws 1300002).
     try {
@@ -2649,6 +2804,15 @@ export class WebAbility extends WebBaseAbility {
             // The status event can equally arrive BEFORE the animation
             // settles - reconcile once it has (round 87, A2).
             this.scheduleViewportReconcile();
+            // BUG-003: the free-window form must publish the desktop layout
+            // even when the PC switch is off; and returning from a maximized
+            // free window must publish the touch layout again.
+            if (status === window.WindowStatusType.FLOATING) {
+              this.writeTouchModeFile(true);
+            } else if (status === window.WindowStatusType.FULL_SCREEN ||
+              status === window.WindowStatusType.MAXIMIZE) {
+              this.writeTouchModeFile(this.pcModeEnabled);
+            }
           }
           // Round 153: in the touch form factor the window must BE the
           // display. A status event that reports a floating/maximized window
@@ -2656,7 +2820,7 @@ export class WebAbility extends WebBaseAbility {
           // restored): re-assert it. forceFullscreenWindow is idempotent and
           // returns immediately when the window is already display-sized, so
           // the FULL_SCREEN event of our own resize does not loop.
-          if (!this.pcModeEnabled &&
+          if (!this.inWindowForm() &&
             (status === window.WindowStatusType.FLOATING ||
               status === window.WindowStatusType.MAXIMIZE)) {
             this.forceFullscreenWindow();
@@ -2800,6 +2964,18 @@ export class WebAbility extends WebBaseAbility {
         }, 1000);
       }
       if (deviceInfo.deviceType === 'tablet') {
+        // BUG-003 diagnostic: one line that says whether the system handed us
+        // a free window even though window_pcmode_switch_status is false.
+        try {
+          const dr = mainWin.getWindowProperties().windowRect;
+          const dd = display.getDefaultDisplaySync();
+          LogUtil.info(TAG, '[OHSidian] window form: status=' + this.windowStatusType() +
+            ' rect=' + dr.width + 'x' + dr.height + '+' + dr.left + '+' + dr.top +
+            ' display=' + dd.width + 'x' + dd.height +
+            ' pcMode=' + this.pcModeEnabled + ' inWindow=' + this.inWindowForm());
+        } catch (eForm) {
+          LogUtil.warn(TAG, '[OHSidian] window form probe failed: ' + JSON.stringify(eForm));
+        }
         // Publish the initial real insets once the window geometry exists;
         // avoidAreaChange keeps them fresh afterwards.
         this.pushSafeAreaInsets();
@@ -2809,7 +2985,7 @@ export class WebAbility extends WebBaseAbility {
         // rect is skipped, the window form factor is guarded out), so this is
         // only the safety net for a pre-show resize the WMS rejected
         // (1300002 / MoveToAsync layout timeout).
-        if (!this.pcModeEnabled) {
+        if (!this.inWindowForm()) {
           this.forceFullscreenWindow();
         }
       }
@@ -2821,11 +2997,11 @@ export class WebAbility extends WebBaseAbility {
       // before loadContent, and letting this call hide the caption afterwards
       // would leave a window-mode window with neither the system strip nor
       // Obsidian's own .titlebar. Touch mode has no caption anyway - keep it.
-      if (!this.pcModeEnabled) {
+      if (!this.inWindowForm()) {
         try {
           LogUtil.info(TAG, '[OHSidian] startup decor: hideTitleBar=' + this.hideTitleBar +
             ' keepButtonsPref=' + this.keepSystemTitleButtons() +
-            ' pcMode=' + this.pcModeEnabled);
+            ' pcMode=' + this.pcModeEnabled + ' inWindow=' + this.inWindowForm());
           mainWin.setWindowDecorVisible(!this.hideTitleBar);
           this.decorVisibleLast = !this.hideTitleBar;
         } catch (exception) {
@@ -2862,7 +3038,8 @@ export class WebAbility extends WebBaseAbility {
         // the content while Obsidian drew its own: the "double window controls /
         // covered top-right controls" report on 2in1. Presentation must follow
         // the decor: no frame, no system buttons.
-        const buttonsVisible: boolean = (!this.hideTitleBar && !this.appDrawsFrame()) ||
+        const buttonsVisible: boolean = this.captionApplied ||
+          (!this.hideTitleBar && !this.appDrawsFrame()) ||
           this.keepSystemTitleButtons();
         LogUtil.info(TAG, '[OHSidian] startup title buttons: hideTitleBar=' + this.hideTitleBar +
           ' keepPref=' + this.keepSystemTitleButtons() +
@@ -3394,7 +3571,7 @@ export class WebAbility extends WebBaseAbility {
     if (deviceInfo.deviceType !== 'tablet' && deviceInfo.deviceType !== 'phone') {
       return;
     }
-    const want: boolean = !this.pcModeEnabled;
+    const want: boolean = !this.inWindowForm();
     // Round 154: dedupe. A cold start requests layout-fullscreen=true twice
     // (boot sync + the loadContent re-assert) - device log 07:39:32.063 and
     // .132 both land as SetLayoutFullScreenByApiVersion status 1. The value
@@ -3429,7 +3606,11 @@ export class WebAbility extends WebBaseAbility {
     let systemMode: string = 'desktop';
     if (deviceInfo.deviceType === 'phone' || deviceInfo.deviceType === 'tablet' ||
       deviceInfo.deviceType === '2in1') {
-      systemMode = pcModeEnabled ? 'desktop' : 'touch';
+      // BUG-003: a tablet free window is the desktop form even when the PC
+      // switch reads false; otherwise the renderer applies the mobile layout
+      // inside a 1960x1593 resizable window.
+      const windowForm: boolean = pcModeEnabled || this.freeWindowForm();
+      systemMode = windowForm ? 'desktop' : 'touch';
     }
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
