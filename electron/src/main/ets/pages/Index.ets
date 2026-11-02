@@ -1956,6 +1956,22 @@ struct Index {
       .onTouch((event: TouchEvent) => {
         this.onPageTouch(event);
       })
+      .onAreaChange((_old: Area, now: Area) => {
+        // The shape engine normalizes by the component area. Passing 1000x1000
+        // made a 3:2 tablet look square, so a physically square stroke arrived
+        // skewed and could be classified/sized wrongly. Feed the real size.
+        if (this.shapeGen !== null) {
+          try {
+            const sw: number = Number(now.width);
+            const sh: number = Number(now.height);
+            if (sw > 0 && sh > 0) {
+              // The engine's coordinate system is 1000 units per canvas width.
+              this.shapeGen.notifyAreaChange(1000, Math.round(1000 * sh / sw));
+            }
+          } catch (eArea) {
+          }
+        }
+      })
       .backgroundColor(this.backgroundColor_)
       .opacity(this.opacity_)
       .width('100%')

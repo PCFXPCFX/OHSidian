@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "49";
+var OHSIDIAN_INK_REV = "53";
 (function () {
   "use strict";
 
@@ -50,6 +50,9 @@ var OHSIDIAN_INK_REV = "49";
     color: "#1f1f1f",
     hlColor: "#ffd54a",
     colorAuto: true,
+    palette: ["#1f1f1f", "#d32f2f", "#1565c0"],
+    hlPalette: ["#ffd54a", "#a5d6a7", "#90caf9"],
+    barItems: ["pen", "highlighter", "eraser", "color"],
     width: 2.4,
     hlWidth: 16,
     hlStraight: true,
@@ -584,17 +587,34 @@ var OHSIDIAN_INK_REV = "49";
     state.color = pref("inkColor", "#1f1f1f");
     state.hlColor = pref("inkHlColor", "#ffd54a");
     state.colorAuto = pref("inkColorAuto", true) !== false;
-    var paletteDefault = ["#1f1f1f", "#d32f2f", "#1565c0", "#2e7d32", "#f9a825"];
+    var paletteDefault = ["#1f1f1f", "#d32f2f", "#1565c0"];
     var paletteSaved = pref("inkPalette", null);
     var palette = [];
     if (Array.isArray(paletteSaved)) {
-      for (var pi = 0; pi < paletteSaved.length && palette.length < 5; pi++) {
+      for (var pi = 0; pi < paletteSaved.length && palette.length < 3; pi++) {
         var pc = String(paletteSaved[pi] || "");
         if (/^#[0-9a-f]{6}$/i.test(pc)) palette.push(pc);
       }
     }
-    while (palette.length < 5) palette.push(paletteDefault[palette.length]);
+    while (palette.length < 3) palette.push(paletteDefault[palette.length]);
     state.palette = palette;
+    var barAllowed = ["pointer", "pen", "highlighter", "eraser", "shape", "lasso",
+      "undo", "redo", "color", "width"];
+    var barSaved = pref("inkBarItems", null);
+    var barItems = [];
+    if (Array.isArray(barSaved)) {
+      for (var bi2 = 0; bi2 < barSaved.length; bi2++) {
+        var bid = String(barSaved[bi2] || "");
+        if (barAllowed.indexOf(bid) >= 0 && barItems.indexOf(bid) < 0) barItems.push(bid);
+      }
+    }
+    if (!barItems.length) barItems = ["pen", "highlighter", "eraser", "color"];
+    // A toolbar without any drawing tool is a dead end; keep the pen recoverable.
+    if (barItems.indexOf("pen") < 0 && barItems.indexOf("highlighter") < 0 &&
+      barItems.indexOf("eraser") < 0) {
+      barItems.push("pen");
+    }
+    state.barItems = barItems;
     state.glass = pref("inkGlass", false) === true;
     state.reduceMotion = pref("inkReduceMotion", true) !== false;
     state.lastPenTool = pref("inkLastPenTool", "pen") === "highlighter" ? "highlighter" : "pen";
@@ -1084,6 +1104,79 @@ var OHSIDIAN_INK_REV = "49";
     };
   }
 
+  function hullCross(o, a, b) {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  }
+
+  function convexHull(pts) {
+    var p = [];
+    for (var i = 0; i < pts.length; i++) p.push({ x: pts[i][0], y: pts[i][1] });
+    p.sort(function (a, b) { return a.x - b.x || a.y - b.y; });
+    if (p.length < 3) return p;
+    var lower = [];
+    for (var l = 0; l < p.length; l++) {
+      while (lower.length >= 2 &&
+        hullCross(lower[lower.length - 2], lower[lower.length - 1], p[l]) <= 0) {
+        lower.pop();
+      }
+      lower.push(p[l]);
+    }
+    var upper = [];
+    for (var u = p.length - 1; u >= 0; u--) {
+      while (upper.length >= 2 &&
+        hullCross(upper[upper.length - 2], upper[upper.length - 1], p[u]) <= 0) {
+        upper.pop();
+      }
+      upper.push(p[u]);
+    }
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
+  }
+
+  /**
+   * Minimum-area rectangle over the stroke's hull. PCA is degenerate for a
+   * square (equal eigenvalues -> arbitrary rotation), which made a hand-drawn
+   * square come out rotated or diamond-shaped. Rotating calipers over the hull
+   * locks onto the actual edges instead.
+   */
+  function minAreaRect(pts) {
+    var hull = convexHull(pts);
+    if (hull.length < 3) return null;
+    var best = null;
+    var bestArea = Infinity;
+    for (var i = 0; i < hull.length; i++) {
+      var a = hull[i];
+      var b = hull[(i + 1) % hull.length];
+      var dx = b.x - a.x;
+      var dy = b.y - a.y;
+      var len = Math.sqrt(dx * dx + dy * dy);
+      if (len < 0.01) continue;
+      var ux = dx / len;
+      var uy = dy / len;
+      var vx = -uy;
+      var vy = ux;
+      var minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+      for (var j = 0; j < hull.length; j++) {
+        var pu = hull[j].x * ux + hull[j].y * uy;
+        var pv = hull[j].x * vx + hull[j].y * vy;
+        if (pu < minU) minU = pu;
+        if (pu > maxU) maxU = pu;
+        if (pv < minV) minV = pv;
+        if (pv > maxV) maxV = pv;
+      }
+      var area = (maxU - minU) * (maxV - minV);
+      if (area < bestArea) {
+        bestArea = area;
+        best = {
+          cx: 0, cy: 0, c: ux, s: uy,
+          minU: minU, maxU: maxU, minV: minV, maxV: maxV
+        };
+      }
+    }
+    return best;
+  }
+
   function axesPoint(ax, u, v) {
     return shapeP(ax.cx + u * ax.c - v * ax.s, ax.cy + u * ax.s + v * ax.c);
   }
@@ -1191,6 +1284,7 @@ var OHSIDIAN_INK_REV = "49";
     var s = pts[0];
     var e = pts[pts.length - 1];
     var ax = principalAxes(pts);
+    var rax = minAreaRect(pts) || ax;
     var cx = (bb[0] + bb[2]) / 2;
     var cy = (bb[1] + bb[3]) / 2;
     var i;
@@ -1199,33 +1293,46 @@ var OHSIDIAN_INK_REV = "49";
         return [shapeP(s[0], s[1]), shapeP(e[0], e[1])];
       case 2: // circle / ellipse
         return ellipseShape(ax);
-      case 6: { // rectangle (oriented bounding box)
-        var cu = (ax.maxU + ax.minU) / 2;
-        var cv = (ax.maxV + ax.minV) / 2;
-        var hu = (ax.maxU - ax.minU) / 2;
-        var hv = (ax.maxV - ax.minV) / 2;
+      case 6: { // rectangle / square (minimum-area box over the hull)
+        var cu = (rax.maxU + rax.minU) / 2;
+        var cv = (rax.maxV + rax.minV) / 2;
+        var hu = (rax.maxU - rax.minU) / 2;
+        var hv = (rax.maxV - rax.minV) / 2;
         if (hu < 2 || hv < 2) return null;
         return closedShape([
-          axesPoint(ax, cu - hu, cv - hv),
-          axesPoint(ax, cu + hu, cv - hv),
-          axesPoint(ax, cu + hu, cv + hv),
-          axesPoint(ax, cu - hu, cv + hv)
+          axesPoint(rax, cu - hu, cv - hv),
+          axesPoint(rax, cu + hu, cv - hv),
+          axesPoint(rax, cu + hu, cv + hv),
+          axesPoint(rax, cu - hu, cv + hv)
         ]);
       }
       case 7: { // parallelogram
-        var dxp = w * 0.22;
+        var cu7 = (rax.maxU + rax.minU) / 2;
+        var cv7 = (rax.maxV + rax.minV) / 2;
+        var hu7 = (rax.maxU - rax.minU) / 2;
+        var hv7 = (rax.maxV - rax.minV) / 2;
+        if (hu7 < 2 || hv7 < 2) return null;
+        var skew = hu7 * 0.24;
         return closedShape([
-          shapeP(bb[0] + dxp, bb[1]),
-          shapeP(bb[2], bb[1]),
-          shapeP(bb[2] - dxp, bb[3]),
-          shapeP(bb[0], bb[3])
+          axesPoint(rax, cu7 - hu7 + skew, cv7 - hv7),
+          axesPoint(rax, cu7 + hu7 + skew, cv7 - hv7),
+          axesPoint(rax, cu7 + hu7 - skew, cv7 + hv7),
+          axesPoint(rax, cu7 - hu7 - skew, cv7 + hv7)
         ]);
       }
-      case 9: // rhombus
+      case 9: { // rhombus
+        var cu9 = (rax.maxU + rax.minU) / 2;
+        var cv9 = (rax.maxV + rax.minV) / 2;
+        var hu9 = (rax.maxU - rax.minU) / 2;
+        var hv9 = (rax.maxV - rax.minV) / 2;
+        if (hu9 < 2 || hv9 < 2) return null;
         return closedShape([
-          shapeP(cx, bb[1]), shapeP(bb[2], cy),
-          shapeP(cx, bb[3]), shapeP(bb[0], cy)
+          axesPoint(rax, cu9, cv9 - hv9),
+          axesPoint(rax, cu9 + hu9, cv9),
+          axesPoint(rax, cu9, cv9 + hv9),
+          axesPoint(rax, cu9 - hu9, cv9)
         ]);
+      }
       case 10: // isosceles triangle
       case 11: // equilateral triangle
         return closedShape([
@@ -1270,12 +1377,27 @@ var OHSIDIAN_INK_REV = "49";
     }
   }
 
+  function isClosedStroke(pts) {
+    if (!pts || pts.length < 4) return false;
+    var bb = bboxOf(pts);
+    var diag = Math.sqrt((bb[2] - bb[0]) * (bb[2] - bb[0]) +
+      (bb[3] - bb[1]) * (bb[3] - bb[1]));
+    var dx = pts[pts.length - 1][0] - pts[0][0];
+    var dy = pts[pts.length - 1][1] - pts[0][1];
+    return Math.sqrt(dx * dx + dy * dy) <= Math.max(8, diag * 0.3);
+  }
+
   function applyNativeShape(type) {
-    if (!state.shapeMode || !(type > 0)) return false;
+    if (!state.shapeMode) return false;
+    if (typeof type !== "number") type = 0;
     var a = state.active;
     if (!a || a.kind !== "stroke" || a.shapeApplied) return false;
     var stroke = a.stroke;
     if (!stroke || stroke.tool !== "pen") return false;
+    // Pen Kit sometimes labels a closed hand-drawn square as a polyline.
+    // A closed stroke is much more useful as the minimum-area rectangle than
+    // as an untouched freehand polygon.
+    if ((type === 3 || type === 0) && isClosedStroke(stroke.pts)) type = 6;
     var out = buildShapePoints(type, stroke.pts, stroke);
     if (!out || out.length < 2) {
       inkTrace("shapeReject", { type: type, points: stroke.pts.length });
@@ -2937,6 +3059,23 @@ var OHSIDIAN_INK_REV = "49";
       }
     };
     surface.doc = docFor(surface);
+    // Migration: old /PolyLine highlighter strokes are marked written=false on
+    // load. Without asking for a write they would never be converted, because
+    // nothing else marks the page dirty. "leave" only registers the surface;
+    // the actual rewrite happens when the PDF leaf is left.
+    try {
+      var pendingHl = false;
+      if (surface.doc && surface.doc.strokes) {
+        for (var ph = 0; ph < surface.doc.strokes.length; ph++) {
+          var pst = surface.doc.strokes[ph];
+          if (pst && pst.tool === "highlighter" && pst.written === false) {
+            pendingHl = true;
+            break;
+          }
+        }
+      }
+      if (pendingHl) schedulePdfWrite(surface);
+    } catch (ePh) {}
     surface.attach();
     surface.refreshPages();
     probeHook("pdfSurface", {
@@ -6652,6 +6791,14 @@ var OHSIDIAN_INK_REV = "49";
       "#" + TOOLBAR_ID + " .ink-sep{width:1px;height:22px;background:var(--background-modifier-border);margin:0 3px;flex:none}",
       "#" + TOOLBAR_ID + " .ink-swatch{width:24px;height:24px;border-radius:12px;border:1px solid var(--background-modifier-border);cursor:pointer;flex:none}",
       "#" + TOOLBAR_ID + " .ink-swatch.is-active{box-shadow:0 0 0 2.5px var(--interactive-accent)}",
+      "#" + TOOLBAR_ID + " .ink-color-btn{position:relative;width:34px;height:34px;flex:none;border-radius:50%;" +
+        "display:flex;align-items:center;justify-content:center;cursor:pointer;touch-action:none}",
+      "#" + TOOLBAR_ID + " .ink-color-btn:hover{background:var(--background-modifier-hover)}",
+      "#" + TOOLBAR_ID + " .ink-color-dot{width:22px;height:22px;border-radius:50%;" +
+        "border:1px solid color-mix(in srgb,var(--text-normal) 22%,transparent);box-sizing:border-box}",
+      "#" + TOOLBAR_ID + " .ink-color-badge{position:absolute;right:1px;bottom:1px;font-size:8px;line-height:11px;" +
+        "padding:0 2px;border-radius:5px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
+        "color:var(--text-muted);pointer-events:none}",
       "#" + TOOLBAR_ID + " input[type=range]{width:84px;height:26px;flex:none}",
       "#" + TOOLBAR_ID + " .ink-badge{font-size:11px;color:var(--text-faint);padding:0 5px;max-width:84px;" +
         "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:none}",
@@ -6939,6 +7086,10 @@ var OHSIDIAN_INK_REV = "49";
     if (el) el.style.display = "none";
   }
 
+  function hasBarItem(id) {
+    return !!(state.barItems && state.barItems.indexOf(id) >= 0);
+  }
+
   function buildToolbar() {
     if (state.toolbarBuilt) return;
     state.toolbarBuilt = true;
@@ -7000,98 +7151,117 @@ var OHSIDIAN_INK_REV = "49";
       if (act === "eraser") inkBindLongPress(b, showClearPanel);
       return b;
     };
-    bar.appendChild(mkBtn("pointer", "↖", "指针（选择文字/PDF 高亮）"));
-    bar.appendChild(mkBtn("pen", "✎", "笔"));
-    bar.appendChild(mkBtn("highlighter", "▤", "高亮笔"));
-    bar.appendChild(mkBtn("shape", "△", "一笔成形（鸿蒙识别）"));
-    bar.appendChild(mkBtn("lasso", "◌", "套索选择墨迹"));
-    bar.appendChild(mkBtn("eraser", "⌫", "橡皮（整笔/局部）"));
-    bar.appendChild(mkBtn("undo", "↶", "撤销墨迹"));
-    bar.appendChild(mkBtn("redo", "↷", "重做墨迹"));
+    if (hasBarItem("pointer")) bar.appendChild(mkBtn("pointer", "↖", "指针（选择文字/PDF 高亮）"));
+    if (hasBarItem("pen")) bar.appendChild(mkBtn("pen", "✎", "笔"));
+    if (hasBarItem("highlighter")) bar.appendChild(mkBtn("highlighter", "▤", "高亮笔"));
+    if (hasBarItem("shape")) bar.appendChild(mkBtn("shape", "△", "一笔成形（鸿蒙识别）"));
+    if (hasBarItem("lasso")) bar.appendChild(mkBtn("lasso", "◌", "套索选择墨迹"));
+    if (hasBarItem("eraser")) bar.appendChild(mkBtn("eraser", "⌫", "橡皮（整笔/局部）"));
+    if (hasBarItem("undo")) bar.appendChild(mkBtn("undo", "↶", "撤销墨迹"));
+    if (hasBarItem("redo")) bar.appendChild(mkBtn("redo", "↷", "重做墨迹"));
     var sep = document.createElement("div");
     sep.className = "ink-sep";
-    bar.appendChild(sep);
-    // Auto colour: follows the note/PDF background (dark theme -> light ink).
-    var autoSw = document.createElement("div");
-    autoSw.className = "ink-swatch ink-swatch-auto";
-    autoSw.title = "自动跟随主题（钢笔）";
-    autoSw.setAttribute("role", "button");
-    autoSw.setAttribute("aria-label", autoSw.title);
-    autoSw.style.background = "linear-gradient(135deg,#1f1f1f 0 50%,#e8e8e8 50% 100%)";
-    inkBindTap(autoSw, function () {
-      state.colorAuto = true;
-      setPref("inkColorAuto", true);
-      updateToolbarState();
-    });
-    bar.appendChild(autoSw);
-    var colors = (state.palette && state.palette.length)
-      ? state.palette.slice()
-      : ["#1f1f1f", "#d32f2f", "#1565c0", "#2e7d32", "#f9a825"];
-    var applySwatch = function (c) {
-      if (state.tool === "highlighter") {
-        state.hlColor = c;
-        setPref("inkHlColor", c);
-      } else {
-        state.color = c;
-        state.colorAuto = false;
-        setPref("inkColor", c);
-        setPref("inkColorAuto", false);
+    if (hasBarItem("color") || hasBarItem("width")) bar.appendChild(sep);
+    // One colour control instead of a row of swatches: the dot shows the
+    // current pen/highlighter colour, a small "A" badge means automatic
+    // (theme-following). Tap cycles the three presets; long-press opens the
+    // platform colour picker.
+    if (hasBarItem("color")) {
+      var colorBtn = document.createElement("div");
+      colorBtn.className = "ink-color-btn";
+      colorBtn.setAttribute("role", "button");
+      colorBtn.setAttribute("aria-label", "颜色");
+      var colorDot = document.createElement("span");
+      colorDot.className = "ink-color-dot";
+      var colorBadge = document.createElement("span");
+      colorBadge.className = "ink-color-badge";
+      colorBadge.textContent = "A";
+      colorBtn.appendChild(colorDot);
+      colorBtn.appendChild(colorBadge);
+      var customInput = document.getElementById("ohsidian-ink-color-input");
+      if (!customInput) {
+        customInput = document.createElement("input");
+        customInput.id = "ohsidian-ink-color-input";
+        customInput.type = "color";
+        customInput.style.cssText = "position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0";
+        var applyCustom = function () {
+          var c = customInput.value;
+          if (!c) return;
+          if (state.tool === "highlighter") {
+            state.hlColor = c;
+            setPref("inkHlColor", c);
+          } else {
+            state.color = c;
+            state.colorAuto = false;
+            setPref("inkColor", c);
+            setPref("inkColorAuto", false);
+          }
+          updateToolbarState();
+        };
+        customInput.addEventListener("input", applyCustom);
+        customInput.addEventListener("change", applyCustom);
+        document.body.appendChild(customInput);
       }
-      updateToolbarState();
-    };
-    for (var i = 0; i < colors.length; i++) {
-      (function (c) {
-        var sw = document.createElement("div");
-        sw.className = "ink-swatch";
-        sw.setAttribute("data-color", c);
-        sw.setAttribute("role", "button");
-        sw.setAttribute("aria-label", "颜色 " + c);
-        sw.style.background = c;
-        sw.title = c;
-        inkBindTap(sw, function () { applySwatch(c); });
-        bar.appendChild(sw);
-      })(colors[i]);
+      var openCustom = function () {
+        customInput.value = state.tool === "highlighter" ? state.hlColor : state.color;
+        try { customInput.click(); } catch (e2) {
+          notice("当前系统不支持颜色选择器，请在设置中填写颜色");
+        }
+      };
+      var cycleColor = function () {
+        if (colorBtn._inkLongPress) {
+          colorBtn._inkLongPress = false;
+          return;
+        }
+        if (state.tool === "highlighter") {
+          var hlist = state.hlPalette || ["#ffd54a", "#a5d6a7", "#90caf9"];
+          var hi = hlist.indexOf(state.hlColor);
+          state.hlColor = hlist[(hi + 1) % hlist.length];
+          setPref("inkHlColor", state.hlColor);
+        } else if (state.colorAuto) {
+          state.colorAuto = false;
+          state.color = state.palette[0];
+          setPref("inkColor", state.color);
+          setPref("inkColorAuto", false);
+        } else {
+          var ci = state.palette.indexOf(state.color);
+          ci++;
+          if (ci >= state.palette.length) {
+            state.colorAuto = true;
+            setPref("inkColorAuto", true);
+          } else {
+            state.color = state.palette[ci];
+            setPref("inkColor", state.color);
+            setPref("inkColorAuto", false);
+          }
+        }
+        updateToolbarState();
+      };
+      inkBindTap(colorBtn, cycleColor);
+      inkBindLongPress(colorBtn, openCustom);
+      bar.appendChild(colorBtn);
     }
-    // Custom colour: opens the platform colour picker. Applies to the tool in
-    // use (pen or highlighter), so the same control covers both.
-    var customInput = document.createElement("input");
-    customInput.type = "color";
-    customInput.style.cssText = "position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0";
-    var customSw = document.createElement("div");
-    customSw.className = "ink-swatch ink-swatch-custom";
-    customSw.title = "自定义颜色";
-    customSw.style.background = "conic-gradient(#e53935,#fdd835,#43a047,#1e88e5,#8e24aa,#e53935)";
-    inkBindTap(customSw, function () {
-      customInput.value = state.tool === "highlighter" ? state.hlColor : state.color;
-      try { customInput.click(); } catch (e2) { notice("当前系统不支持颜色选择器，请在设置中填写颜色"); }
-    });
-    var applyCustom = function () {
-      var c = customInput.value;
-      if (!c) return;
-      applySwatch(c);
-    };
-    customInput.addEventListener("input", applyCustom);
-    customInput.addEventListener("change", applyCustom);
-    document.body.appendChild(customInput);
-    bar.appendChild(customSw);
-    var widthInput = document.createElement("input");
-    widthInput.type = "range";
-    widthInput.min = "1";
-    widthInput.max = "12";
-    widthInput.step = "0.2";
-    widthInput.title = "笔宽";
-    widthInput.addEventListener("pointerdown", function (e) { e.stopPropagation(); }, true);
-    widthInput.addEventListener("input", function () {
-      var v = Number(widthInput.value) || 2.4;
-      if (state.tool === "highlighter") {
-        state.hlWidth = v;
-        setPref("inkHlWidth", v);
-      } else {
-        state.width = v;
-        setPref("inkWidth", v);
-      }
-    });
-    bar.appendChild(widthInput);
+    var widthInput = null;
+    if (hasBarItem("width")) {
+      widthInput = document.createElement("input");
+      widthInput.type = "range";
+      widthInput.min = "1";
+      widthInput.max = "12";
+      widthInput.step = "0.2";
+      widthInput.title = "笔宽";
+      widthInput.addEventListener("pointerdown", function (e) { e.stopPropagation(); }, true);
+      widthInput.addEventListener("input", function () {
+        var v = Number(widthInput.value) || 2.4;
+        if (state.tool === "highlighter") {
+          state.hlWidth = v;
+          setPref("inkHlWidth", v);
+        } else {
+          state.width = v;
+          setPref("inkWidth", v);
+        }
+      });
+      bar.appendChild(widthInput);
+    }
     bar.appendChild(mkBtn("more", "⋯", "更多：写入 PDF / 导出 / 清空"));
     bar.appendChild(mkBtn("collapse", "»", "收起"));
     var toast = document.createElement("span");
@@ -7114,6 +7284,17 @@ var OHSIDIAN_INK_REV = "49";
       ["diag", "手写笔诊断"],
       ["settings", "OHSidian 设置 → 手写笔"]
     ];
+    // Tools hidden from the bar must stay reachable from this menu.
+    var hiddenTools = [];
+    if (!hasBarItem("pointer")) hiddenTools.push(["pointer", "指针（手）"]);
+    if (!hasBarItem("pen")) hiddenTools.push(["pen", "笔"]);
+    if (!hasBarItem("highlighter")) hiddenTools.push(["highlighter", "高亮笔"]);
+    if (!hasBarItem("eraser")) hiddenTools.push(["eraser", "橡皮"]);
+    if (!hasBarItem("shape")) hiddenTools.push(["shape", "一笔成形 开/关"]);
+    if (!hasBarItem("lasso")) hiddenTools.push(["lasso", "套索"]);
+    if (!hasBarItem("undo")) hiddenTools.push(["undo", "撤销"]);
+    if (!hasBarItem("redo")) hiddenTools.push(["redo", "重做"]);
+    menuItems = hiddenTools.concat(menuItems);
     for (var m = 0; m < menuItems.length; m++) {
       (function (it) {
         var b = document.createElement("button");
@@ -7144,6 +7325,7 @@ var OHSIDIAN_INK_REV = "49";
 
   function rebuildToolbar() {
     try {
+      state.menuOpen = false;
       var old = toolbarEl();
       if (old && old.parentNode) old.parentNode.removeChild(old);
       var oldMenu = document.getElementById(MENU_ID);
@@ -7291,21 +7473,26 @@ var OHSIDIAN_INK_REV = "49";
       if (on) b.classList.add("is-active");
       else b.classList.remove("is-active");
     }
-    var sws = bar.querySelectorAll(".ink-swatch");
-    var activeColor = state.tool === "highlighter" ? state.hlColor : state.color;
-    var activeAuto = state.tool !== "highlighter" && state.colorAuto;
-    var fixedList = ["#1f1f1f", "#d32f2f", "#1565c0", "#2e7d32", "#f9a825"];
-    for (var j = 0; j < sws.length; j++) {
-      var sw = sws[j];
-      var isAuto = sw.classList && sw.classList.contains("ink-swatch-auto");
-      var isCustom = sw.classList && sw.classList.contains("ink-swatch-custom");
-      var fixed = sw.getAttribute("data-color");
-      var active = false;
-      if (isAuto) active = activeAuto;
-      else if (isCustom) active = !activeAuto && fixedList.indexOf(activeColor) < 0;
-      else active = !activeAuto && fixed === activeColor;
-      if (active) sw.classList.add("is-active");
-      else sw.classList.remove("is-active");
+    var colorBtn = bar.querySelector(".ink-color-btn");
+    if (colorBtn) {
+      var activeColor = state.tool === "highlighter" ? state.hlColor : state.color;
+      var activeAuto = state.tool !== "highlighter" && state.colorAuto;
+      var dot = colorBtn.querySelector(".ink-color-dot");
+      var badge = colorBtn.querySelector(".ink-color-badge");
+      if (dot) {
+        if (activeAuto) {
+          dot.style.background = "linear-gradient(135deg,#1f1f1f 0 48%,#e8e8e8 52% 100%)";
+        } else {
+          dot.style.background = activeColor;
+        }
+      }
+      if (badge) badge.style.display = activeAuto ? "block" : "none";
+      if (activeAuto) colorBtn.classList.add("is-auto");
+      else colorBtn.classList.remove("is-auto");
+      colorBtn.title = activeAuto
+        ? "自动颜色（点按切换，长按自定义）"
+        : "颜色 " + activeColor + "（点按切换，长按自定义）";
+      colorBtn.setAttribute("aria-label", colorBtn.title);
     }
     var range = bar.querySelector("input[type=range]");
     if (range) {
@@ -7695,6 +7882,37 @@ var OHSIDIAN_INK_REV = "49";
             if (!on) edgeTouch = null;
           });
 
+        var barGroup = ctx.newGroup("工具条");
+        var barDefs = [
+          ["pen", "笔"],
+          ["highlighter", "高亮笔"],
+          ["eraser", "橡皮"],
+          ["color", "颜色按钮"],
+          ["pointer", "指针"],
+          ["shape", "一笔成形"],
+          ["lasso", "套索"],
+          ["undo", "撤销"],
+          ["redo", "重做"],
+          ["width", "笔宽滑杆"]
+        ];
+        var setBarItem = function (id, on) {
+          var items = state.barItems.slice();
+          var at = items.indexOf(id);
+          if (on && at < 0) items.push(id);
+          if (!on && at >= 0) items.splice(at, 1);
+          state.barItems = items;
+          setPref("inkBarItems", items);
+          rebuildToolbar();
+        };
+        for (var bd = 0; bd < barDefs.length; bd++) {
+          (function (id, label) {
+            ctx.toggleEl(ctx.itemEl(barGroup, label,
+              "显示在工具条上；隐藏后仍可从工具条的 ⋯ 菜单打开。", true),
+              state.barItems.indexOf(id) >= 0,
+              function (on) { setBarItem(id, !!on); });
+          })(barDefs[bd][0], barDefs[bd][1]);
+        }
+
         var input = ctx.newGroup("输入与手势");
         ctx.toggleEl(ctx.itemEl(input, "掌托过滤",
           "笔按下时拦截手掌与手指的触摸，避免书写时滚动或选中文字。", true),
@@ -7733,6 +7951,34 @@ var OHSIDIAN_INK_REV = "49";
           "打开后橡皮只擦高亮笔迹，普通笔迹不受影响。", true),
           state.eraserOnlyHl === true,
           function (on) { state.eraserOnlyHl = !!on; setPref("inkEraserOnlyHl", !!on); });
+        var penWidthCtl = ctx.itemEl(input, "笔宽",
+          "普通笔的屏幕宽度（CSS px）；不显示工具条滑杆时也可以在这里调。");
+        var penWidthInput = document.createElement("input");
+        penWidthInput.type = "range";
+        penWidthInput.min = "1";
+        penWidthInput.max = "12";
+        penWidthInput.step = "0.2";
+        penWidthInput.value = String(state.width);
+        penWidthInput.style.cssText = "width:140px;height:24px;vertical-align:middle";
+        penWidthInput.addEventListener("input", function () {
+          state.width = Number(penWidthInput.value) || 2.4;
+          setPref("inkWidth", state.width);
+        });
+        penWidthCtl.appendChild(penWidthInput);
+        var hlWidthCtl = ctx.itemEl(input, "高亮笔宽度",
+          "高亮笔的屏幕宽度（CSS px），不受压力影响。");
+        var hlWidthInput = document.createElement("input");
+        hlWidthInput.type = "range";
+        hlWidthInput.min = "4";
+        hlWidthInput.max = "32";
+        hlWidthInput.step = "1";
+        hlWidthInput.value = String(state.hlWidth);
+        hlWidthInput.style.cssText = "width:140px;height:24px;vertical-align:middle";
+        hlWidthInput.addEventListener("input", function () {
+          state.hlWidth = Number(hlWidthInput.value) || 16;
+          setPref("inkHlWidth", state.hlWidth);
+        });
+        hlWidthCtl.appendChild(hlWidthInput);
         ctx.toggleEl(ctx.itemEl(input, "压感橡皮擦",
           "与华为笔记一致：笔尖用力按住并停顿约半秒，暂时变成橡皮；移动擦除，抬笔继续书写。笔画一旦移动过就不会触发，避免把写完的线条擦掉。", true),
           pref("inkPressureEraser", true) !== false,
@@ -7948,10 +8194,10 @@ var OHSIDIAN_INK_REV = "49";
             updateToolbarState();
           });
         var paletteCtl = ctx.itemEl(color, "工具条调色盘",
-          "设置工具条上的 5 个常用颜色；改完立即重建工具条。");
+          "设置颜色按钮轮换的 3 个常用颜色；长按颜色按钮可打开系统取色器。");
         var paletteWrap = document.createElement("div");
         paletteWrap.style.cssText = "display:flex;gap:6px;align-items:center";
-        for (var palIdx = 0; palIdx < 5; palIdx++) {
+        for (var palIdx = 0; palIdx < 3; palIdx++) {
           (function (idx) {
             var pin = document.createElement("input");
             pin.type = "color";
