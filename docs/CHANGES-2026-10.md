@@ -4462,7 +4462,7 @@ controlEl.createEl("label", {cls:"checkbox-container", attr:{tabIndex:0}}, e => 
   3. 画正方形/矩形是否贴合、旋转矩形是否保持角度；
   4. 旧高亮页重写后是否单层且宽度一致。
 
-## 第 204 轮 (2026-11-02): 荧光笔置底、PDF 注释偏移与坐标原点（v56）
+## 第 204 轮 (2026-11-02): 荧光笔置底/PDF 文字混合、注释偏移与坐标原点（v57）
 
 ### 一、荧光笔覆盖黑色笔迹变淡
 
@@ -4479,6 +4479,11 @@ PDF Embed 的 `appendStroke()` 遇到高亮笔返回 `false`，强制整页有�
 增量追加时又盖到黑字上。
 
 PDF 写回 payload 也把高亮笔排到最前面，外部阅读器里高亮注释同样位于笔迹下方。
+
+**补充：PDF 内文字的黑字**。如果黑色是 PDF 页面里的印刷文字，两遍绘制并不能解决——整块墨迹画布仍然以 source-over 盖在 PDF 页面上。现在 PDF 页的 base/live 画布在**浅色页面**上设置
+`mix-blend-mode: multiply`：黑色文字乘荧光色仍是黑色，只有白纸被染色；高亮笔在 PDF
+文字上不再像蒙了一层黄膜。深色页面保持 `normal`（否则浅色自动墨会变黑），PDF Embed
+也同步。是否浅色由页面背景亮度判断（`--pdf-page-background`/`backgroundColor`）。
 
 ### 二、笔迹与 PDF 注释偏移
 
@@ -4510,7 +4515,7 @@ PDF 写回 payload 也把高亮笔排到最前面，外部阅读器里高亮注�
 
 | 产物 | 大小/时间 | SHA-256 |
 |---|---|---|
-| `electron-default-signed.hap`（ink v56） | 121,111,294 B / 2026-11-02 20:21:23 | `6D91CBA472895BCA8E0C60D359BFB0992F77CEE7C9CF90CB1668636411254119` |
+| `electron-default-signed.hap`（ink v57） | 121,115,390 B / 2026-11-02 20:28:33 | `323AEC81FBD0B3725AEB7C4CAF110D7634A6D2C2A44F398D981E39F75E9FB83D` |
 
 - `node --check`、`update-obsidian --repatch`、`verify-asar`、`verify-release` 全绿。
 - 按你的要求未安装、未操作设备；需真机确认：

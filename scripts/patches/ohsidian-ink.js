@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "56";
+var OHSIDIAN_INK_REV = "57";
 (function () {
   "use strict";
 
@@ -2472,6 +2472,21 @@ var OHSIDIAN_INK_REV = "56";
     return null;
   }
 
+  function pdfEntryDark(pageEl) {
+    try {
+      var cs = getComputedStyle(pageEl);
+      var c = inkParseColor((cs.getPropertyValue("--pdf-page-background") || "").trim());
+      if (!c || c.a <= 0.1) c = inkParseColor(cs.backgroundColor);
+      // An unset/transparent page background is the normal white PDF page.
+      if (!c || c.a <= 0.1) return false;
+      var lum = 0.2126 * inkLinear(c.r) + 0.7152 * inkLinear(c.g) +
+        0.0722 * inkLinear(c.b);
+      return lum < 0.42;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function createPdfSurface(leaf) {
     var view = leaf.view;
     if (!view || view.getViewType() !== "pdf") return null;
@@ -2741,6 +2756,17 @@ var OHSIDIAN_INK_REV = "56";
       },
       redrawPage: function (entry) {
         if (!entry || !entry.cv || !entry.cv.isConnected) return;
+        // Highlighter must multiply with the PDF page content, not paint a
+        // translucent yellow veil over it. On a white page multiply keeps
+        // black text black and only tints the paper. Dark pages keep the
+        // normal source-over path because their automatic ink is light.
+        try {
+          var bm = pdfEntryDark(entry.pageEl) ? "normal" : "multiply";
+          if (entry.cv.style.mixBlendMode !== bm) entry.cv.style.mixBlendMode = bm;
+          if (entry.live && entry.live.style.mixBlendMode !== bm) {
+            entry.live.style.mixBlendMode = bm;
+          }
+        } catch (eBlend) {}
         var ctx = entry.cv.getContext("2d");
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.clearRect(0, 0, entry.cv.width, entry.cv.height);
@@ -3678,6 +3704,11 @@ var OHSIDIAN_INK_REV = "56";
       },
       redraw: function () {
         var doc = this.doc;
+        try {
+          var bm = pdfEntryDark(this.pageEl) ? "normal" : "multiply";
+          if (this.base && this.base.style.mixBlendMode !== bm) this.base.style.mixBlendMode = bm;
+          if (this.live && this.live.style.mixBlendMode !== bm) this.live.style.mixBlendMode = bm;
+        } catch (eBm) {}
         var ctx = this.base.getContext("2d");
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.clearRect(0, 0, this.base.width, this.base.height);
