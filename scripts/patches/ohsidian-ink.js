@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "39";
+var OHSIDIAN_INK_REV = "40";
 (function () {
   "use strict";
 
@@ -49,6 +49,8 @@ var OHSIDIAN_INK_REV = "39";
     colorAuto: true,
     width: 2.4,
     hlWidth: 16,
+    hlStraight: true,
+    holdStraight: true,
     curve: "linear",
     palm: true,
     fingerDraw: false,
@@ -290,6 +292,20 @@ var OHSIDIAN_INK_REV = "39";
     }
   }
 
+  /**
+   * PDF Kit annotation colors are documented as 0xBBGGRR (0xFF0000 = blue),
+   * i.e. the opposite byte order of CSS. Convert instead of reusing the CSS
+   * integer, otherwise red pen turns blue and a yellow highlighter bakes as a
+   * saturated blue marker.
+   */
+  function hexToPdfColor(hex) {
+    var c = hexToInt(hex);
+    var r = (c >> 16) & 0xff;
+    var g = (c >> 8) & 0xff;
+    var b = c & 0xff;
+    return ((b << 16) | (g << 8) | r) & 0xffffff;
+  }
+
   function safeName(rel) {
     var base = String(rel || "drawing").split("/").pop() || "drawing";
     return base.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]/g, "_");
@@ -485,6 +501,15 @@ var OHSIDIAN_INK_REV = "39";
       }
       setPref("inkDoubleTapMigrated", true);
     }
+    if (pref("inkDoubleTapRestore", false) !== true) {
+      // v24: users asked for the original quick pen↔eraser toggle back. The
+      // "wake" default made a double-tap look like a no-op whenever the
+      // toolbar was already open. Restore it once; the setting stays live.
+      if (pref("inkDoubleTap", "wake") === "wake") {
+        setPref("inkDoubleTap", "pen-eraser");
+      }
+      setPref("inkDoubleTapRestore", true);
+    }
     state.enabled = pref("inkEnabled", false) === true;
     state.eraserPx = Number(pref("inkEraserPx", 12)) || 12;
     if (state.eraserPx < 6) state.eraserPx = 6;
@@ -530,6 +555,8 @@ var OHSIDIAN_INK_REV = "39";
     state.pressureTapPref = pref("inkPressureTap", "auto");
     state.width = Number(pref("inkWidth", 2.4)) || 2.4;
     state.hlWidth = Number(pref("inkHlWidth", 16)) || 16;
+    state.hlStraight = pref("inkHlStraight", true) !== false;
+    state.holdStraight = pref("inkHoldStraight", true) !== false;
     state.color = pref("inkColor", "#1f1f1f");
     state.hlColor = pref("inkHlColor", "#ffd54a");
     state.colorAuto = pref("inkColorAuto", true) !== false;
@@ -893,8 +920,69 @@ var OHSIDIAN_INK_REV = "39";
   }
 
   function widthFor(stroke, p) {
+    // A highlighter is a marker, not a brush: Huawei Notes keeps its width
+    // constant no matter how hard the pen presses, otherwise a line of text
+    // gets darker/thicker bands wherever the hand happens to press harder.
+    if (stroke.tool === "highlighter") return Math.max(0.35, stroke.width);
     var w = stroke.width * (0.35 + 1.65 * pressureCurve(p));
     return Math.max(0.35, w);
+  }
+
+  /**
+   * Huawei Notes turns a stroke into a straight line when the pen rests at the
+   * end of it. Only strokes that are already almost straight are eligible, so
+   * pausing inside a character never replaces it with a diagonal line.
+   */
+  function strokeCanStraighten(stroke) {
+    if (!stroke || stroke.tool === "highlighter" || stroke.straight) return false;
+    var pts = stroke.pts;
+    if (!pts || pts.length < 3) return false;
+    var a = pts[0];
+    var b = pts[pts.length - 1];
+    var dx = b[0] - a[0];
+    var dy = b[1] - a[1];
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 24) return false;
+    var maxDev = 0;
+    for (var i = 1; i < pts.length - 1; i++) {
+      var px = pts[i][0] - a[0];
+      var py = pts[i][1] - a[1];
+      var dev = Math.abs(px * dy - py * dx) / len;
+      if (dev > maxDev) maxDev = dev;
+    }
+    return maxDev <= Math.max(8, len * 0.18);
+  }
+
+  function straightenStroke(stroke) {
+    var pts = stroke.pts;
+    if (!pts || pts.length < 2) return;
+    var a = pts[0];
+    var b = pts[pts.length - 1];
+    var sum = 0;
+    for (var i = 0; i < pts.length; i++) sum += Number(pts[i][2]) || 0;
+    var p = sum / pts.length;
+    stroke.pts = [
+      [a[0], a[1], p, a[3] || 0, a[4] || 0, a[5] || 0],
+      [b[0], b[1], p, b[3] || 0, b[4] || 0, b[5] || 0]
+    ];
+    stroke.straight = true;
+    stroke.bbox = null;
+  }
+
+  function armStraightenTimer(a) {
+    if (!a || a.kind !== "stroke" || !a.stroke || a.stroke.tool === "highlighter") return;
+    if (state.holdStraight === false) return;
+    if (a.holdTimer) clearTimeout(a.holdTimer);
+    a.holdTimer = setTimeout(function () {
+      a.holdTimer = 0;
+      if (state.active !== a || a.kind !== "stroke") return;
+      // 380 ms is the dwell Huawei Notes uses before it snaps the line; the
+      // 50 ms slack keeps a slightly early frame from cancelling the snap.
+      if (nowMs() - (a.lastMoveAt || 0) < 380) return;
+      if (!strokeCanStraighten(a.stroke)) return;
+      straightenStroke(a.stroke);
+      requestLiveFrame();
+    }, 430);
   }
 
   function smoothPoints(pts) {
@@ -1015,6 +1103,11 @@ var OHSIDIAN_INK_REV = "39";
       pts.push(raw[raw.length - 1]);
     }
     if (!pts.length) return;
+    if (stroke.straight === true && pts.length > 2) {
+      var sa = pts[0];
+      var sb = pts[pts.length - 1];
+      pts = [sa, sb];
+    }
     var scale = surface.widthScale ? surface.widthScale() : 1;
     var pxMode = stroke.px === true;
     var lineScale = pxMode ? 1 : scale;
@@ -2314,27 +2407,11 @@ var OHSIDIAN_INK_REV = "39";
         var onPageChanging = function (e) {
           try {
             var to = e && e.pageNumber;
-            // pdf.js changes currentPageNumber before it applies the scroll.
-            // Its next view-area update then still sees the old page, starts
-            // rendering it, and a heavy cover (large images) blocks the render
-            // queue for 10+ seconds while the new page stays white. Apply the
-            // scroll synchronously for long jumps (restore / page-number jump)
-            // so the old page is never considered visible.
-            if (to > 0 && !self.forcingScroll) {
-              var scrollEl = null;
-              try { scrollEl = self.viewer.container || null; } catch (eSC) {}
-              if (scrollEl && scrollEl.querySelector) {
-                var targetEl = scrollEl.querySelector('.page[data-page-number="' + to + '"]');
-                if (targetEl) {
-                  var target = targetEl.offsetTop;
-                  if (Math.abs((scrollEl.scrollTop || 0) - target) > scrollEl.clientHeight) {
-                    self.forcingScroll = true;
-                    try { scrollEl.scrollTop = target; } catch (eFS) {}
-                    setTimeout(function () { self.forcingScroll = false; }, 80);
-                  }
-                }
-              }
-            }
+            // Do NOT scroll here. pdf.js fires pagechanging for ordinary
+            // finger scrolling too; snapping scrollTop to pageEl.offsetTop on
+            // every crossing made a slow swipe through the gap between page a
+            // and a+1 jump back to the top of page a. The stored-page restore
+            // already sets the scroll position before pagesinit.
             probeHook("pdfPageChange", {
               from: e && e.previous,
               to: to,
@@ -3650,8 +3727,19 @@ var OHSIDIAN_INK_REV = "39";
     var tool = state.tool === "eraser" ? "eraser" : state.tool;
     // The pen's tail/barrel button arrives as button 5 (or the eraser bit in
     // `buttons`); treat it as a temporary eraser even when the pen tool is
-    // selected. This also covers devices that never expose SourceTool.RUBBER.
-    if (ev.button === 5 || ((ev.buttons || 0) & 32) !== 0) {
+    // selected. On HarmonyOS the tip can also report that bit while writing,
+    // which used to carve small eraser holes into fresh ink and then "turn back
+    // into a pen" on pen-up. A real hardware eraser has no pressure, so a
+    // pressed tip (pressure > 0.01) is never reclassified.
+    var eraseButton = ev.button === 5 || ((ev.buttons || 0) & 32) !== 0;
+    if (ev.pointerType === "pen") {
+      // Only the hardware eraser tip qualifies: it reports button 5 with no
+      // pressure. A pressed tip must always draw, even if the driver happens
+      // to leak the eraser bit into `buttons` for one sample.
+      eraseButton = ev.button === 5 &&
+        (typeof ev.pressure !== "number" || ev.pressure <= 0.01);
+    }
+    if (eraseButton) {
       tool = "eraser";
     }
     if (surface.kind === "canvas") surface.refreshScale();
@@ -3716,6 +3804,7 @@ var OHSIDIAN_INK_REV = "39";
       px: pxWidth,
       screenWidth: pxWidth ? baseWidth : 0,
       opacity: tool === "highlighter" ? 0.38 : 1,
+      straight: tool === "highlighter" && state.hlStraight !== false,
       device: ev.pointerType === "pen" ? "pen" : (ev.pointerType || "?"),
       pts: [],
       bbox: null,
@@ -3736,6 +3825,8 @@ var OHSIDIAN_INK_REV = "39";
       pointerId: ev.pointerId,
       t0: state.strokeT0,
       lastSampleAt: state.strokeT0,
+      lastMoveAt: state.strokeT0,
+      holdTimer: 0,
       dirty: true
     };
     state.latencyT0 = nowMs();
@@ -3825,6 +3916,18 @@ var OHSIDIAN_INK_REV = "39";
       state.lastPenAt = nowMs();
       a.dirty = true;
     }
+    // A pen resting on the glass still emits jitter. Only real travel resets
+    // the dwell timer, otherwise the hold-to-straighten gesture could never
+    // complete while the nib is perfectly still.
+    var sl = a.stroke.pts;
+    if (sl.length >= 2) {
+      var lx = sl[sl.length - 1][0] - sl[sl.length - 2][0];
+      var ly = sl[sl.length - 1][1] - sl[sl.length - 2][1];
+      if (lx * lx + ly * ly > 0.36) {
+        a.lastMoveAt = nowMs();
+        armStraightenTimer(a);
+      }
+    }
     requestLiveFrame();
   }
 
@@ -3864,6 +3967,10 @@ var OHSIDIAN_INK_REV = "39";
     if (ev.preventDefault) ev.preventDefault();
     if (ev.stopPropagation) ev.stopPropagation();
     state.active = null;
+    if (a.holdTimer) {
+      clearTimeout(a.holdTimer);
+      a.holdTimer = 0;
+    }
     if (a.kind === "erase") clearCursor(true);
     palmOffSoon();
     inkWritingChrome(false);
@@ -3901,6 +4008,9 @@ var OHSIDIAN_INK_REV = "39";
     }
     var stroke = a.stroke;
     if (!stroke.pts.length) return;
+    // Persist the snapped geometry, not the wobbly samples: the sidecar and
+    // the PDF annotation must both show the straight line the user saw.
+    if (stroke.straight === true && stroke.pts.length > 2) straightenStroke(stroke);
     stroke.bbox = bboxOf(stroke.pts);
     finishStroke(a.surface, a.entry, stroke);
   }
@@ -4082,7 +4192,12 @@ var OHSIDIAN_INK_REV = "39";
     state.penNativeActive = false;
     try {
       if (a) {
+        if (a.holdTimer) {
+          clearTimeout(a.holdTimer);
+          a.holdTimer = 0;
+        }
         if (a.kind === "stroke" && a.stroke) {
+          if (a.stroke.straight === true && a.stroke.pts.length > 2) straightenStroke(a.stroke);
           a.stroke.bbox = bboxOf(a.stroke.pts);
           finishStroke(a.surface, a.entry, a.stroke);
         } else if (a.kind === "erase" && a.changed && a.doc && a.before) {
@@ -4117,8 +4232,14 @@ var OHSIDIAN_INK_REV = "39";
       palmHide();
       return;
     }
+    // A pen resting on the glass sends no move events. The old 2.6 s timeout
+    // committed the stroke under a still-pressed nib, so everything written
+    // after the pause vanished (and looked like the pen had turned into an
+    // eraser); the next pen-down "turned it back". Native penActive only goes
+    // false on a real pen-up, so while it is true the nib is still down.
+    if (state.penNativeActive) return;
     var last = state.active.lastSampleAt || state.lastPenActivity || 0;
-    if (nowMs() - last > 2600) {
+    if (nowMs() - last > 4500) {
       forceReleaseActive(false);
     }
   }
@@ -4485,6 +4606,17 @@ var OHSIDIAN_INK_REV = "39";
     } catch (e) {}
     if (!state.enabled) return;
     inkTrace("gesture", { kind: kind, tool: state.tool });
+    // Never let a barrel gesture land in the middle of a stroke: switching to
+    // the eraser while the tip is still down is what made handwriting grow
+    // round holes and then "become a pen again" after the lift.
+    if (state.active) {
+      inkTrace("gestureIgnored", { kind: kind, reason: "stroke" });
+      return;
+    }
+    if (nowMs() - (state.lastPenActivity || 0) < 220) {
+      inkTrace("gestureIgnored", { kind: kind, reason: "pen-recent" });
+      return;
+    }
     // No overlay (typically Live Preview): a pen gesture is an explicit request
     // to write, so switch to reading view and enter pen mode.
     if (!activeSurfaceNow()) {
@@ -4494,34 +4626,44 @@ var OHSIDIAN_INK_REV = "39";
         return;
       }
     }
-    var dbl = pref("inkDoubleTap", "wake");
+    var dbl = pref("inkDoubleTap", "pen-eraser");
     var sq = pref("inkSqueeze", "palette");
     if (kind === "doubleTap") {
       if (dbl === "none") return;
       if (!ensureInkTarget()) return;
       var wasHidden = !barActuallyVisible();
-      if (wasHidden) {
-        expandToolbar();
-        if (state.tool === "pointer") setTool(state.lastPenTool || "pen");
-        inkStatus("手写工具条已唤醒");
-      }
+      var wasPointer = state.tool === "pointer";
+      if (wasHidden) expandToolbar();
       if (dbl === "wake") {
         if (!wasHidden) expandToolbar();
+        inkStatus("手写工具条已唤醒");
         return;
       }
       if (dbl === "undo") { inkUndo(); return; }
       if (dbl === "palette") { togglePalette(); return; }
-      // Optional legacy behavior; not the default anymore.
-      if (state.tool === "pen") { setTool("eraser"); inkStatus("橡皮"); }
-      else if (state.tool === "eraser") { setTool("pen"); inkStatus("笔"); }
-      else { setTool("pen"); inkStatus("笔"); }
+      // Coming from the hand tool, the first double-tap means "write again",
+      // not "erase": toggling straight to the eraser here felt like a bug.
+      if (wasPointer) {
+        setTool(state.lastPenTool || "pen");
+        inkStatus("笔");
+        return;
+      }
+      // Pen ↔ eraser. The highlighter is a pen tool in this context: a
+      // double-tap from it switches to the eraser, and back to the last pen.
+      if (state.tool === "eraser") {
+        setTool(state.lastPenTool || "pen");
+        inkStatus("笔");
+      } else {
+        setTool("eraser");
+        inkStatus("橡皮");
+      }
       return;
     }
     if (kind === "squeeze") {
       if (sq === "none") return;
       if (sq === "undo") { if (ensureInkTarget()) inkUndo(); return; }
       if (sq === "pen-eraser") {
-        if (state.tool === "eraser") { setTool("pen"); inkStatus("笔"); }
+        if (state.tool === "eraser") { setTool(state.lastPenTool || "pen"); inkStatus("笔"); }
         else { setTool("eraser"); inkStatus("橡皮"); }
         return;
       }
@@ -5045,7 +5187,10 @@ var OHSIDIAN_INK_REV = "39";
       payload.push({
         id: st2.id,
         pts: pts,
-        color: hexToInt(st2.color),
+        // PDF Kit documents lineColor as 0xBBGGRR (0xFF0000 is blue), while
+        // the sidecar stores CSS #RRGGBB. Sending RGB directly made a yellow
+        // highlighter come back as a blue stroke after write-back.
+        color: hexToPdfColor(st2.color),
         width: st2.width,
         opacity: st2.opacity
       });
@@ -5952,6 +6097,12 @@ var OHSIDIAN_INK_REV = "39";
       inkStatus("手写笔功能已在设置中关闭");
       return;
     }
+    if (state.active && tool !== state.tool) {
+      // A tool switch while the nib is down would change nothing for the
+      // current stroke but silently turn the next one into an eraser.
+      inkTrace("setToolIgnored", { tool: tool, reason: "stroke" });
+      return;
+    }
     if (tool !== "pointer" && !activeSurfaceNow()) {
       // Canvas/PDF can mount slightly after the leaf becomes active; retry
       // before falling through to the "no layer" path.
@@ -6424,14 +6575,14 @@ var OHSIDIAN_INK_REV = "39";
         });
         ersCtl.appendChild(ersInput);
         var dblCtl = ctx.itemEl(input, "笔杆双击",
-          "M-Pencil 双击的行为。默认只唤醒工具条，不切换橡皮；系统设置里的「双击切换」建议设为「无/应用内」，否则可能双触发。");
+          "M-Pencil 双击的行为。默认笔 ↔ 橡皮；书写过程中收到的双击会被忽略，避免写到一半突然变成橡皮。如果系统设置里也开了「双击切换」，建议设为「无/应用内」，否则可能双触发。");
         selectEl(dblCtl, [
-          ["wake", "唤醒工具条（默认）"],
-          ["pen-eraser", "笔 ↔ 橡皮"],
+          ["pen-eraser", "笔 ↔ 橡皮（默认）"],
+          ["wake", "唤醒工具条"],
           ["undo", "撤销上一笔"],
           ["palette", "打开工具条/调色盘"],
           ["none", "不响应"]
-        ], pref("inkDoubleTap", "wake"), function (v) { setPref("inkDoubleTap", v); });
+        ], pref("inkDoubleTap", "pen-eraser"), function (v) { setPref("inkDoubleTap", v); });
         var sqCtl = ctx.itemEl(input, "笔杆轻捏",
           "仅支持轻捏的笔（如 M-Pencil 3）；不支持时不会触发。");
         selectEl(sqCtl, [
@@ -6657,10 +6808,18 @@ var OHSIDIAN_INK_REV = "39";
           updateToolbarState();
         });
         hlCtl.appendChild(hlInput);
+        ctx.toggleEl(ctx.itemEl(color, "荧光笔直线",
+          "与华为笔记一致：荧光笔在起笔和抬笔之间画一条等宽直线，不随压力变粗。关闭后可自由手绘。", true),
+          pref("inkHlStraight", true) !== false,
+          function (on) { state.hlStraight = !!on; setPref("inkHlStraight", !!on); });
+        ctx.toggleEl(ctx.itemEl(color, "停留变直",
+          "笔尖在笔画末端停住约 0.4 秒，接近直线的笔画会自动拉直；写字时停顿不会触发。", true),
+          pref("inkHoldStraight", true) !== false,
+          function (on) { state.holdStraight = !!on; setPref("inkHoldStraight", !!on); });
 
         var pdf = ctx.newGroup("PDF 与诊断");
         var pdfCtl = ctx.itemEl(pdf, "写入 PDF 后",
-          "本机 pdf.js 不绘制 /Ink 折线，默认保留叠加层以确保墨迹可见；PDF 内注释作为可移植副本。若你的阅读器能显示注释，可改为隐藏。");
+          "写入后本机同时有手写叠加层和 PDF 注释。注释颜色已与手写同步（修复了荧光笔变蓝），想只保留 PDF 里的那一份就选“隐藏叠加层”。");
         selectEl(pdfCtl, [
           ["keep", "保留叠加层（默认，确保可见）"],
           ["hide", "隐藏叠加层（依赖阅读器）"]
@@ -6693,6 +6852,12 @@ var OHSIDIAN_INK_REV = "39";
           setPref("inkPdfStyle", v);
           inkStatus(v === "polyline" ? "PDF 注释改为折线，下次写回生效" : "PDF 注释恢复标准墨迹", 2500);
         });
+        var rewriteCtl = ctx.itemEl(pdf, "重写本页标注",
+          "旧版本把颜色按 RGB 写进 PDF Kit（它要 BGR），黄色荧光笔会变成蓝色。此按钮用修正后的颜色重写当前页注释，同时清掉旧的蓝色副本。");
+        var rewriteBtn = document.createElement("button");
+        rewriteBtn.textContent = "重写";
+        rewriteBtn.addEventListener("click", function () { inkWritePdf(null, false); });
+        rewriteCtl.appendChild(rewriteBtn);
         var restoreCtl = ctx.itemEl(pdf, "恢复原始 PDF",
           "从 .obsidian/ohsidian-ink/backups 的原始备份恢复当前 PDF；会丢弃之后写入的注释。");
         var restoreBtn = document.createElement("button");
