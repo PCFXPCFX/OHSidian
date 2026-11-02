@@ -681,7 +681,10 @@ export class WebAbility extends WebBaseAbility {
             rect.height >= displayClass.height;
         }
         if (winObj !== undefined && !captionless) {
-          if (this.ensureSystemCaption(winObj, this.freeWindowForm())) {
+          // Force the caption only for the tablet free-window case where the
+          // PC switch is off; PC-mode tablets keep respecting 窗口边框样式.
+          const forceCaption: boolean = this.freeWindowForm() && !this.pcModeEnabled;
+          if (this.ensureSystemCaption(winObj, forceCaption)) {
             decor = 'system';
           }
         } else {
@@ -771,10 +774,11 @@ export class WebAbility extends WebBaseAbility {
     if (!this.mainWindow) {
       return;
     }
-    // BUG-003: in a free window the system caption owns drag/maximize; letting
-    // the app-drawn frame style hide it again would re-create the control-less
-    // floating window on the next 1 s tick.
-    if (this.freeWindowForm()) {
+    // BUG-003: in a tablet free window the system caption owns drag/maximize;
+    // letting the app-drawn frame style hide it again would re-create the
+    // control-less floating window on the next 1 s tick. PC-mode windows keep
+    // honoring the user's 窗口边框样式.
+    if (!this.pcModeEnabled && this.freeWindowForm()) {
       return;
     }
     if (!this.appDrawsFrame()) {
@@ -1330,6 +1334,14 @@ export class WebAbility extends WebBaseAbility {
   }
 
   private freeWindowForm(): boolean {
+    // 2in1 / PC desktop must stay untouched: there `pcModeEnabled` is false by
+    // design (H15 skips the boot read) and a floating BrowserWindow is normal.
+    // Treating its FLOATING status as the tablet free-window form would force
+    // the system caption over Obsidian's own titlebar and change the viewport
+    // rect - the BUG-002 "two sets of window buttons" regression.
+    if (deviceInfo.deviceType !== 'tablet' && deviceInfo.deviceType !== 'phone') {
+      return false;
+    }
     const st: number = this.windowStatusType();
     return st === window.WindowStatusType.FLOATING ||
       st === window.WindowStatusType.SPLIT_SCREEN;

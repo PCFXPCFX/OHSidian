@@ -4631,3 +4631,55 @@ MP4 + GIF，自动生成酷安/B 站可直接用的文案与素材清单。
 - 该状态文件是 Electron 的 DIP 单位；以后改窗口尺寸不要写物理像素。
 - 真正的自由窗口（`getWindowStatus()` = FLOATING）不校正，保留用户尺寸。
 - 本轮 HAP 仍是 release 构建（探针被剥离）；手写回归需要另做 `--agent` 构建。
+
+## 第 207 轮 (2026-11-02): 2in1 安全复核 + 手写评测扩到 18 场景
+
+### 一、窗口修改的 2in1 / PC 复核
+
+第 206 轮的 `freeWindowForm()` 用了 `getWindowStatus()`，但 `pcModeEnabled`
+在 2in1 上本来就是 false（H15 跳过读取），如果直接把 FLOATING 当平板自由窗口，
+会带来三处桌面回归：
+
+1. `pushSafeAreaInsets()` 走 caption 分支，强制系统标题栏盖掉 Obsidian 自绘标题栏
+   （BUG-002 的双标题栏）；
+2. `computeViewportBound()` 从 windowRect 改为 drawableRect，底部/右侧视口变化；
+3. `enforceFrameStyle()` 的 1s 复位被跳过，用户选的「隐藏边框」失效。
+
+修复：`freeWindowForm()` 只对 `tablet`/`phone` 生效；`forceCaption` 只在
+`freeWindowForm() && !pcModeEnabled` 时为 true；`enforceFrameStyle()` 的跳过
+也加了 `!pcModeEnabled`。2in1 上 `inWindowForm()` 恒等于 `pcModeEnabled`，
+decor/视口/边框复位全部回落到修复前的分支。没有 2in1 真机，属静态审查；
+平板（BKY-W10）复测全屏正常，`viewport:[1244,820] dpr:2.25`。
+
+### 二、评测场景 12 → 18
+
+新增：
+
+| id | 功能 | 关键探针 |
+|---|---|---|
+| `markdown-highlighter` | Markdown 荧光笔（非 PDF） | `inkStroke` |
+| `undo-redo` | 手写墨迹撤销/重做 | `inkHistory`（新增） |
+| `pdf-embed` | Markdown 内嵌 PDF 手写 | `pdfEmbedBlend`、`pdfPayload` |
+| `canvas-ink` | Canvas 白板手写 | `inkStroke` |
+| `eraser-hl-only` | 只擦荧光笔 | `inkErase(mode=hl)` |
+| `palm-rejection` | 掌托防误触 | 人工目视 |
+
+配套探针：`inkUndo`/`inkRedo` 发 `inkHistory{op,n,left}`，清空本页发
+`inkClear{space,removed}`。素材新增 `03-embed.md`（内嵌 PDF）与
+`04-canvas.canvas`。
+
+### 三、真机链路
+
+- `--agent` 包安装后 `--mode doctor` 全绿：
+  `agent build ink 58 · 1244x820 @2.25x`、`screenshot snapshot_display`、
+  `clock offset ~735 ms`、hilog 5–7k 行、截图 201 KB。
+- 修正 `snapshot_display` 只接受 `.jpeg` 后缀（`.jpg` 报 invalid），
+  并在 `Device.screenshot()` 加重试，避免刚写完就 recv 拿到 0 字节。
+- 本机 `screenrecord` 不存在，录制自动降级为 `snapshot_display` 帧模式。
+
+### 四、产物
+
+- release HAP：121,133,855 B / 2026-11-02 23:12:13，
+  SHA-256 `C6ABF8639A572DC2E7DC92D426E96D691AB1C23499835512625BAF7F93E07C19`。
+- `verify-release` / `verify-asar` 全绿。
+- 设备上当前装的是 `--agent` 包（供评测），release 包需另装。

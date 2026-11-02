@@ -120,8 +120,8 @@ function printSceneHeader(scene, index) {
   out("");
   out(C.bold(`──────────────────────────────────────────────────────────────`));
   out(C.bold(`${String(index + 1).padStart(2, "0")} · ${scene.title}`) + C.dim(`  [${scene.group}]`));
-  out(C.dim(`原版：${scene.stock}`));
-  out(C.dim(`我们：${scene.ours}`));
+  out(C.dim(`原版 OHsidian：${scene.stock}`));
+  out(C.dim(`平板魔改版：${scene.ours}`));
   if (scene.setup && scene.setup.length) {
     out(C.cyan("准备："));
     for (const s of scene.setup) out("  · " + s);
@@ -651,9 +651,9 @@ async function main() {
     const h = await device.shell("hilog -x", { timeoutMs: 30000 });
     out(`  hilog dump   ${(h.out || "").split(/\r?\n/).length} lines`);
     if (device.caps.snapshot) {
-      const shot = path.join(dir, "screen.jpg");
+      const shot = path.join(dir, "screen.jpeg");
       try {
-        await device.screenshot("/data/local/tmp/ohs-eval-doctor.jpg", shot);
+        await device.screenshot("/data/local/tmp/ohs-eval-doctor.jpeg", shot);
         out(`  screenshot   ok · ${fmtBytes(fs.statSync(shot).size)} -> ${shot}`);
       } catch (e) {
         out(`  screenshot   FAILED: ${e.message}`);

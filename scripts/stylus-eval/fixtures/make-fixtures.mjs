@@ -102,8 +102,32 @@ const PEN = `# 手写评测页
 ---
 `;
 
+const EMBED = `# 内嵌 PDF 手写
+
+下面内嵌了 \`02-pdf.pdf\`，用笔直接在上半页的印刷文字上写/划。
+
+![[02-pdf.pdf]]
+`;
+
+const CANVAS = JSON.stringify({
+  nodes: [
+    {
+      id: "eval-note",
+      type: "text",
+      text: "Canvas 手写评测\\n用笔在空白处画线，然后拖动画布确认墨迹跟随。",
+      x: -260,
+      y: -120,
+      width: 420,
+      height: 180,
+    },
+  ],
+  edges: [],
+}, null, 2) + "\n";
+
 fs.mkdirSync(OUT, { recursive: true });
 fs.writeFileSync(path.join(OUT, "00-README.md"), README, "utf8");
 fs.writeFileSync(path.join(OUT, "01-pen.md"), PEN, "utf8");
 fs.writeFileSync(path.join(OUT, "02-pdf.pdf"), buildPdf());
+fs.writeFileSync(path.join(OUT, "03-embed.md"), EMBED, "utf8");
+fs.writeFileSync(path.join(OUT, "04-canvas.canvas"), CANVAS, "utf8");
 console.log("fixtures written to " + OUT);

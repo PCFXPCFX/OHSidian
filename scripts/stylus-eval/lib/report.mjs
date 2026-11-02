@@ -80,9 +80,9 @@ export function renderReport({ meta, scenes, coverage, files, error, selftest })
   }
   lines.push("");
 
-  lines.push("## 与原版的差异（宣传口径）");
+  lines.push("## 与原版 OHsidian 的差异（宣传口径）");
   lines.push("");
-  lines.push("| 功能 | 原版（鸿蒙 Obsidian） | OHsidian |");
+  lines.push("| 功能 | 原版 OHsidian | 平板魔改版 |");
   lines.push("|---|---|---|");
   for (const s of scenes) {
     lines.push(`| ${esc(s.scene.title)} | ${esc(s.scene.stock)} | ${esc(s.scene.ours)} |`);
@@ -96,8 +96,8 @@ export function renderReport({ meta, scenes, coverage, files, error, selftest })
     const r = s.result;
     lines.push(`### ${String(s.index + 1).padStart(2, "0")} · ${sc.title} ${r ? statusIcon(r) : ""}`);
     lines.push("");
-    lines.push(`- **原版**：${sc.stock}`);
-    lines.push(`- **我们**：${sc.ours}`);
+    lines.push(`- **原版 OHsidian**：${sc.stock}`);
+    lines.push(`- **平板魔改版**：${sc.ours}`);
     if (sc.setup && sc.setup.length) {
       lines.push("- **准备**：");
       for (const step of sc.setup) lines.push(`  - ${step}`);

@@ -175,11 +175,21 @@ export class Device {
   async screenshot(remote, local) {
     const args = this.screenshotArgs(remote);
     const cmd = args.map((a) => (/[\s"']/.test(a) ? `"${a}"` : a)).join(" ");
+    // snapshot_display returns before the JPEG is fully flushed on some builds;
+    // recv immediately after the shell call produced 0-byte files in doctor.
+    await this.shell(`rm -f ${remote}`);
     const r = await run(this.hdc, ["-t", this.serial, "shell", cmd], { timeoutMs: 20000 });
     if (r.code !== 0) throw new DeviceError(`screenshot failed: ${(r.err || r.out).trim().slice(-200)}`);
-    await this.recv(remote, local);
-    if (!fs.existsSync(local) || fs.statSync(local).size < 512) throw new DeviceError("screenshot is empty");
-    return local;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await sleep(attempt === 0 ? 250 : 350);
+      try {
+        await this.recv(remote, local);
+      } catch (e) {
+        if (attempt === 2) throw e;
+      }
+      if (fs.existsSync(local) && fs.statSync(local).size > 512) return local;
+    }
+    throw new DeviceError("screenshot is empty after 3 attempts");
   }
 
   async mkdir(remote) {

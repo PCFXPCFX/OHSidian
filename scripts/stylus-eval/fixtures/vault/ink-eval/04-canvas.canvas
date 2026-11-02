@@ -1,0 +1,14 @@
+{
+  "nodes": [
+    {
+      "id": "eval-note",
+      "type": "text",
+      "text": "Canvas 手写评测\\n用笔在空白处画线，然后拖动画布确认墨迹跟随。",
+      "x": -260,
+      "y": -120,
+      "width": 420,
+      "height": 180
+    }
+  ],
+  "edges": []
+}

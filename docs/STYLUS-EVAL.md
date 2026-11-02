@@ -63,9 +63,17 @@ release 构建由 `scripts/update-obsidian.mjs` 的 `stripDevProbeCalls()` 剥�
 | 10 | `lasso-move` | 套索选择/移动 | 14s |
 | 11 | `lasso-copy-delete` | 套索复制/删除 | 22s |
 | 12 | `predict` | 点预测（实验） | 12s |
+| 13 | `markdown-highlighter` | Markdown 荧光笔 | 12s |
+| 14 | `undo-redo` | 手写撤销 / 重做 | 16s |
+| 15 | `pdf-embed` | Markdown 内嵌 PDF 手写 | 16s |
+| 16 | `canvas-ink` | Canvas 白板手写 | 12s |
+| 17 | `eraser-hl-only` | 只擦荧光笔 | 14s |
+| 18 | `palm-rejection` | 掌托防误触 | 12s |
 
 每个场景在 `manifest.mjs` 里声明：原版行为、我们的行为、准备步骤、操作、时间窗、
 必需探针、断言、宣传文案。新增功能时**必须同时加场景**，否则 gate 不会保护它。
+`palm-rejection` 没有可自动断言的探针，只做人工目视（`PASS*`），其余场景的
+断言都参与 gate。
 
 ## 四、跑法
 

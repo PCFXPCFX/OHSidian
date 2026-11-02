@@ -915,6 +915,12 @@ var OHSIDIAN_INK_REV = "58";
     restoreSpace(doc, entry.space, entry.before);
     markPdfPageDirty(s, entry.space);
     schedulePdfWrite(s);
+    probeHook("inkHistory", {
+      op: "undo",
+      space: entry.space,
+      n: entry.before ? entry.before.length : 0,
+      left: stack.length
+    });
     return true;
   }
 
@@ -935,6 +941,12 @@ var OHSIDIAN_INK_REV = "58";
     restoreSpace(doc, entry.space, entry.after);
     markPdfPageDirty(s, entry.space);
     schedulePdfWrite(s);
+    probeHook("inkHistory", {
+      op: "redo",
+      space: entry.space,
+      n: entry.after ? entry.after.length : 0,
+      left: stack.length
+    });
     return true;
   }
 
@@ -961,6 +973,7 @@ var OHSIDIAN_INK_REV = "58";
     markPdfPageDirty(s, space);
     schedulePdfWrite(s);
     inkStatus("已清除本页墨迹（可撤销）");
+    probeHook("inkClear", { space: space, removed: before.length });
     return true;
   }
 
