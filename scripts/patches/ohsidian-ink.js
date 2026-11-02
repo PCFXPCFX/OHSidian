@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "40";
+var OHSIDIAN_INK_REV = "41";
 (function () {
   "use strict";
 
@@ -51,6 +51,8 @@ var OHSIDIAN_INK_REV = "40";
     hlWidth: 16,
     hlStraight: true,
     holdStraight: true,
+    pressureEraser: true,
+    pressureEraserSens: 60,
     curve: "linear",
     palm: true,
     fingerDraw: false,
@@ -557,6 +559,8 @@ var OHSIDIAN_INK_REV = "40";
     state.hlWidth = Number(pref("inkHlWidth", 16)) || 16;
     state.hlStraight = pref("inkHlStraight", true) !== false;
     state.holdStraight = pref("inkHoldStraight", true) !== false;
+    state.pressureEraser = pref("inkPressureEraser", true) !== false;
+    state.pressureEraserSens = clamp(Number(pref("inkPressureEraserSens", 60)) || 0, 0, 100);
     state.color = pref("inkColor", "#1f1f1f");
     state.hlColor = pref("inkHlColor", "#ffd54a");
     state.colorAuto = pref("inkColorAuto", true) !== false;
@@ -983,6 +987,107 @@ var OHSIDIAN_INK_REV = "40";
       straightenStroke(a.stroke);
       requestLiveFrame();
     }, 430);
+  }
+
+  // ---------------------------------------------------------------------
+  // Pressure eraser (Huawei Notes "压感橡皮擦")
+  // ---------------------------------------------------------------------
+  // Huawei Notes: press the nib down and hold still for a moment, and the pen
+  // temporarily becomes an eraser; move to erase; lift to resume writing.
+  // It deliberately does NOT trigger after a normal stroke moved away from its
+  // start (the troubleshooting page says a moved pen is "writing"), so a pause
+  // at the end of a line can never eat the line.
+  function stopPressureEraserWatch(a) {
+    if (a && a.pressureTimer) {
+      clearInterval(a.pressureTimer);
+      a.pressureTimer = 0;
+    }
+  }
+
+  function pressureEraserArmed(a, pr) {
+    if (state.pressureEraser === false) return false;
+    if (!a || a.kind !== "stroke" || !a.stroke) return false;
+    if (a.stroke.device !== "pen") return false;
+    if (a.stroke.tool !== "pen" && a.stroke.tool !== "highlighter") return false;
+    // Without a real pressure sensor the simulated curve rises to ~0.9 when
+    // the pen stops, which would turn every held dot into an eraser.
+    return state.pressureMode === "real" || (pr && pr.real === true);
+  }
+
+  function startPressureEraserWatch(a, pr) {
+    if (!pressureEraserArmed(a, pr)) return;
+    stopPressureEraserWatch(a);
+    var sens = clamp(Number(state.pressureEraserSens) || 0, 0, 100);
+    var threshold = 0.82 - 0.0055 * sens;
+    var dwell = 700 - 3.2 * sens;
+    a.pressureTimer = setInterval(function () {
+      if (state.active !== a || a.kind !== "stroke") {
+        stopPressureEraserWatch(a);
+        return;
+      }
+      if (nowMs() - (a.downAt || a.t0) < dwell) return;
+      // A real stroke has travelled: this is writing, not the erase gesture.
+      if ((a.maxTravel || 0) > 9) {
+        stopPressureEraserWatch(a);
+        return;
+      }
+      if ((a.lastPressure || 0) < threshold) return;
+      triggerPressureEraser(a);
+    }, 70);
+  }
+
+  function triggerPressureEraser(a) {
+    if (state.active !== a || a.kind !== "stroke") return;
+    stopPressureEraserWatch(a);
+    if (a.holdTimer) {
+      clearTimeout(a.holdTimer);
+      a.holdTimer = 0;
+    }
+    var surface = a.surface;
+    var entry = a.entry;
+    // The dot/line drawn while waiting is not committed yet; drop its live
+    // pixels so the pause does not leave a stray mark before erasing.
+    try {
+      if (surface.kind === "markdown" || surface.kind === "canvas" ||
+        surface.kind === "pdfembed") surface.clearLive();
+      else surface.clearLive(entry);
+    } catch (eCL) {}
+    var doc = docFor(surface);
+    var space = inkSpaceOf(surface, entry);
+    var cx = a.lastClientX;
+    var cy = a.lastClientY;
+    var sp = surface.kind === "pdf"
+      ? surface.toSpaceOn(entry, cx, cy)
+      : surface.toSpace(cx, cy);
+    var st = {
+      kind: "erase",
+      surface: surface,
+      entry: entry,
+      space: space,
+      doc: doc,
+      before: doc ? snapshotSpace(doc, space) : null,
+      changed: false,
+      erasePts: [[sp[0], sp[1]]],
+      visualErased: false,
+      pointerId: a.pointerId,
+      t0: nowMs(),
+      lastSampleAt: nowMs(),
+      pressureTriggered: true
+    };
+    state.active = st;
+    drawCursor(cx, cy, surface, true);
+    if (typeof surface.erasePreview === "function") {
+      surface.erasePreview(cx, cy, Number(state.eraserPx) || 12, entry);
+      st.visualErased = true;
+    } else {
+      eraseAt(surface, entry, sp[0], sp[1], st);
+    }
+    inkStatus("压感橡皮", 700);
+    inkTrace("pressureEraser", {
+      space: space,
+      p: Number(a.lastPressure || 0).toFixed(3),
+      travel: Math.round(a.maxTravel || 0)
+    });
   }
 
   function smoothPoints(pts) {
@@ -3827,6 +3932,14 @@ var OHSIDIAN_INK_REV = "40";
       lastSampleAt: state.strokeT0,
       lastMoveAt: state.strokeT0,
       holdTimer: 0,
+      downAt: state.strokeT0,
+      downClientX: ev.clientX,
+      downClientY: ev.clientY,
+      lastClientX: ev.clientX,
+      lastClientY: ev.clientY,
+      maxTravel: 0,
+      lastPressure: pr.p,
+      pressureTimer: 0,
       dirty: true
     };
     state.latencyT0 = nowMs();
@@ -3842,6 +3955,7 @@ var OHSIDIAN_INK_REV = "40";
     else surface.drawLive(entry, stroke);
     state.active.liveDrawn = stroke.pts.length;
     requestLiveFrame();
+    startPressureEraserWatch(state.active, pr);
   }
 
   function onPointerMoveCapture(ev) {
@@ -3905,6 +4019,13 @@ var OHSIDIAN_INK_REV = "40";
         ? a.surface.toSpaceOn(a.entry, e2.clientX, e2.clientY)
         : a.surface.toSpace(e2.clientX, e2.clientY);
       var pr = pressureFor(a.surface, e2, sp2[0], sp2[1]);
+      a.lastPressure = pr.p;
+      a.lastClientX = e2.clientX;
+      a.lastClientY = e2.clientY;
+      var tdx = e2.clientX - a.downClientX;
+      var tdy = e2.clientY - a.downClientY;
+      var travel = Math.sqrt(tdx * tdx + tdy * tdy);
+      if (travel > a.maxTravel) a.maxTravel = travel;
       a.stroke.pts.push([sp2[0], sp2[1], pr.p, pr.tiltX, pr.tiltY,
         Math.round(nowMs() - a.t0)]);
       if (!pr.real && state.pressureMode !== "real") {
@@ -3971,6 +4092,7 @@ var OHSIDIAN_INK_REV = "40";
       clearTimeout(a.holdTimer);
       a.holdTimer = 0;
     }
+    stopPressureEraserWatch(a);
     if (a.kind === "erase") clearCursor(true);
     palmOffSoon();
     inkWritingChrome(false);
@@ -4196,6 +4318,7 @@ var OHSIDIAN_INK_REV = "40";
           clearTimeout(a.holdTimer);
           a.holdTimer = 0;
         }
+        stopPressureEraserWatch(a);
         if (a.kind === "stroke" && a.stroke) {
           if (a.stroke.straight === true && a.stroke.pts.length > 2) straightenStroke(a.stroke);
           a.stroke.bbox = bboxOf(a.stroke.pts);
@@ -6414,6 +6537,7 @@ var OHSIDIAN_INK_REV = "40";
     return [
       "  " + "手写笔".padEnd(8) + "v" + OHSIDIAN_INK_REV + " 点=" + (pt || "?") + " · 压力档=" + pvals +
         " · 模式=" + state.pressureMode + " · 旁路=" + (state.pressureTapOn ? "开" : "关") +
+        " · 压感橡皮=" + (state.pressureEraser ? Math.round(state.pressureEraserSens) : "关") +
         " · 首帧=" + Math.round(state.lastLatency) + "ms · 合帧=" + state.coalescedMax,
       "  " + "视图".padEnd(9) + viewInfo + " · 工具条=" + barInfo + " · 手写层=" +
         (surface ? surface.kind : "无"),
@@ -6574,6 +6698,30 @@ var OHSIDIAN_INK_REV = "40";
           if (state.tool === "eraser") clearCursor();
         });
         ersCtl.appendChild(ersInput);
+        ctx.toggleEl(ctx.itemEl(input, "压感橡皮擦",
+          "与华为笔记一致：笔尖用力按住并停顿约半秒，暂时变成橡皮；移动擦除，抬笔继续书写。笔画一旦移动过就不会触发，避免把写完的线条擦掉。", true),
+          pref("inkPressureEraser", true) !== false,
+          function (on) { state.pressureEraser = !!on; setPref("inkPressureEraser", !!on); });
+        var pesCtl = ctx.itemEl(input, "压感橡皮灵敏度",
+          "0–100，越高越容易触发（压力门槛更低、等待更短）；越低需要更用力、停得更久。");
+        var pesInput = document.createElement("input");
+        pesInput.type = "range";
+        pesInput.min = "0";
+        pesInput.max = "100";
+        pesInput.step = "5";
+        pesInput.value = String(Number(pref("inkPressureEraserSens", 60)) || 0);
+        pesInput.style.cssText = "width:140px;height:24px;vertical-align:middle";
+        var pesVal = document.createElement("span");
+        pesVal.style.cssText = "margin-left:8px;color:var(--text-muted);font-variant-numeric:tabular-nums";
+        pesVal.textContent = pesInput.value;
+        pesInput.addEventListener("input", function () {
+          var v = clamp(Number(pesInput.value) || 0, 0, 100);
+          state.pressureEraserSens = v;
+          pesVal.textContent = String(Math.round(v));
+          setPref("inkPressureEraserSens", v);
+        });
+        pesCtl.appendChild(pesInput);
+        pesCtl.appendChild(pesVal);
         var dblCtl = ctx.itemEl(input, "笔杆双击",
           "M-Pencil 双击的行为。默认笔 ↔ 橡皮；书写过程中收到的双击会被忽略，避免写到一半突然变成橡皮。如果系统设置里也开了「双击切换」，建议设为「无/应用内」，否则可能双触发。");
         selectEl(dblCtl, [
