@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "47";
+var OHSIDIAN_INK_REV = "49";
 (function () {
   "use strict";
 
@@ -728,6 +728,31 @@ var OHSIDIAN_INK_REV = "47";
             store.redo[key] = [];
           } else {
             doc.strokes = parsed.strokes;
+          }
+          // Migrate sidecars written before the "baked" flag existed: a stroke
+          // that was already written to the PDF is in the annotation layer.
+          // Highlighter uses the flag to avoid drawing a second translucent
+          // copy over the /Highlight annotation.
+          for (var bi = 0; bi < doc.strokes.length; bi++) {
+            if (doc.strokes[bi] && doc.strokes[bi].written === true) {
+              doc.strokes[bi].baked = true;
+            }
+          }
+          // Older highlighter annotations were written as /PolyLine and their
+          // width did not match the overlay. Mark them for one rewrite; that
+          // rewrite emits /Highlight quads with the exact width.
+          var hlMigrate = false;
+          if (doc.type === "pdf") {
+            for (var hi = 0; hi < doc.strokes.length; hi++) {
+              var hs = doc.strokes[hi];
+              if (hs && hs.tool === "highlighter" && hs.written === true &&
+                hs.pdfHl !== true) {
+                hs.written = false;
+                hs.baked = false;
+                hlMigrate = true;
+              }
+            }
+            if (hlMigrate) saveSoon(doc);
           }
           doc.orphans = parsed.orphans || [];
         } else if (parsed) {
@@ -2330,6 +2355,10 @@ var OHSIDIAN_INK_REV = "47";
       reloads: 0,
       annoProbed: false,
       rendered: 0,
+      // True while pdf.js' annotation layer corresponds to the current PDF
+      // bytes. It flips false after we replace the file; the overlay then keeps
+      // showing baked strokes until the document reloads.
+      annotationFresh: true,
       pageStarts: {},
       // The overlay never needs more than 2x; 2.249 costs 26% more pixels
       // per page with no visible gain on handwriting at reading distance.
@@ -2538,10 +2567,23 @@ var OHSIDIAN_INK_REV = "47";
         ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
         // Read the preference once per page, not once per stroke.
         var showBaked = pref("inkPdfAfterBake", "keep") === "keep";
+        // While erasing/moving/selecting, baked highlighter must be visible so
+        // the preview and selection have something to act on. In normal pen
+        // mode it is hidden: the /Highlight annotation is the only copy, and
+        // drawing the overlay too would double the 0.38 alpha (darker bands).
+        var editingBaked = state.tool === "eraser" || state.tool === "lasso" ||
+          !!(state.active && (state.active.kind === "erase" || state.active.kind === "move"));
+        var hideBakedHl = this.annotationFresh !== false;
         for (var i = 0; i < doc.strokes.length; i++) {
           var st = doc.strokes[i];
           if (st.space !== entry.space) continue;
-          if (st.baked && !showBaked) continue;
+          if (st.baked) {
+            if (st.tool === "highlighter") {
+              if (st.pdfHl === true && hideBakedHl && !editingBaked) continue;
+            } else if (!showBaked) {
+              continue;
+            }
+          }
           drawStrokeOnCtx(ctx, st, {
             toCanvasPoint: (function (e) {
               return function (x, y) { return surface.toCanvasPointOn(e, x, y); };
@@ -2651,6 +2693,10 @@ var OHSIDIAN_INK_REV = "47";
         };
         var onPagesInit = function (e) {
           try {
+            // A new document was parsed from the current file; its annotation
+            // layer now matches the sidecar's baked flags again.
+            self.docGeneration = (self.docGeneration || 0) + 1;
+            self.annotationFresh = true;
             probeHook("pdfPagesInit", {
               pages: e && e.pagesCount,
               ms: Math.round(nowMs() - self.openedAt)
@@ -6235,7 +6281,11 @@ var OHSIDIAN_INK_REV = "47";
         // highlighter come back as a blue stroke after write-back.
         color: hexToPdfColor(st2.color),
         width: st2.width,
-        opacity: st2.opacity
+        opacity: st2.opacity,
+        // Highlighter goes to PDF as a /Highlight quad strip, not a thin
+        // polyline: the quad width is the same PDF-space width the overlay
+        // uses, so the two agree exactly.
+        tool: st2.tool || "pen"
       });
     }
     var sample = [];
@@ -6271,6 +6321,7 @@ var OHSIDIAN_INK_REV = "47";
     });
     state.pdfInFlight = true;
     state.pdfAutoDirty = false;
+    var docGen = isPdf && s ? (s.docGeneration || 0) : -1;
     try {
       var res = await pdfWritePage(file.path, abs, vaultRoot, page,
         payload, isDom ? "normalized" : "vector", true, removeIds, state.pdfStyle);
@@ -6297,9 +6348,25 @@ var OHSIDIAN_INK_REV = "47";
       }
       state.pdfAutoFail = 0;
       if (res.backup) state.pdfBackup = res.backup;
-      for (var q = 0; q < list.length; q++) list[q].written = true;
+      for (var q = 0; q < list.length; q++) {
+        list[q].written = true;
+        // The stroke now exists in the PDF annotation layer. The overlay can
+        // stop drawing it (highlighter does, to avoid a double translucent
+        // coat); pdfembed keeps the overlay because its annotation layer is
+        // not guaranteed to be rendered by the host viewer.
+        if (isPdf) {
+          list[q].baked = true;
+          if (list[q].tool === "highlighter") list[q].pdfHl = true;
+        }
+      }
       try { delete state.pdfDirty[doc.target + "|pdf:" + page]; } catch (eD) {}
       await saveDoc(doc);
+      if (isPdf && s && (s.docGeneration || 0) === docGen) {
+        // The file on disk changed but pdf.js still holds the old annotation
+        // layer. Keep the overlay copy visible until the document reloads;
+        // hiding it now would make a freshly written highlighter disappear.
+        s.annotationFresh = false;
+      }
       if (!auto) inkStatus("已写入 PDF 第 " + (page + 1) + " 页；原始文件已备份", 4500);
       else inkStatus("已直接写入 PDF 第 " + (page + 1) + " 页（原文件已备份）", 1800);
       return true;
@@ -7953,10 +8020,10 @@ var OHSIDIAN_INK_REV = "47";
 
         var pdf = ctx.newGroup("PDF 与诊断");
         var pdfCtl = ctx.itemEl(pdf, "写入 PDF 后",
-          "写入后本机同时有手写叠加层和 PDF 注释。注释颜色已与手写同步（修复了荧光笔变蓝），想只保留 PDF 里的那一份就选“隐藏叠加层”。");
+          "高亮笔写入后只显示 PDF 的 /Highlight 注释（等宽、单层，不再和叠加层叠色）。普通笔迹按此选项保留或隐藏叠加层；改为“隐藏”时只看 PDF 注释。");
         selectEl(pdfCtl, [
-          ["keep", "保留叠加层（默认，确保可见）"],
-          ["hide", "隐藏叠加层（依赖阅读器）"]
+          ["keep", "普通笔迹保留叠加层（默认）"],
+          ["hide", "全部只显示 PDF 注释"]
         ], pref("inkPdfAfterBake", "keep"), function (v) { setPref("inkPdfAfterBake", v); });
         ctx.toggleEl(ctx.itemEl(pdf, "直接写入 PDF（自动备份）",
           "开启后按下面的时机把当前页墨迹写回 PDF；首次写入前保留原文件备份。擦除/撤销/清除会重写本页注释。", true),

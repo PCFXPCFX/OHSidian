@@ -49,6 +49,9 @@ export interface PdfInkStroke {
   color: number;
   width: number;
   opacity: number;
+  // "highlighter" becomes a /Highlight quad strip so its width is explicit;
+  // everything else keeps the /PolyLine or /Ink vector path.
+  tool?: string;
 }
 
 export interface PdfInkRequest {
@@ -459,7 +462,38 @@ export class PdfInkWriter {
           }
           pts.push(pt);
         }
-        if (style === 'polyline') {
+        if (stroke.tool === 'highlighter' && !normalized) {
+          // A /Highlight stores the highlighted area as quads. Using the same
+          // PDF-space width as the overlay makes screen and PDF agree exactly;
+          // a /PolyLine's border width is not a reliable highlighter width in
+          // every viewer and was the source of the visible size mismatch.
+          const quads: Array<pdfService.PdfPoint> = PdfInkWriter.highlightQuads(pts, stroke.width);
+          if (quads.length >= 4) {
+            const hinfo = new pdfService.HighlightAnnotationInfo();
+            hinfo.type = pdfService.AnnotationType.HIGHLIGHT;
+            hinfo.uniqueId = annId;
+            hinfo.color = stroke.color;
+            hinfo.opacity = stroke.opacity;
+            hinfo.quadPoints = quads;
+            hinfo.title = INK_MARK;
+            hinfo.content = INK_MARK + ' ' + annId;
+            hinfo.subject = INK_MARK;
+            page.addAnnotation(hinfo);
+          } else {
+            // Degenerate highlighter (single point): keep a vector dot.
+            const pinfo = new pdfService.PolylineAnnotationInfo();
+            pinfo.type = pdfService.AnnotationType.POLYLINE;
+            pinfo.uniqueId = annId;
+            pinfo.lineColor = stroke.color;
+            pinfo.opacity = stroke.opacity;
+            pinfo.border = border;
+            pinfo.vertexes = pts;
+            pinfo.title = INK_MARK;
+            pinfo.content = INK_MARK + ' ' + annId;
+            pinfo.subject = INK_MARK;
+            page.addAnnotation(pinfo);
+          }
+        } else if (style === 'polyline') {
           const pinfo = new pdfService.PolylineAnnotationInfo();
           pinfo.type = pdfService.AnnotationType.POLYLINE;
           pinfo.uniqueId = annId;
@@ -631,6 +665,43 @@ export class PdfInkWriter {
       ' strokes=' + req.strokes.length + ' bytes=' + bytes +
       ' totalMs=' + (Date.now() - started));
     return result;
+  }
+
+  /**
+   * Build PDF /Highlight quadPoints from a polyline: each segment becomes one
+   * quad (UL, UR, LL, LR). The width is the same PDF-space width the renderer
+   * uses for the overlay, so the annotation is not scaled or given a viewer's
+   * default border width.
+   */
+  private static highlightQuads(points: Array<pdfService.PdfPoint>,
+    width: number): Array<pdfService.PdfPoint> {
+    const quads: Array<pdfService.PdfPoint> = [];
+    const hw: number = Math.max(0.5, width) / 2;
+    for (let i = 1; i < points.length; i++) {
+      const x0: number = points[i - 1].x;
+      const y0: number = points[i - 1].y;
+      const x1: number = points[i].x;
+      const y1: number = points[i].y;
+      const dx: number = x1 - x0;
+      const dy: number = y1 - y0;
+      const len: number = Math.sqrt(dx * dx + dy * dy);
+      if (len < 0.01) {
+        continue;
+      }
+      const nx: number = -dy / len * hw;
+      const ny: number = dx / len * hw;
+      const mk = (x: number, y: number): pdfService.PdfPoint => {
+        const p = new pdfService.PdfPoint();
+        p.x = x;
+        p.y = y;
+        return p;
+      };
+      quads.push(mk(x0 + nx, y0 + ny));
+      quads.push(mk(x1 + nx, y1 + ny));
+      quads.push(mk(x0 - nx, y0 - ny));
+      quads.push(mk(x1 - nx, y1 - ny));
+    }
+    return quads;
   }
 
   static backupPathFor(src: string, backupDir: string): string {

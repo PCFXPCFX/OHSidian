@@ -4246,3 +4246,57 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 - 滚动会清除选择（避免选框与页面脱节）；
 - 真机重点看：PDF 页面套索坐标是否准、移动后写回是否只更新本页、指纹/笔尖在
   “副本/删除/取消”按钮上是否能正常点击。
+
+## 第 201 轮 (2026-11-02): 高亮笔写回宽度与双层叠色修复（v49）
+
+### 一、根因
+
+1. **双层叠色**：`inkWritePdf` 成功后只把 `written=true`，从未把 `baked=true`。`redrawPage`
+   里 `if (st.baked && !showBaked) continue` 永远不生效，所以叠加层一直画着高亮笔，
+   同时 PDF 注释的 appearance stream 也被 pdf.js 画出来 → 0.38 的透明色叠成两层，
+   明显变深。
+2. **宽度不匹配**：高亮笔之前写成 `/PolyLine`，`borderWidth` 交给 PDF Kit 生成
+   appearance stream。pdf.js 实际显示的是这份 appearance，不是 polyline 的 SVG
+   （pdf.js 把 polyline 的 `stroke` 固定成 `transparent`）。appearance 的线宽与叠加层
+   的 `widthFor()` 不是同一套换算，于是屏幕和 PDF 的宽度对不上。
+3. **旧注释**：v48 以前写出的高亮笔都是 polyline，没有记录“已改成 quad”的标记。
+
+### 二、修复
+
+- **PDF 侧改成 `/Highlight` quad 条带**（`PdfInkWriter.highlightQuads()`）：
+  - 每个线段按法线扩半个笔宽，生成 `UL, UR, LL, LR` 四点；
+  - 宽度直接用 `stroke.width`（PDF 单位），和叠加层 `stroke.width * viewport.scale`
+    完全同源，因此宽度精确一致；
+  - 只对 `highlighter && !normalized` 使用；单点退化时回退 polyline；
+  - payload 新增 `tool`，native `PdfInkStroke` 同步。
+- **写入成功后标记 baked / pdfHl**：
+  - `written=true`、`baked=true`；高亮笔另加 `pdfHl=true`；
+  - `redrawPage` 只在 `annotationFresh`（pdf.js 已加载新注释层）时跳过已 baked 的
+    高亮笔；普通笔迹仍按设置保留叠加层；
+  - 擦除/套索/移动时强制显示 baked 高亮笔，保证预览和选择可见；
+  - 写入后把 `annotationFresh=false`，避免“文件已换、pdf.js 还是旧注释层”时把
+    刚写的荧光笔从叠加层里藏掉；下次 `pagesinit`（重新加载 PDF）恢复 true。
+- **旧高亮笔自动迁移**：侧车里 `highlighter + written && !pdfHl` 的笔画会被标记为
+  `written=false`、`baked=false`，下一次离开/后台写回时用 quad 重写；重写后
+  `pdfHl=true`，再加载即只显示 PDF 注释。也可用设置里的 **“重写本页标注”** 立即触发。
+- 设置文案同步：高亮笔写回后只显示 PDF 的 `/Highlight`，不再和叠加层叠色；普通笔迹
+  仍可选“保留/隐藏叠加层”。
+
+### 三、产物
+
+| 产物 | 大小/时间 | SHA-256 |
+|---|---|---|
+| `electron-default-signed.hap`（ink v49） | 121,095,537 B / 2026-11-02 19:29:42 | `12DE220325470BE731FAB7070F8114591F0BF52B5FBCF409BDC2C000EF139F5D` |
+
+- `node --check`、`update-obsidian --repatch`、`verify-asar`、`verify-release` 全绿。
+- 按你的要求，**没有安装/操作设备**；未做真机验证。
+
+### 四、使用 / 待确认
+
+1. 旧页面：打开 PDF → 设置 → PDF 与诊断 → **重写本页标注**，然后离开/重开 PDF；
+   或直接离开 PDF 让自动写回在后台转换。转换后叠加层不再画高亮笔，只剩 PDF 注释。
+2. 新画的高亮笔：写回后重开 PDF，应只有一份、宽度与屏幕上一致、颜色不加深。
+3. 如果重开后高亮笔**完全不可见**，说明该阅读器不显示 `/Highlight` appearance，
+   把诊断和现象发我，我再改成“隐藏 PDF 注释 + 只留叠加层”的路线。
+4. 普通笔迹的双层是黑色不透明，视觉上无叠色；如果也想只留一份，把“写入 PDF 后”
+   设为“全部只显示 PDF 注释”。
