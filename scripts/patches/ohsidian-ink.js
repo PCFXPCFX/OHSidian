@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "46";
+var OHSIDIAN_INK_REV = "47";
 (function () {
   "use strict";
 
@@ -27,6 +27,9 @@ var OHSIDIAN_INK_REV = "46";
   var TOOLBAR_ID = "ohsidian-ink-toolbar";
   var MENU_ID = "ohsidian-ink-menu";
   var CLEAR_ID = "ohsidian-ink-clear";
+  var LASSO_ID = "ohsidian-ink-lasso";
+  var SEL_ID = "ohsidian-ink-sel";
+  var SELBAR_ID = "ohsidian-ink-selbar";
   var GUARD_ID = "ohsidian-palm-guard";
 
   var state = {
@@ -107,6 +110,8 @@ var OHSIDIAN_INK_REV = "46";
     lastToolMode: null,
     pdfProbeDone: false,
     active: null,
+    selection: null,
+    lassoPts: null,
     toolbarBuilt: false,
     menuOpen: false,
     ipcReady: false,
@@ -842,6 +847,7 @@ var OHSIDIAN_INK_REV = "46";
   }
 
   function inkUndo(surface) {
+    clearSelection();
     var s = surface || state.activeSurface || activeSurfaceNow();
     var doc = s ? docFor(s) : null;
     if (!doc) return false;
@@ -861,6 +867,7 @@ var OHSIDIAN_INK_REV = "46";
   }
 
   function inkRedo(surface) {
+    clearSelection();
     var s = surface || state.activeSurface || activeSurfaceNow();
     var doc = s ? docFor(s) : null;
     if (!doc) return false;
@@ -880,6 +887,7 @@ var OHSIDIAN_INK_REV = "46";
   }
 
   function inkClearSpace(surface) {
+    clearSelection();
     var s = surface || state.activeSurface || activeSurfaceNow();
     var doc = s ? docFor(s) : null;
     if (!doc || !s) return false;
@@ -2914,6 +2922,7 @@ var OHSIDIAN_INK_REV = "46";
   }
 
   function removeSurface(surface) {
+    if (state.selection && state.selection.surface === surface) clearSelection();
     if (state.active && state.active.surface === surface) {
       // Never leave a live stroke pointing at a detached surface; commit it to
       // its doc first, then tear the DOM down.
@@ -3999,7 +4008,7 @@ var OHSIDIAN_INK_REV = "46";
     if (!el) return true;
     try {
       if (el.closest("#" + TOOLBAR_ID) || el.closest("#" + MENU_ID) ||
-        el.closest("#" + CLEAR_ID)) return true;
+        el.closest("#" + CLEAR_ID) || el.closest("#" + SELBAR_ID)) return true;
       if (el.closest(".modal-container") || el.closest(".modal-bg") || el.closest(".prompt") ||
         el.closest(".menu") || el.closest(".suggestion-container")) return true;
       if (el.closest(".workspace-drawer") || el.closest(".pdf-sidebar-container") ||
@@ -4020,7 +4029,7 @@ var OHSIDIAN_INK_REV = "46";
   function isInkChrome(el) {
     try {
       return !!(el && (el.closest("#" + TOOLBAR_ID) || el.closest("#" + MENU_ID) ||
-        el.closest("#" + CLEAR_ID)));
+        el.closest("#" + CLEAR_ID) || el.closest("#" + SELBAR_ID)));
     } catch (e) {
       return false;
     }
@@ -4057,7 +4066,8 @@ var OHSIDIAN_INK_REV = "46";
       return;
     }
     if (ev.button !== undefined && ev.button !== 0 && ev.button !== 5) return;
-    if (!isPenEvent(ev) && !(state.fingerDraw && ev.pointerType === "touch")) return;
+    var fingerLasso = state.tool === "lasso" && ev.pointerType === "touch";
+    if (!isPenEvent(ev) && !(state.fingerDraw && ev.pointerType === "touch") && !fingerLasso) return;
     if (state.tool === "pointer") return;
     if (isExcluded(ev.target)) {
       if (isPenEvent(ev) && state.tool !== "pointer") {
@@ -4202,6 +4212,54 @@ var OHSIDIAN_INK_REV = "46";
       }
       return;
     }
+    if (tool === "lasso") {
+      var ldoc = docFor(surface);
+      var lspace = inkSpaceOf(surface, entry);
+      var sel = state.selection;
+      var canMove = !!(sel && ldoc && sel.doc === ldoc && sel.space === lspace &&
+        sel.clientRect &&
+        ev.clientX >= sel.clientRect.left - 6 && ev.clientX <= sel.clientRect.right + 6 &&
+        ev.clientY >= sel.clientRect.top - 6 && ev.clientY <= sel.clientRect.bottom + 6);
+      state.activeSurface = surface;
+      try {
+        if (ev.target && ev.target.setPointerCapture) ev.target.setPointerCapture(ev.pointerId);
+      } catch (eCap) {}
+      if (canMove) {
+        state.active = {
+          kind: "move",
+          surface: surface,
+          entry: entry,
+          space: lspace,
+          doc: ldoc,
+          ids: sel.ids.slice(),
+          origIds: sel.ids.slice(),
+          cloned: false,
+          before: snapshotSpace(ldoc, lspace),
+          last: sp,
+          changed: false,
+          pointerId: ev.pointerId,
+          t0: state.strokeT0,
+          lastSampleAt: state.strokeT0
+        };
+      } else {
+        clearSelection();
+        state.active = {
+          kind: "lasso",
+          surface: surface,
+          entry: entry,
+          space: lspace,
+          lassoPts: [[ev.clientX, ev.clientY]],
+          pointerId: ev.pointerId,
+          t0: state.strokeT0,
+          lastSampleAt: state.strokeT0
+        };
+        drawLasso(state.active.lassoPts);
+      }
+      palmOn();
+      inkWritingChrome(true);
+      inkTrace("lassoDown", { move: canMove, space: lspace });
+      return;
+    }
     var autoColor = state.colorAuto && tool !== "highlighter";
     var baseWidth = tool === "highlighter" ? state.hlWidth : state.width;
     var widthScale = surface.kind === "pdf"
@@ -4322,6 +4380,59 @@ var OHSIDIAN_INK_REV = "46";
       }
       return;
     }
+    if (a.kind === "lasso") {
+      a.lassoPts.push([ev.clientX, ev.clientY]);
+      drawLasso(a.lassoPts);
+      return;
+    }
+    if (a.kind === "move") {
+      var msp = a.surface.kind === "pdf"
+        ? a.surface.toSpaceOn(a.entry, ev.clientX, ev.clientY)
+        : a.surface.toSpace(ev.clientX, ev.clientY);
+      var mdx = msp[0] - a.last[0];
+      var mdy = msp[1] - a.last[1];
+      if (Math.abs(mdx) + Math.abs(mdy) > 0.01) {
+        if (!a.cloned) {
+          // History snapshots keep references, so a move must not mutate the
+          // committed stroke objects. Replace each selected stroke with a fresh
+          // clone once per gesture; the before snapshot still points at the
+          // originals and undo can restore them.
+          var orig = {};
+          for (var oi = 0; oi < a.origIds.length; oi++) orig[a.origIds[oi]] = true;
+          var movedIds = [];
+          for (var ri = 0; ri < a.doc.strokes.length; ri++) {
+            var rst = a.doc.strokes[ri];
+            if (!rst || !orig[rst.id]) continue;
+            var rclone = cloneStrokeObject(rst);
+            rclone.id = uid();
+            rclone.written = false;
+            a.doc.strokes[ri] = rclone;
+            movedIds.push(rclone.id);
+          }
+          a.ids = movedIds;
+          a.cloned = true;
+          if (state.selection) state.selection.ids = movedIds.slice();
+        }
+        for (var si = 0; si < a.doc.strokes.length; si++) {
+          var mst = a.doc.strokes[si];
+          if (!mst || a.ids.indexOf(mst.id) < 0) continue;
+          for (var mi = 0; mi < mst.pts.length; mi++) {
+            mst.pts[mi][0] += mdx;
+            mst.pts[mi][1] += mdy;
+          }
+          mst.bbox = null;
+        }
+        a.last = msp;
+        a.changed = true;
+        var mt = nowMs();
+        if (!a.lastRedraw || mt - a.lastRedraw > 16) {
+          a.lastRedraw = mt;
+          redrawEraseSurface(a.surface, a.entry);
+          updateSelectionBox();
+        }
+      }
+      return;
+    }
     if (a.shapeApplied) {
       // The native recognizer has already replaced this stroke with the ideal
       // shape; further pen movement must not append freehand points to it.
@@ -4424,6 +4535,24 @@ var OHSIDIAN_INK_REV = "46";
       tool: a.stroke ? a.stroke.tool : "erase",
       points: a.stroke && a.stroke.pts ? a.stroke.pts.length : 0
     });
+    if (a.kind === "lasso") {
+      finishLasso(a);
+      return;
+    }
+    if (a.kind === "move") {
+      if (a.changed && a.doc && a.before) {
+        pushHistory(a.doc, a.space, a.before);
+        saveSoon(a.doc);
+        if (a.space.indexOf("pdf:") === 0) markPdfPageDirty(a.surface, a.space);
+        if (a.surface.kind === "pdf" || a.surface.kind === "pdfembed") {
+          schedulePdfWrite(a.surface);
+        }
+        inkStatus("已移动选中墨迹", 900);
+      }
+      redrawEraseSurface(a.surface, a.entry);
+      updateSelectionBox();
+      return;
+    }
     if (a.kind === "erase") {
       // Partial mode clears pixels on the base canvas while the pen moves and
       // applies the path to the document once, at pen-up. Whole-stroke mode
@@ -4706,6 +4835,349 @@ var OHSIDIAN_INK_REV = "46";
     } catch (e) {}
   }
 
+  // ---------------------------------------------------------------------
+  // Lasso selection
+  // ---------------------------------------------------------------------
+  function lassoCanvas() {
+    var cv = document.getElementById(LASSO_ID);
+    if (!cv) {
+      cv = document.createElement("canvas");
+      cv.id = LASSO_ID;
+      document.body.appendChild(cv);
+    }
+    var dpr = 1; // outline only: CSS-resolution is enough and 4x cheaper
+    var w = Math.max(1, window.innerWidth || 1);
+    var h = Math.max(1, window.innerHeight || 1);
+    var pw = Math.round(w * dpr);
+    var ph = Math.round(h * dpr);
+    if (cv.width !== pw || cv.height !== ph) {
+      cv.width = pw;
+      cv.height = ph;
+    }
+    return cv;
+  }
+
+  function clearLasso() {
+    state.lassoPts = null;
+    var cv = document.getElementById(LASSO_ID);
+    if (!cv) return;
+    try {
+      var ctx = cv.getContext("2d");
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, cv.width, cv.height);
+    } catch (e) {}
+  }
+
+  function drawLasso(pts) {
+    if (!pts || pts.length < 2) return;
+    var cv = lassoCanvas();
+    var dpr = 1;
+    var ctx = cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cv.width / dpr, cv.height / dpr);
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(74,144,226,.08)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(74,144,226,.95)";
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([6, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  function pointInPoly(poly, x, y) {
+    var inside = false;
+    for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      var xi = poly[i][0], yi = poly[i][1];
+      var xj = poly[j][0], yj = poly[j][1];
+      if (((yi > y) !== (yj > y)) &&
+        (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-9) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  function surfaceRootRect(surface) {
+    if (surface.kind === "pdf") return null;
+    if (surface.kind === "canvas") return surface.wrapper.getBoundingClientRect();
+    if (surface.kind === "pdfembed") return surface.pageEl.getBoundingClientRect();
+    return surface.rootEl.getBoundingClientRect();
+  }
+
+  function spaceToClient(surface, entry, x, y) {
+    try {
+      if (surface.kind === "pdf") {
+        var vp = entry.viewport.convertToViewportPoint(x, y);
+        var pr = entry.pageEl.getBoundingClientRect();
+        return [pr.left + vp[0], pr.top + vp[1]];
+      }
+      var cp = surface.toCanvasPoint(x, y);
+      var rr = surfaceRootRect(surface);
+      return [rr.left + cp[0], rr.top + cp[1]];
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function clientToSpace(surface, entry, x, y) {
+    if (surface.kind === "pdf") return surface.toSpaceOn(entry, x, y);
+    return surface.toSpace(x, y);
+  }
+
+  function cloneStrokeObject(st) {
+    var clone = {};
+    for (var key in st) {
+      if (Object.prototype.hasOwnProperty.call(st, key)) clone[key] = st[key];
+    }
+    clone.pts = [];
+    for (var i = 0; i < st.pts.length; i++) clone.pts.push(st.pts[i].slice());
+    clone.bbox = null;
+    return clone;
+  }
+
+  function selectedStrokes(sel) {
+    if (!sel) return [];
+    var out = [];
+    for (var i = 0; i < sel.doc.strokes.length; i++) {
+      var st = sel.doc.strokes[i];
+      if (st && sel.ids.indexOf(st.id) >= 0) out.push(st);
+    }
+    return out;
+  }
+
+  function selectionBBox(sel) {
+    if (!sel) return null;
+    var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    var list = selectedStrokes(sel);
+    for (var i = 0; i < list.length; i++) {
+      var st = list[i];
+      var b = st.bbox || bboxOf(st.pts);
+      if (!b) continue;
+      if (b[0] < x0) x0 = b[0];
+      if (b[1] < y0) y0 = b[1];
+      if (b[2] > x1) x1 = b[2];
+      if (b[3] > y1) y1 = b[3];
+    }
+    if (x0 > x1) return null;
+    return [x0, y0, x1, y1];
+  }
+
+  function selectionEl() {
+    var el = document.getElementById(SEL_ID);
+    if (!el) {
+      el = document.createElement("div");
+      el.id = SEL_ID;
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+
+  function selectionBarEl() {
+    var el = document.getElementById(SELBAR_ID);
+    if (!el) {
+      el = document.createElement("div");
+      el.id = SELBAR_ID;
+      var mk = function (label, cls, fn) {
+        var b = document.createElement("button");
+        b.textContent = label;
+        if (cls) b.className = cls;
+        b.addEventListener("pointerdown", function (e) {
+          try { e.preventDefault(); e.stopPropagation(); } catch (e1) {}
+          fn();
+        });
+        el.appendChild(b);
+        return b;
+      };
+      mk("副本", "", function () { duplicateSelection(); });
+      mk("删除", "is-danger", function () { deleteSelection(); });
+      mk("取消", "", function () { clearSelection(); });
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+
+  function updateSelectionBox() {
+    var sel = state.selection;
+    var el = document.getElementById(SEL_ID);
+    var bar = document.getElementById(SELBAR_ID);
+    if (!sel) {
+      if (el) el.style.display = "none";
+      if (bar) bar.style.display = "none";
+      return;
+    }
+    var bb = selectionBBox(sel);
+    if (!bb) {
+      clearSelection();
+      return;
+    }
+    var a = spaceToClient(sel.surface, sel.entry, bb[0], bb[1]);
+    var b = spaceToClient(sel.surface, sel.entry, bb[2], bb[3]);
+    if (!a || !b) {
+      clearSelection();
+      return;
+    }
+    var left = Math.min(a[0], b[0]) - 8;
+    var top = Math.min(a[1], b[1]) - 8;
+    var w = Math.abs(b[0] - a[0]) + 16;
+    var h = Math.abs(b[1] - a[1]) + 16;
+    var box = selectionEl();
+    box.style.display = "block";
+    box.style.left = Math.round(left) + "px";
+    box.style.top = Math.round(top) + "px";
+    box.style.width = Math.max(18, Math.round(w)) + "px";
+    box.style.height = Math.max(18, Math.round(h)) + "px";
+    var sb = selectionBarEl();
+    sb.style.display = "flex";
+    var bw = 180;
+    var bx = Math.max(8, Math.min(window.innerWidth - bw - 8, left + w - bw));
+    var by = top - 42;
+    if (by < 8) by = top + h + 8;
+    sb.style.left = Math.round(bx) + "px";
+    sb.style.top = Math.round(by) + "px";
+    sel.clientRect = { left: left, top: top, right: left + w, bottom: top + h };
+  }
+
+  function clearSelection() {
+    state.selection = null;
+    var el = document.getElementById(SEL_ID);
+    if (el) el.style.display = "none";
+    var bar = document.getElementById(SELBAR_ID);
+    if (bar) bar.style.display = "none";
+    clearLasso();
+  }
+
+  function selectStrokes(surface, entry, clientPoly) {
+    var doc = docFor(surface);
+    if (!doc || !clientPoly || clientPoly.length < 3) {
+      clearSelection();
+      return;
+    }
+    var space = inkSpaceOf(surface, entry);
+    var poly = [];
+    for (var i = 0; i < clientPoly.length; i++) {
+      var sp = clientToSpace(surface, entry, clientPoly[i][0], clientPoly[i][1]);
+      poly.push(sp);
+    }
+    var ids = [];
+    var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (var j = 0; j < doc.strokes.length; j++) {
+      var st = doc.strokes[j];
+      if (!st || st.space !== space || !st.pts || !st.pts.length) continue;
+      var inside = 0;
+      var sx = 0, sy = 0;
+      for (var k = 0; k < st.pts.length; k++) {
+        if (pointInPoly(poly, st.pts[k][0], st.pts[k][1])) inside++;
+        sx += st.pts[k][0];
+        sy += st.pts[k][1];
+      }
+      var centerIn = pointInPoly(poly, sx / st.pts.length, sy / st.pts.length);
+      if (inside < Math.max(1, Math.ceil(st.pts.length * 0.5)) && !centerIn) continue;
+      if (!st.id) st.id = uid();
+      ids.push(st.id);
+      var b = st.bbox || bboxOf(st.pts);
+      if (!b) continue;
+      if (b[0] < x0) x0 = b[0];
+      if (b[1] < y0) y0 = b[1];
+      if (b[2] > x1) x1 = b[2];
+      if (b[3] > y1) y1 = b[3];
+    }
+    if (!ids.length) {
+      clearSelection();
+      inkStatus("套索没有选中墨迹", 900);
+      return;
+    }
+    state.selection = {
+      doc: doc,
+      space: space,
+      surface: surface,
+      entry: entry,
+      ids: ids,
+      clientRect: null
+    };
+    updateSelectionBox();
+    inkStatus("已选中 " + ids.length + " 笔", 1100);
+    inkTrace("lassoSelect", { strokes: ids.length, space: space });
+  }
+
+  function duplicateSelection() {
+    var sel = state.selection;
+    if (!sel) return;
+    var before = snapshotSpace(sel.doc, sel.space);
+    var dx = 18, dy = 18;
+    try {
+      if (sel.surface.kind === "pdf") dx = 14 / (sel.surface.widthScaleOn(sel.entry) || 1);
+      else if (sel.surface.kind === "pdfembed") dx = 0.02;
+    } catch (e) {}
+    var newIds = [];
+    var total = sel.doc.strokes.length;
+    for (var i = 0; i < total; i++) {
+      var st = sel.doc.strokes[i];
+      if (!st || sel.ids.indexOf(st.id) < 0) continue;
+      var clone = cloneStrokeObject(st);
+      clone.id = uid();
+      clone.baked = false;
+      clone.written = false;
+      for (var p = 0; p < clone.pts.length; p++) {
+        clone.pts[p][0] += dx;
+        clone.pts[p][1] += dy;
+      }
+      clone.bbox = bboxOf(clone.pts);
+      sel.doc.strokes.push(clone);
+      newIds.push(clone.id);
+    }
+    if (!newIds.length) return;
+    sel.ids = newIds;
+    pushHistory(sel.doc, sel.space, before);
+    saveSoon(sel.doc);
+    redrawEraseSurface(sel.surface, sel.entry);
+    updateSelectionBox();
+    if (sel.space.indexOf("pdf:") === 0) markPdfPageDirty(sel.surface, sel.space);
+    if (sel.surface.kind === "pdf" || sel.surface.kind === "pdfembed") schedulePdfWrite(sel.surface);
+    inkStatus("已复制 " + newIds.length + " 笔", 1100);
+  }
+
+  function deleteSelection() {
+    var sel = state.selection;
+    if (!sel) return;
+    var before = snapshotSpace(sel.doc, sel.space);
+    var out = [];
+    var removed = 0;
+    for (var i = 0; i < sel.doc.strokes.length; i++) {
+      var st = sel.doc.strokes[i];
+      if (st && sel.ids.indexOf(st.id) >= 0) {
+        removed++;
+        continue;
+      }
+      out.push(st);
+    }
+    if (!removed) {
+      clearSelection();
+      return;
+    }
+    sel.doc.strokes = out;
+    pushHistory(sel.doc, sel.space, before);
+    saveSoon(sel.doc);
+    redrawEraseSurface(sel.surface, sel.entry);
+    if (sel.space.indexOf("pdf:") === 0) markPdfPageDirty(sel.surface, sel.space);
+    if (sel.surface.kind === "pdf" || sel.surface.kind === "pdfembed") schedulePdfWrite(sel.surface);
+    clearSelection();
+    inkStatus("已删除 " + removed + " 笔", 1100);
+  }
+
+  function finishLasso(a) {
+    var pts = (a.lassoPts || []).slice();
+    clearLasso();
+    if (pts.length < 4) {
+      clearSelection();
+      return;
+    }
+    selectStrokes(a.surface, a.entry, pts);
+  }
+
   // Palm rejection: a full-screen guard exists only while the pen is down.
   var palmTimer = 0;
   var palmWatchdog = 0;
@@ -4744,7 +5216,15 @@ var OHSIDIAN_INK_REV = "46";
           a.holdTimer = 0;
         }
         stopPressureEraserWatch(a);
-        if (a.kind === "stroke" && a.stroke) {
+        if (a.kind === "lasso") {
+          clearLasso();
+        } else if (a.kind === "move" && a.changed && a.doc && a.before) {
+          pushHistory(a.doc, a.space, a.before);
+          saveSoon(a.doc);
+          if (a.space.indexOf("pdf:") === 0) markPdfPageDirty(a.surface, a.space);
+          if (a.surface.kind === "pdf" || a.surface.kind === "pdfembed") schedulePdfWrite(a.surface);
+          updateSelectionBox();
+        } else if (a.kind === "stroke" && a.stroke) {
           if (a.stroke.straight === true && a.stroke.pts.length > 2) straightenStroke(a.stroke);
           a.stroke.bbox = bboxOf(a.stroke.pts);
           finishStroke(a.surface, a.entry, a.stroke);
@@ -6149,7 +6629,16 @@ var OHSIDIAN_INK_REV = "46";
         "background:color-mix(in srgb,var(--background-secondary) 72%,transparent);" +
         "backdrop-filter:blur(18px) saturate(1.25);-webkit-backdrop-filter:blur(18px) saturate(1.25)}",
       "body.ohsidian-ink-reduce-motion #" + TOOLBAR_ID + " *,body.ohsidian-ink-reduce-motion #" + MENU_ID + " *," +
-        "body.ohsidian-ink-reduce-motion #" + CLEAR_ID + " *{transition:none!important;animation:none!important}"
+        "body.ohsidian-ink-reduce-motion #" + CLEAR_ID + " *{transition:none!important;animation:none!important}",
+      "#" + LASSO_ID + "{position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;z-index:58}",
+      "#" + SEL_ID + "{position:fixed;border:1.5px dashed #4a90e2;background:rgba(74,144,226,.08);" +
+        "border-radius:3px;z-index:59;pointer-events:none;display:none}",
+      "#" + SELBAR_ID + "{position:fixed;z-index:61;display:none;gap:5px;padding:4px;" +
+        "border-radius:9px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
+        "box-shadow:var(--shadow-s,0 1px 3px rgba(0,0,0,.14))}",
+      "#" + SELBAR_ID + " button{pointer-events:auto;border:0;border-radius:6px;background:var(--background-modifier-hover);" +
+        "color:var(--text-normal);font-size:12px;padding:5px 9px;min-width:38px;touch-action:manipulation}",
+      "#" + SELBAR_ID + " button.is-danger{color:var(--text-error,#d33)}"
     ].join("\n");
     var el = document.createElement("style");
     el.id = CSS_ID;
@@ -6168,6 +6657,7 @@ var OHSIDIAN_INK_REV = "46";
       highlighter: '<path d="M9 11l-5 5v4h4l5-5"/><path d="M14 4l6 6-4 4-6-6 4-4z"/>',
       eraser: '<path d="M7 21h13"/><path d="M5 15l6-6 5 5-6 6H6l-1-5z"/>',
       shape: '<path d="M12 4l8 15H4L12 4z"/><path d="M8.5 14h7"/>',
+      lasso: '<path d="M4 15c0-6 4-9 8-9s8 3 8 7-3 6-7 6c-2 0-4-.6-5.2-1.4"/><path d="M8 19.5c-2-.6-3-2-3-3.5"/>',
       undo: '<path d="M9 14l-4-4 4-4"/><path d="M5 10h9a5 5 0 010 10h-3"/>',
       redo: '<path d="M15 14l4-4-4-4"/><path d="M19 10h-9a5 5 0 000 10h3"/>',
       more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
@@ -6447,6 +6937,7 @@ var OHSIDIAN_INK_REV = "46";
     bar.appendChild(mkBtn("pen", "✎", "笔"));
     bar.appendChild(mkBtn("highlighter", "▤", "高亮笔"));
     bar.appendChild(mkBtn("shape", "△", "一笔成形（鸿蒙识别）"));
+    bar.appendChild(mkBtn("lasso", "◌", "套索选择墨迹"));
     bar.appendChild(mkBtn("eraser", "⌫", "橡皮（整笔/局部）"));
     bar.appendChild(mkBtn("undo", "↶", "撤销墨迹"));
     bar.appendChild(mkBtn("redo", "↷", "重做墨迹"));
@@ -6646,7 +7137,8 @@ var OHSIDIAN_INK_REV = "46";
       updateToolbarState();
       return;
     }
-    if (act === "pointer" || act === "pen" || act === "highlighter" || act === "eraser") {
+    if (act === "pointer" || act === "pen" || act === "highlighter" || act === "eraser" ||
+      act === "lasso") {
       setTool(act);
       if (state.barExpanded) scheduleBarHide();
       return;
@@ -6679,6 +7171,7 @@ var OHSIDIAN_INK_REV = "46";
       inkTrace("setToolIgnored", { tool: tool, reason: "stroke" });
       return;
     }
+    if (tool !== "lasso" && state.selection) clearSelection();
     if (tool !== "pointer" && !activeSurfaceNow()) {
       // Canvas/PDF can mount slightly after the leaf becomes active; retry
       // before falling through to the "no layer" path.
@@ -7651,7 +8144,11 @@ var OHSIDIAN_INK_REV = "46";
         if (ss.kind === "markdown" || ss.kind === "canvas") ss.rects = null;
       }
       if (state.barMode !== "always" && state.barExpanded) collapseToolbar();
+      if (state.selection) clearSelection();
     }, { capture: true, passive: true });
+    window.addEventListener("resize", function () {
+      if (state.selection) clearSelection();
+    }, { passive: true });
     try { document.addEventListener("pointerleave", clearCursor, true); } catch (eL) {}
     // A lost pen-up must not leave the translucent "writing" state covering
     // the nib, or the controls look dead until the 2.6s watchdog fires.
@@ -7731,6 +8228,7 @@ var OHSIDIAN_INK_REV = "46";
   }
 
   function onActiveLeafChange() {
+    clearSelection();
     flushPdfWrite();
     var app = state.app;
     var leaf = app && app.workspace ? app.workspace.activeLeaf : null;
