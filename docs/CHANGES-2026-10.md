@@ -4098,3 +4098,44 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
 
 `electron-default-signed.hap`（ink v41）：121,041,872 B / 2026-11-02 12:28:07，SHA-256 `515E0EDF936B3901685F9370AFDF6039A5D596CC05BCAC0437EE7C1DBBBB10C0`。`verify-asar` / `verify-release` 全绿。
 
+
+## 第 198 轮 (2026-11-02): v40/v41 审计与加固
+
+**审计范围**：`c506c97..b65a739`，`scripts/patches/ohsidian-ink.js` 397 行改动，
+覆盖停留变直、荧光笔直线/等宽、跨页跳页、笔停断笔、双击恢复、PDF 写回颜色、
+压感橡皮擦与相关设置。
+
+### 一、审计方法
+
+- 逐 hunk 复核指针生命周期、定时器清理、撤销快照、PDF 脏页、设置迁移。
+- `node --check`；`update-obsidian --repatch`；`verify-asar` / `verify-release` 全绿。
+- 从构建后的 `obsidian.asar` 里解出 `app.js`，确认 `REV=41`、`hexToPdfColor`、
+  `pressureEraser`、`inkDoubleTapRestore` 等标记确实进包。
+- 对照华为官方“压感橡皮擦”条件（按住不动、压力门槛、抬笔恢复）复核实现。
+
+### 二、发现并修复
+
+| # | 级别 | 问题 | 修复 |
+|---|---|---|---|
+| 1 | 中 | 硬件橡皮判定仍偏宽：`button===5` 且压力≈0 就转橡皮。部分引擎在**正常笔尖第一帧**会先给 `button=5`、压力尚未上报（0），可能把起笔误判成橡皮 | 笔事件改为 `button===5 && (buttons & 32) && pressure<=0.01` 三条同时成立；普通笔尖有压力时永远绘制。非笔事件保持原逻辑 |
+| 2 | 低 | `pagechanging` 强制滚动删除后，`forcingScroll` 标记已无消费者，仍留两处赋值 | 删除两处赋值，避免后来维护者误以为还有同步滚动路径 |
+| 3 | 文档 | 第 196 轮只写了“`button===5` 且压力≈0”，与加固后的三条件不一致 | 以本节为准；三条件已写进代码注释 |
+
+### 三、确认无问题的点
+
+- **压感橡皮不会擦掉写完的线条**：`maxTravel > 9 CSS px` 立即停表；线条末尾停顿不触发。
+- **定时器无泄漏**：抬笔、`pointercancel`、`blur`、`forceReleaseActive`、触发橡皮五条路径
+  都会清理 `holdTimer` / `pressureTimer`；旧 stroke 被替换时定时器也会在 70 ms 内自停。
+- **撤销正确**：压感橡皮的 `before` 快照在丢弃未提交笔画之后才拍，undo 回到擦除前，
+  不会把等待期间画的那一小段恢复出来。
+- **整笔跳转路径**：删除的只是 `pagechanging` 的同步滚动；`pagesinit` 的恢复页预跳保留。
+- **写回颜色**：只在 IPC payload 里做 RGB→BGR，侧车仍存 CSS 颜色，回读/再写回不受影响。
+- **双击迁移**：只覆盖 `wake`，用户之后在设置里显式改的值不会被再次覆盖。
+- **压感橡皮只在真实压力下启用**：避免无压感设备停笔时模拟压力升到 ~0.9 导致误擦。
+
+### 四、仍未真机验证（设备离线）
+
+- 压感橡皮的实际触发手感、双击手势上报、跨页不跳、写回颜色，均需装机复测。
+- 风险点：若 WebEngine 在笔尖完全静止时不派发 `pointermove`，压力只在按下瞬间可读；
+  灵敏度调低/调高可绕过，后续可接入 ArkTS 压力样本做兜底。
+- 本次审计的源改动**不单独出包**，随下一版功能构建一起出 HAP 并补哈希。

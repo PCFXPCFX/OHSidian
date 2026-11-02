@@ -2385,9 +2385,7 @@ var OHSIDIAN_INK_REV = "41";
               if (sc && sc.querySelector) {
                 var pe = sc.querySelector('.page[data-page-number="' + jumpPage + '"]');
                 if (pe && pe.offsetTop > 0) {
-                  self.forcingScroll = true;
                   try { sc.scrollTop = pe.offsetTop; } catch (ePJ) {}
-                  setTimeout(function () { self.forcingScroll = false; }, 120);
                 }
               }
               try { self.viewer.currentPageNumber = jumpPage; } catch (eCJ) {}
@@ -3838,10 +3836,12 @@ var OHSIDIAN_INK_REV = "41";
     // pressed tip (pressure > 0.01) is never reclassified.
     var eraseButton = ev.button === 5 || ((ev.buttons || 0) & 32) !== 0;
     if (ev.pointerType === "pen") {
-      // Only the hardware eraser tip qualifies: it reports button 5 with no
-      // pressure. A pressed tip must always draw, even if the driver happens
-      // to leak the eraser bit into `buttons` for one sample.
-      eraseButton = ev.button === 5 &&
+      // Only the hardware eraser tip qualifies: button 5 AND the eraser bit in
+      // `buttons`, with no pressure. Requiring both matters because some
+      // engines report button 5 alone on the first sample of a normal tip
+      // contact (pressure is still 0 there), which would erase instead of
+      // drawing. A real eraser sets both signals.
+      eraseButton = ev.button === 5 && ((ev.buttons || 0) & 32) !== 0 &&
         (typeof ev.pressure !== "number" || ev.pressure <= 0.01);
     }
     if (eraseButton) {
