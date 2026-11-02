@@ -4300,3 +4300,103 @@ capCanvasAreaFactor:(window.devicePixelRatio>=2&&
    把诊断和现象发我，我再改成“隐藏 PDF 注释 + 只留叠加层”的路线。
 4. 普通笔迹的双层是黑色不透明，视觉上无叠色；如果也想只留一份，把“写入 PDF 后”
    设为“全部只显示 PDF 注释”。
+
+## 第 202 轮 (2026-11-02): 设置开关“按半天没反应”——手写开关不是 `<label>`，热区只有左上角 15px（补丁 190）
+
+**用户报告**：设置里那个开关按钮点不动；原本的开关按动都正常，新加的这个按半天没反应。
+
+### 一、真因（读 asar 内 app.js + 内核 app.css 确认）
+
+Obsidian 自己的开关（`app.js` 里 `ToggleComponent`）是这么造的：
+
+```js
+controlEl.createEl("label", {cls:"checkbox-container", attr:{tabIndex:0}}, e => {
+  e.createEl("input", {attr:{type:"checkbox", tabIndex:-1}});
+  e.addEventListener("change", ...);
+})
+```
+
+我们手写的开关是 `<div class="checkbox-container">`，其余完全一样。**差别就是热区**：
+
+| 规则 | 位置（内核解包 app.css） | 后果 |
+|---|---|---|
+| `.checkbox-container input[type='checkbox']{position:absolute;opacity:0;left:0}` | 10100 | 真 input 被压到**左上角**且透明 |
+| `input[type=checkbox]{width:var(--checkbox-size);…}`；`.modal{--checkbox-size:var(--font-ui-medium)}` | 14009 / 8928 | 该 input 只有**约 15×15** |
+| `.modal .checkbox-container{width:var(--toggle-width);height:…}`；`.is-mobile{--toggle-width:52px;--toggle-thumb-height:26px}` | 10151 / 18836 | 开关本体是 **52×30** |
+| `.checkbox-container:after{pointer-events:none}` | 10122 | 看得见的圆钮**不吃点击**，直接穿透到容器 |
+
+于是 `<div>` 版整行只有左上角那块看不见的 15×15 能命中；点在圆钮上等于点在背景上。
+`<label>` 会把落在它身上**任意位置**的点击转发给内部 input —— 这就是原生开关“点哪儿
+都灵”的全部秘密，没有任何额外 JS。
+
+**为什么“旧的正常、新加的没反应”**：圆钮在**关**状态位于左侧，正好压在 input 上，
+点圆钮能开；一旦打开，圆钮移到右侧，而 input 仍在左上角，可见的圆钮就**永远点不到**。
+所有手写行其实都是坏的，用户卡在“已经是开”的那一个上（新加的那个多半刚被点开过，
+或者本来默认就是开）。
+
+**排除项**：
+
+- 不是事件没绑上：`change` 一直在 input 上，且 `is-enabled` 的类名更新在回调**之前**，
+  所以“连视觉都不变”只能是点击没落到 input。
+- 不是 BUG-005 那种拖动区吞点击：`.checkbox-container` 自带 `-webkit-app-region:no-drag`
+  （app.css:10086）。
+- 同一模态里原生开关能用 == 该引擎的 label 激活行为可用，而这正是本修复依赖的机制
+  （也是唯一与该引擎有关的假设）。
+
+### 二、修复
+
+| 文件 | 改动 |
+|---|---|
+| `scripts/patches/touch-mode.js` | 新增 `ohsidianMakeToggle()`：`<label class="checkbox-container" tabindex="0"><input type="checkbox" tabIndex="-1"></label>` + `change` + 空格/回车，与 `ToggleComponent` 完全对齐。OHSidian 页与「手写笔」页（`ctx.toggleEl` 交给 `buildSettings`）**共用**它，两处手写副本删除 |
+| `scripts/patches/touch-mode.js` | `OHSIDIAN_PATCH_REV` 189 → **190**（诊断里“补丁 190”即本版） |
+| `scripts/verify-asar.cjs` | 新门禁 `app settings switches are labels`：helper 在、两处调用点都在（`===2`）、旧 `mk("div","checkbox-container` 为 0 |
+| `scripts/refresh-app-patch.mjs` | 顺带修掉一个会静默丢功能的缺陷（见下） |
+
+**`refresh-app-patch.mjs` 的缺陷**（本轮使用它时触发）：`app.js` 前缀是 `INK + TOUCH`，
+而 `/*OHSIDIAN-PATCH-END*/` 是 **TOUCH 块**的结束标记，脚本按它切片就会把 ink 块一起
+切掉，然后只重新拼 TOUCH —— 出来的 app **完全没有手写/PDF 墨迹**，只有 `verify-asar`
+的四条 ink 检查会报红（且 `verify-asar` 是在 asar 已被覆盖之后才跑，坏包已经落盘）。
+现改为“原样保留 ink 前缀、只替换 touch 块”，边界找不到就 abort。
+
+### 三、审计（六维）
+
+| 维度 | 结论 |
+|---|---|
+| 必要性 | 症状是“点不动”，根因在 DOM 结构；改回调或加 `onClick` 都是治标，label 才是与主题 CSS 配套的正确结构 |
+| 正确性 | 与 `ToggleComponent` 的标记、焦点归属（label `tabindex=0` / input `tabIndex=-1`）、键盘绑定逐项对齐；`is-enabled`、`change`、`onChange(on)` 语义未变 |
+| 安全性 | 不改任何 `onChange` 回调与偏好读写；不做全局监听；回退只需 revert 该文件并 repack |
+| 代码质量 | 两处重复实现合并为一个 helper（原来 main 页与手写笔页各写一份，正是这类分叉导致行为不一致）；注释带 CSS/源码出处 |
+| 架构 | helper 由 `ohsidianSettingsRows` 与 `buildStylusTab` 共用，后续新增开关不会再各写一遍；verify-asar 门禁防止回退 |
+| 耗电 | 每个开关多 1 个 keydown 监听、无定时器、无重绘；设置页一次性创建，页面关闭即随 DOM 回收 |
+
+**逐项核对**：
+
+- **不会双触发**：直接点在 input 上时，浏览器不会再把 label 的激活转发一次；键盘路径用
+  `e.target!==box` 排除“输入框已聚焦时空格被原生机理处理”的情况。
+- **布局**：`.checkbox-container` 自带 `display:inline-block`，`label` 默认 `inline` 被覆盖；
+  行容器、`mod-toggle` 类、间距都不变。
+- **无障碍**：仍是内嵌 `input[type=checkbox]`，role/checked 状态不丢；多了 label 焦点环
+  （`app.css:10133` 的 `:focus-visible`）。
+- **`onChange` 抛错**：类名先更新、异常照旧上抛（不加 try/catch，避免把坏设置吞掉）；
+  与改动前一致，没有新增失败点。
+- **影响面**：仅 OHSidian 与「手写笔」两页的开关；其它 UI、工具条、笔输入链路未动。
+- **全仓库盘点**：`checkbox-container` 只有这两处手写实现，均已收敛到 helper。
+
+### 四、构建与验证
+
+- `node --check`：`touch-mode.js` / `ohsidian-ink.js` / `verify-asar.cjs` / `refresh-app-patch.mjs` 全 OK。
+- `node scripts/update-obsidian.mjs --repatch`（离线，用缓存的 1.13.7 内核）→ 安装成功。
+- `verify-asar`：全绿，含新门禁 `app settings switches are labels`（`SYNTAX OK | all markers present`）。
+- `verify-release`：`OK - no device-agent probe in app.js`。
+- 包内实证（解 asar 读 app.js）：`ohsidianMakeToggle` 存在、`var toggleEl=ohsidianMakeToggle`
+  两处、`mk("div","checkbox-container` 0 处、`OHSIDIAN_PATCH_REV="190"`、`OHSIDIAN_INK_REV="49"`。
+- **未出 HAP**：本轮只改渲染层补丁与构建脚本，asar 已刷新；仍需按平常流程构建 HAP 才能上机。
+
+### 五、待真机确认
+
+1. 手指点开关的**圆钮/轨道任意位置**都应立即翻转并落盘（这是本轮的直接验收点）。
+2. 键盘：Tab 到开关后空格/回车能切换。
+3. 若“还是没反应”，先确认是不是**用笔尖**点的：笔落在设置面板上被
+   “笔不误触 Obsidian 自身控件”策略拦截（`ohsidian-ink.js` 里 `isExcluded` 的笔分支，
+   `docs/STYLUS-PEN.md:13`），属设计行为，请用手指；如需设置面板接受笔点，需另行
+   修改该策略（一行判定），本轮未动。

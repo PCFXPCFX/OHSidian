@@ -146,6 +146,16 @@ try {
     // OHSidian tab opened showing 关于): update() must be neutralised and
     // display() must clear the container first.
     'app settings tab owns its container': app.includes('__ohsidianSettingsPre') && app.includes('this.settingItems=[];return this'),
+    // Settings switches must be built like Obsidian's own ToggleComponent
+    // (`<label class="checkbox-container"><input type=checkbox></label>`). The
+    // theme gives the real input `opacity:0` at ~15px in the container's
+    // top-left corner and lets the visible thumb pass taps through, so only a
+    // <label> forwards a tap on the knob to the input; with a <div> an enabled
+    // row (thumb on the right) could not be turned off at all.
+    'app settings switches are labels': app.includes('function ohsidianMakeToggle') &&
+      app.includes('var box=document.createElement("label")') &&
+      (app.match(/var toggleEl=ohsidianMakeToggle/g) || []).length === 2 &&
+      !app.includes('mk("div","checkbox-container'),
     // Self-report command: proves which patch revision is actually running and
     // why the settings section did or did not register.
     'app build/settings status command': app.includes('ohsidianBuildStatusLines') && app.includes('ohsidian-diag-build'),

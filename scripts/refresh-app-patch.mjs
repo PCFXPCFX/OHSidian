@@ -45,6 +45,29 @@ for (const [file, patch, marker] of [
   }
   let src = fs.readFileSync(full, 'utf8');
   const at = src.indexOf(marker);
+  /* The prefix of app.js is INK + TOUCH (update-obsidian.mjs prepends the ink
+     layer first) and the END marker belongs to the TOUCH block, so slicing at
+     it removes the ink block too - while this script can only re-prepend the
+     touch block. That used to ship an app with no handwriting/PDF ink at all
+     (all four ink checks in verify-asar fail, everything else looks green).
+     Keep everything before the touch block verbatim; replace only that block. */
+  let prefixKeep = '';
+  const hasInk = file === 'app.js' && src.includes('window.__ohsidianInkPatch');
+  if (hasInk) {
+    /* ';(function(){try{' is the literal first line of touch-mode.js and the
+       ink block never contains the touch signature (checked: 0 hits), so this
+       boundary is exact. Still refuse to guess if it is not where expected. */
+    const sig = src.indexOf('if(window.__ohsidianTouchPatch=');
+    const head = sig >= 0 ? src.lastIndexOf(';(function(){try{', sig) : -1;
+    if (at < 0 || head < 0 || sig > at) {
+      console.error('[refresh] ABORT: ink layer present but the touch block boundaries are not where expected.');
+      console.error('[refresh] Run `node scripts/update-obsidian.mjs --repatch` (offline, cached kernel) instead.');
+      process.exit(1);
+    }
+    prefixKeep = src.slice(0, head);
+    console.log('[refresh] ink layer preserved verbatim (' + prefixKeep.length +
+      ' bytes); run update-obsidian.mjs --repatch to pick up ink patch changes');
+  }
   if (at >= 0) {
     console.log('[refresh] ' + file + ': previous patch found at ' + at + ', stripping');
     src = src.slice(at + marker.length);
@@ -110,7 +133,7 @@ for (const [file, patch, marker] of [
       console.log('[refresh] WARNING: frame default site missing - windows keep the hidden-frameless default');
     }
   }
-  fs.writeFileSync(full, patch + src);
+  fs.writeFileSync(full, prefixKeep + patch + src);
   console.log('[refresh] ' + file + ': new patch prepended (len ' + patch.length + ')');
 }
 

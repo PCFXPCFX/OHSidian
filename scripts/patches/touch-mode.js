@@ -3487,6 +3487,58 @@ function ohsidianSetKeepSystemTitleButtons(on){
    from `app.setting.settingTabs[0]`), and registration retries until the
    settings module is ready. Everything is guarded: worst case the section is
    absent and the commands still work. */
+/* Every switch on our settings pages goes through here. It MUST be built the
+   way Obsidian's own ToggleComponent builds one (app.js, `new ToggleComponent`):
+       <label class="checkbox-container" tabindex="0">
+         <input type="checkbox" tabindex="-1">
+       </label>
+   ...plus a `change` hook (Obsidian binds it on the label; ours sits on the
+   input, whose change event bubbles to the label - same hook) and Space/Enter
+   on the label.
+   The element type is not cosmetic - it is the whole hit area. The theme only
+   makes room for the switch itself:
+       .checkbox-container                 -> 52x30 on touch, thumb 26px
+       .checkbox-container input[type=checkbox] -> position:absolute;opacity:0;left:0
+       input[type=checkbox]                -> width/height:var(--checkbox-size) (~15px)
+       .checkbox-container:after           -> the visible thumb, pointer-events:none
+   So the ONLY clickable pixel of the row is an invisible ~15x15 square in the
+   container's top-left corner; the rest of the track is background, and the
+   thumb lets the tap straight through. A <label> forwards a tap anywhere on
+   itself to the nested input, which is exactly how Obsidian's rows respond to
+   a tap on the knob; a <div> has no such behaviour.
+   With a <div> (what this used to be) the corner tap still worked while the
+   thumb was on the left - i.e. while the switch was OFF - but an ENABLED row
+   has its thumb on the RIGHT, so nothing on the visible switch could ever turn
+   it back off: "新加的开关按半天没反应". All rows shared the defect; the one the
+   user happens to be fighting is the one that was already on. */
+function ohsidianMakeToggle(ctl,on,onChange){
+  var box=document.createElement("label");
+  box.className="checkbox-container"+(on?" is-enabled":"");
+  box.setAttribute("tabindex","0");
+  var inp=document.createElement("input");
+  inp.type="checkbox";
+  inp.checked=!!on;
+  /* Obsidian keeps the input out of the tab order; the label owns focus and
+     answers the keyboard itself. */
+  inp.tabIndex=-1;
+  box.appendChild(inp);
+  inp.addEventListener("change",function(){
+    if(inp.checked){box.classList.add("is-enabled")}
+    else{box.classList.remove("is-enabled")}
+    onChange(!!inp.checked);
+  });
+  box.addEventListener("keydown",function(e){
+    /* Only when the label itself holds focus - a Space pressed while the
+       input is focused is already handled natively (and would double-toggle
+       if we forwarded it again). */
+    if(e.target!==box)return;
+    if(e.key!==" "&&e.key!=="Enter")return;
+    e.preventDefault();
+    inp.click();
+  });
+  ctl.appendChild(box);
+  return box;
+}
 function ohsidianSettingsRows(root){
   try{
     if(!root)return;
@@ -3546,19 +3598,9 @@ function ohsidianSettingsRows(root){
       list.appendChild(r);
       return ctl;
     };
-    var toggleEl=function(ctl,on,onChange){
-      var box=mk("div","checkbox-container"+(on?" is-enabled":""));
-      var inp=document.createElement("input");
-      inp.type="checkbox";
-      inp.checked=!!on;
-      box.appendChild(inp);
-      inp.addEventListener("change",function(){
-        if(inp.checked){box.classList.add("is-enabled")}
-        else{box.classList.remove("is-enabled")}
-        onChange(!!inp.checked);
-      });
-      ctl.appendChild(box);
-    };
+    /* label-based switch, see ohsidianMakeToggle() for why the element type
+       decides whether the row reacts at all */
+    var toggleEl=ohsidianMakeToggle;
     var basic=newGroup("常规");
     toggleEl(itemEl(basic,"隐藏模式下保留系统窗口按钮",
       "开启：窗口边框样式选「隐藏」时仍显示鸿蒙的关闭/最大化/最小化（重启生效）。关闭：无边框时只显示 Obsidian 自己的标题栏。",true),
@@ -3848,19 +3890,9 @@ function ohsidianBuildStylusTab(){
           list.appendChild(r);
           return ctl;
         };
-        var toggleEl=function(ctl,on,onChange){
-          var box=mk("div","checkbox-container"+(on?" is-enabled":""));
-          var inp=document.createElement("input");
-          inp.type="checkbox";
-          inp.checked=!!on;
-          box.appendChild(inp);
-          inp.addEventListener("change",function(){
-            if(inp.checked){box.classList.add("is-enabled")}
-            else{box.classList.remove("is-enabled")}
-            onChange(!!inp.checked);
-          });
-          ctl.appendChild(box);
-        };
+        /* label-based switch, see ohsidianMakeToggle() for why the element
+           type decides whether the row reacts at all */
+        var toggleEl=ohsidianMakeToggle;
         var ctx={newGroup:newGroup,itemEl:itemEl,toggleEl:toggleEl,mk:mk};
         if(window.__ohsidianInkHooks&&typeof window.__ohsidianInkHooks.buildSettings==="function"){
           window.__ohsidianInkHooks.buildSettings(ctx);
@@ -4075,7 +4107,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="189";
+var OHSIDIAN_PATCH_REV="190";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
