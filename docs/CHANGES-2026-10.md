@@ -4461,3 +4461,59 @@ controlEl.createEl("label", {cls:"checkbox-container", attr:{tabIndex:0}}, e => 
   2. 颜色按钮点按/长按、自动色 A 徽标；
   3. 画正方形/矩形是否贴合、旋转矩形是否保持角度；
   4. 旧高亮页重写后是否单层且宽度一致。
+
+## 第 204 轮 (2026-11-02): 荧光笔置底、PDF 注释偏移与坐标原点（v56）
+
+### 一、荧光笔覆盖黑色笔迹变淡
+
+**根因**：所有表面的 `redraw` 都按 `doc.strokes` 的插入顺序绘制。后画的高亮笔
+（`globalAlpha=0.38`）会盖在之前的黑色笔迹上，屏幕合成后黑色就发灰/发黄。
+
+**修复**：所有落盘绘制改成两遍：
+
+1. 先画 `tool === "highlighter"`；
+2. 再画笔/其他。
+
+覆盖 PDF 页、Markdown 瓦片、Markdown 旧单画布、Canvas 瓦片、PDF Embed 底图。
+PDF Embed 的 `appendStroke()` 遇到高亮笔返回 `false`，强制整页有序重绘，避免
+增量追加时又盖到黑字上。
+
+PDF 写回 payload 也把高亮笔排到最前面，外部阅读器里高亮注释同样位于笔迹下方。
+
+### 二、笔迹与 PDF 注释偏移
+
+**根因 1**：`toSpaceOn()` 用 `pageEl.getBoundingClientRect()` 计算落笔坐标，
+但墨迹 canvas 位于 page 的内容盒（`left:0;top:0`）。页面一旦有 border/padding
+或 CSS transform，就把整页注释整体推移 1–2px。
+
+**修复**：统一以 `entry.cv.getBoundingClientRect()` 为基准，并用
+`entry.w / rect.width` 处理缩放；`_spaceRect`、PDF 橡皮预览、套索选框的
+`spaceToClient()` 全部同步。这样屏幕笔迹和写回坐标来自同一个画布矩形。
+
+**根因 2**：PDF.js 返回的是含 CropBox 原点的绝对 PDF 坐标，而 PDF Kit 的
+`PdfPage` 坐标从 `0,0` 起。CropBox 原点非零时，写出的注释会整体偏移。
+
+**修复**：写回时读取 `pageView.viewport.viewBox[0..1]`，从每个点减去原点
+（`originX/originY`，通常为 0；只有 PDF 才有）。旧注释用“重写本页标注”重写
+一次即可归位。
+
+### 三、审计
+
+- 两遍绘制覆盖了所有会长期保留笔迹的 canvas；live 层仍是当前笔，抬笔后整页重绘。
+- `appendStroke` 的高亮笔回退路径已检查：`inkAddStroke` 收到 false 后会
+  `inkAfterDocChange` 全量重绘。
+- `toSpaceOn` / `erasePreview` / `spaceToClient` 三处坐标基准已统一，避免只修一处。
+- `viewBox` 读取失败时 `origin=0`，保持旧行为，不会把正常 PDF 推偏。
+- `origin` 只作用于 `isPdf` 的 vector payload，不影响 PDF Embed 的 normalized 坐标。
+
+### 四、产物
+
+| 产物 | 大小/时间 | SHA-256 |
+|---|---|---|
+| `electron-default-signed.hap`（ink v56） | 121,111,294 B / 2026-11-02 20:21:23 | `6D91CBA472895BCA8E0C60D359BFB0992F77CEE7C9CF90CB1668636411254119` |
+
+- `node --check`、`update-obsidian --repatch`、`verify-asar`、`verify-release` 全绿。
+- 按你的要求未安装、未操作设备；需真机确认：
+  1. 荧光笔盖住黑色笔迹时黑色不再变淡；
+  2. PDF 写回后笔迹与注释是否重合；
+  3. 旧页面重写后是否归位。

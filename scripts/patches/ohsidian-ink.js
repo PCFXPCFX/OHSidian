@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "54";
+var OHSIDIAN_INK_REV = "56";
 (function () {
   "use strict";
 
@@ -2058,13 +2058,17 @@ var OHSIDIAN_INK_REV = "54";
             })(idx * MARKDOWN_TILE_H),
             widthScale: function () { return 1; }
           };
-          for (i = 0; i < doc.strokes.length; i++) {
-            var s2 = doc.strokes[i];
-            if (s2.space !== this.space || s2.baked) continue;
-            var bb = s2.bbox || bboxOf(s2.pts);
-            if (!bb) continue;
-            if (bb[3] < idx * MARKDOWN_TILE_H || bb[1] > (idx + 1) * MARKDOWN_TILE_H) continue;
-            drawStrokeOnCtx(ctx, s2, tileSurface);
+          for (var pass = 0; pass < 2; pass++) {
+            for (i = 0; i < doc.strokes.length; i++) {
+              var s2 = doc.strokes[i];
+              if (s2.space !== this.space || s2.baked) continue;
+              if (pass === 0 && s2.tool !== "highlighter") continue;
+              if (pass === 1 && s2.tool === "highlighter") continue;
+              var bb = s2.bbox || bboxOf(s2.pts);
+              if (!bb) continue;
+              if (bb[3] < idx * MARKDOWN_TILE_H || bb[1] > (idx + 1) * MARKDOWN_TILE_H) continue;
+              drawStrokeOnCtx(ctx, s2, tileSurface);
+            }
           }
         }
       },
@@ -2290,10 +2294,14 @@ var OHSIDIAN_INK_REV = "54";
         ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
         var doc = this.doc;
         if (!doc) return;
-        for (var i = 0; i < doc.strokes.length; i++) {
-          var st = doc.strokes[i];
-          if (st.space !== this.space || st.baked) continue;
-          drawStrokeOnCtx(ctx, st, this);
+        for (var pass = 0; pass < 2; pass++) {
+          for (var i = 0; i < doc.strokes.length; i++) {
+            var st = doc.strokes[i];
+            if (st.space !== this.space || st.baked) continue;
+            if (pass === 0 && st.tool !== "highlighter") continue;
+            if (pass === 1 && st.tool === "highlighter") continue;
+            drawStrokeOnCtx(ctx, st, this);
+          }
         }
       },
       scheduleRedraw: function () {
@@ -2687,9 +2695,15 @@ var OHSIDIAN_INK_REV = "54";
         return this.ensurePage(pageEl, true);
       },
       toSpaceOn: function (entry, clientX, clientY) {
-        var r = entry._spaceRect || entry.pageEl.getBoundingClientRect();
-        var cssX = clientX - r.left;
-        var cssY = clientY - r.top;
+        // Use the ink canvas' box, not the page div: the page can carry a
+        // border/padding or a CSS transform, and the old page-rect math then
+        // shifted every written annotation by a pixel or two.
+        var r = entry._spaceRect ||
+          (entry.cv ? entry.cv.getBoundingClientRect() : entry.pageEl.getBoundingClientRect());
+        var sx = entry.w / Math.max(1, r.width);
+        var sy = entry.h / Math.max(1, r.height);
+        var cssX = (clientX - r.left) * sx;
+        var cssY = (clientY - r.top) * sy;
         try {
           var pt = entry.viewport.convertToPdfPoint(cssX, cssY);
           return [pt[0], pt[1]];
@@ -2710,7 +2724,7 @@ var OHSIDIAN_INK_REV = "54";
       },
       erasePreview: function (clientX, clientY, radius, entry) {
         if (!entry || !entry.cv) return;
-        var r = entry.pageEl.getBoundingClientRect();
+        var r = entry.cv.getBoundingClientRect();
         var sx = entry.w / Math.max(1, r.width);
         var sy = entry.h / Math.max(1, r.height);
         var x = (clientX - r.left) * sx;
@@ -2742,24 +2756,30 @@ var OHSIDIAN_INK_REV = "54";
         var editingBaked = state.tool === "eraser" || state.tool === "lasso" ||
           !!(state.active && (state.active.kind === "erase" || state.active.kind === "move"));
         var hideBakedHl = this.annotationFresh !== false;
-        for (var i = 0; i < doc.strokes.length; i++) {
-          var st = doc.strokes[i];
-          if (st.space !== entry.space) continue;
-          if (st.baked) {
-            if (st.tool === "highlighter") {
-              if (st.pdfHl === true && hideBakedHl && !editingBaked) continue;
-            } else if (!showBaked) {
-              continue;
+        // Highlighter is a background wash: draw every highlighter first, then
+        // pen/other strokes, so a later highlight can never fade black ink.
+        for (var pass = 0; pass < 2; pass++) {
+          for (var i = 0; i < doc.strokes.length; i++) {
+            var st = doc.strokes[i];
+            if (st.space !== entry.space) continue;
+            if (pass === 0 && st.tool !== "highlighter") continue;
+            if (pass === 1 && st.tool === "highlighter") continue;
+            if (st.baked) {
+              if (st.tool === "highlighter") {
+                if (st.pdfHl === true && hideBakedHl && !editingBaked) continue;
+              } else if (!showBaked) {
+                continue;
+              }
             }
+            drawStrokeOnCtx(ctx, st, {
+              toCanvasPoint: (function (e) {
+                return function (x, y) { return surface.toCanvasPointOn(e, x, y); };
+              })(entry),
+              widthScale: (function (e) {
+                return function () { return surface.widthScaleOn(e); };
+              })(entry)
+            });
           }
-          drawStrokeOnCtx(ctx, st, {
-            toCanvasPoint: (function (e) {
-              return function (x, y) { return surface.toCanvasPointOn(e, x, y); };
-            })(entry),
-            widthScale: (function (e) {
-              return function () { return surface.widthScaleOn(e); };
-            })(entry)
-          });
         }
       },
       redraw: function () {
@@ -3395,14 +3415,18 @@ var OHSIDIAN_INK_REV = "54";
             })(t.tx * CANVAS_TILE, t.ty * CANVAS_TILE),
             widthScale: function () { return 1; }
           };
-          for (i = 0; i < doc.strokes.length; i++) {
-            var s2 = doc.strokes[i];
-            if (s2.space !== this.space || s2.baked) continue;
-            var bb = s2.bbox || bboxOf(s2.pts);
-            if (!bb) continue;
-            if (bb[2] < t.tx * CANVAS_TILE || bb[0] > (t.tx + 1) * CANVAS_TILE) continue;
-            if (bb[3] < t.ty * CANVAS_TILE || bb[1] > (t.ty + 1) * CANVAS_TILE) continue;
-            drawStrokeOnCtx(ctx, s2, tileSurface);
+          for (var pass = 0; pass < 2; pass++) {
+            for (i = 0; i < doc.strokes.length; i++) {
+              var s2 = doc.strokes[i];
+              if (s2.space !== this.space || s2.baked) continue;
+              if (pass === 0 && s2.tool !== "highlighter") continue;
+              if (pass === 1 && s2.tool === "highlighter") continue;
+              var bb = s2.bbox || bboxOf(s2.pts);
+              if (!bb) continue;
+              if (bb[2] < t.tx * CANVAS_TILE || bb[0] > (t.tx + 1) * CANVAS_TILE) continue;
+              if (bb[3] < t.ty * CANVAS_TILE || bb[1] > (t.ty + 1) * CANVAS_TILE) continue;
+              drawStrokeOnCtx(ctx, s2, tileSurface);
+            }
           }
         }
       },
@@ -3660,14 +3684,21 @@ var OHSIDIAN_INK_REV = "54";
         ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
         this.baseReady = true;
         if (!doc) return;
-        for (var i = 0; i < doc.strokes.length; i++) {
-          var st = doc.strokes[i];
-          if (st.space !== this.space || st.baked) continue;
-          drawStrokeOnCtx(ctx, st, this);
+        for (var pass = 0; pass < 2; pass++) {
+          for (var i = 0; i < doc.strokes.length; i++) {
+            var st = doc.strokes[i];
+            if (st.space !== this.space || st.baked) continue;
+            if (pass === 0 && st.tool !== "highlighter") continue;
+            if (pass === 1 && st.tool === "highlighter") continue;
+            drawStrokeOnCtx(ctx, st, this);
+          }
         }
       },
       appendStroke: function (stroke) {
         if (!this.baseReady || !stroke || stroke.space !== this.space) return false;
+        // A highlighter must go below existing pen ink; appending it on top
+        // would tint the black strokes. Fall back to a full ordered redraw.
+        if (stroke.tool === "highlighter") return false;
         var ctx = this.base.getContext("2d");
         ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
         drawStrokeOnCtx(ctx, stroke, this);
@@ -4393,7 +4424,8 @@ var OHSIDIAN_INK_REV = "54";
     }
     if (surface.kind === "canvas") surface.refreshScale();
     if (surface.kind === "pdf" && entry) {
-      entry._spaceRect = entry.pageEl.getBoundingClientRect();
+      entry._spaceRect = entry.cv ? entry.cv.getBoundingClientRect() :
+        entry.pageEl.getBoundingClientRect();
     }
     if (typeof surface.beginStroke === "function") surface.beginStroke(entry);
     var sp = surface.kind === "pdf"
@@ -5158,8 +5190,11 @@ var OHSIDIAN_INK_REV = "54";
     try {
       if (surface.kind === "pdf") {
         var vp = entry.viewport.convertToViewportPoint(x, y);
-        var pr = entry.pageEl.getBoundingClientRect();
-        return [pr.left + vp[0], pr.top + vp[1]];
+        var pr = entry.cv ? entry.cv.getBoundingClientRect() :
+          entry.pageEl.getBoundingClientRect();
+        var psx = pr.width / Math.max(1, entry.w);
+        var psy = pr.height / Math.max(1, entry.h);
+        return [pr.left + vp[0] * psx, pr.top + vp[1] * psy];
       }
       var cp = surface.toCanvasPoint(x, y);
       var rr = surfaceRootRect(surface);
@@ -6469,10 +6504,33 @@ var OHSIDIAN_INK_REV = "54";
       return false;
     }
     var payload = [];
-    for (var j = 0; j < list.length; j++) {
-      var st2 = list[j];
+    // PDF.js stores absolute page coordinates (CropBox origin included), while
+    // PDF Kit's PdfPage coordinates start at 0,0. On PDFs with a non-zero
+    // CropBox origin this showed up as a constant sub-millimetre shift between
+    // the overlay and the written annotation.
+    var originX = 0, originY = 0;
+    if (isPdf) {
+      try {
+        var pv0 = s.viewer.getPageView(page);
+        var vb0 = pv0 && pv0.viewport && pv0.viewport.viewBox;
+        if (vb0) {
+          originX = Number(vb0[0]) || 0;
+          originY = Number(vb0[1]) || 0;
+        }
+      } catch (eOrig) {}
+    }
+    // Annotations are painted in insertion order by most viewers; write the
+    // translucent highlighters first so they sit under pen ink there too.
+    var ordered = list.slice();
+    ordered.sort(function (a, b) {
+      return (a.tool === "highlighter" ? 0 : 1) - (b.tool === "highlighter" ? 0 : 1);
+    });
+    for (var j = 0; j < ordered.length; j++) {
+      var st2 = ordered[j];
       var pts = [];
-      for (var k = 0; k < st2.pts.length; k++) pts.push([st2.pts[k][0], st2.pts[k][1]]);
+      for (var k = 0; k < st2.pts.length; k++) {
+        pts.push([st2.pts[k][0] - originX, st2.pts[k][1] - originY]);
+      }
       payload.push({
         id: st2.id,
         pts: pts,
