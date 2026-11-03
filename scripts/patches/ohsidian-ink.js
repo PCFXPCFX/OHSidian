@@ -6659,10 +6659,13 @@ var OHSIDIAN_INK_REV = "58";
       return false;
     }
     var payload = [];
-    // PDF.js stores absolute page coordinates (CropBox origin included), while
-    // PDF Kit's PdfPage coordinates start at 0,0. On PDFs with a non-zero
-    // CropBox origin this showed up as a constant sub-millimetre shift between
-    // the overlay and the written annotation.
+    // PDF.js stores absolute page coordinates (CropBox origin included), and
+    // PDF Kit's PdfPoint is also measured in the page's user space (docs say
+    // "distance to the left/bottom edge of the page"). Subtracting viewBox[0..1]
+    // was wrong for cropped book PDFs: their CropBox is e.g. [84,116,511,726]
+    // inside a 595x842 MediaBox, so writing x-84/y-116 shifted every annotation
+    // 84 pt left and 116 pt down - the reported "both pen and highlighter jump
+    // left-bottom". Keep the values for the probe, but do not subtract them.
     var originX = 0, originY = 0;
     if (isPdf) {
       try {
@@ -6684,7 +6687,7 @@ var OHSIDIAN_INK_REV = "58";
       var st2 = ordered[j];
       var pts = [];
       for (var k = 0; k < st2.pts.length; k++) {
-        pts.push([st2.pts[k][0] - originX, st2.pts[k][1] - originY]);
+        pts.push([st2.pts[k][0], st2.pts[k][1]]);
       }
       payload.push({
         id: st2.id,

@@ -4683,3 +4683,35 @@ decor/视口/边框复位全部回落到修复前的分支。没有 2in1 真机�
   SHA-256 `C6ABF8639A572DC2E7DC92D426E96D691AB1C23499835512625BAF7F93E07C19`。
 - `verify-release` / `verify-asar` 全绿。
 - 设备上当前装的是 `--agent` 包（供评测），release 包需另装。
+
+## 第 208 轮 (2026-11-03): PDF 写回整体左下偏移——停止重复减 CropBox 原点
+
+### 一、现象与证据
+
+用户报告：荧光笔和画笔写回 PDF 后，墨迹整体**向左下**移动，距离很大。
+真机 hilog（BKY-W10，16:07）显示该书页：
+
+- CSS 画布 `w=1230,h=1759 @scale=2.881` → PDF 页面 **427×610 pt**；
+- 427 = 595 − 84×2，610 = 842 − 116×2，说明页面是
+  `MediaBox 595×842` + `CropBox [84,116,511,726]` 的裁切书页；
+- `pdfAnnoInfo` 里既有 `/Highlight` 也有 `/PolyLine`，两类注释同时偏移，
+  排除 quad 顺序问题。
+
+根因：`inkWritePdf` 的 payload 先 `convertToPdfPoint`（得到含 CropBox 原点的
+**绝对**用户坐标），又减了一次 `viewport.viewBox[0..1]`。PDF Kit 的
+`PdfPoint` 本身就是页面用户坐标，于是每条注释都被减掉 (84,116)，表现为
+**左移 84 pt、下移 116 pt**，且两类工具共用同一段代码。
+
+### 二、修复
+
+- payload 不再减 `originX/originY`，保留这两个值只用于 `pdfPayload` 探针；
+- 旧注释的 sidecar 点本来就是绝对坐标，下一次“写回本页/重写标注”会用
+  同样的绝对坐标重建注释，不需要迁移；
+- 新增 2.0.0 版本号（`versionCode=2000000`），这是手写线独立成 v2.x 的起点。
+
+### 三、验证
+
+- `old subtract=false / new push=true`（asar 检查）；
+- agent 包已安装，等待真机复测：同一 PDF 页画一笔，写回后应不再偏移。
+- 若仍有偏移，下一步给 `pdfPage` 探针加 `MediaBox/CropBox/Rotate` 原值，
+  直接确认是页面盒还是旋转问题，不再猜。
