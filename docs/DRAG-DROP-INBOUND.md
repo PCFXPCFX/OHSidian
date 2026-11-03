@@ -2,7 +2,7 @@
 
 本文描述"外部内容进入 Obsidian 编辑器"的完整链路：系统拖拽（中转站、文件管理器、
 截图悬浮窗、跨设备拖拽）以及未来的碰一碰 / 分享目标注入。修复记录见
-`docs/CHANGES-2026-09.md` 与 `docs/AUDIT-FIXES-2026-09-29.md`（F16/F17）。
+`docs/CHANGES-2026-09.md` 与 `docs/archive/AUDIT-FIXES-2026-09-29.md`（F16/F17）。
 
 ## 链路总览（入站）
 

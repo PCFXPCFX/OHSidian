@@ -1,6 +1,6 @@
 # 平板功能演示
 
-本文档用文字与动图演示本 Fork（[PCFXPCFX/OHSidian][fork]）相对上游新增的平板相关功能。技术细节与完整变更记录见[变更日志][changes]。
+本文档用文字与动图演示 OHsidian 在平板上相对原版 Obsidian 新增的能力。技术细节见[功能与差异](FEATURES.md)，手写见[手写笔文档](STYLUS.md)，开发记录见[CHANGELOG](CHANGELOG.md)。
 
 > 演示动图（GIF，10 MB 以内）统一存放在 [docs/media/tablet-demo](media/tablet-demo) 文件夹，命名 `两位序号-功能英文简述.gif`，录制一个补充一个。
 
@@ -85,7 +85,7 @@
 
 ## 删除进回收站
 
-**功能**：在应用内删除笔记时，文件强制进入仓库的 `.trash` 文件夹，而不是被永久删除（引擎回收站桥在鸿蒙上行为不可控）。
+**功能**：在应用内删除笔记时，文件强制进入 `文档/OHSidianTrash/<仓库名>/`（未经授权时回退到仓库内 `.trash`），而不是被永久删除（引擎回收站桥在鸿蒙上行为不可控）。30 天后自动清理，可在文件管理中恢复。
 
 ---
 
@@ -112,5 +112,4 @@
 
 <!-- 参考链接 -->
 
-[fork]: https://github.com/PCFXPCFX/OHSidian
-[changes]: CHANGES-2026-09.md
+[changes]: CHANGELOG.md

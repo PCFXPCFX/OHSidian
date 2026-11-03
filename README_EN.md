@@ -13,13 +13,14 @@
 </p>
 
 <p align="center">
-  Run real Obsidian on HarmonyOS tablets and 2-in-1 PCs, with multi-window support and native system integration.<br>
+  Run official Obsidian on HarmonyOS tablets and 2-in-1 PCs, with multi-window support, native system integration and Huawei M-Pencil handwriting.<br>
   Tablets and 2-in-1 PCs only; phones are not supported.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/HarmonyOS-6.1.1%2824%29-blue?logo=harmonyos" alt="HarmonyOS" />
+  <img src="https://img.shields.io/badge/HarmonyOS-6.0.2%2B-blue?logo=harmonyos" alt="HarmonyOS" />
   <img src="https://img.shields.io/badge/Obsidian-1.13.7-purple?logo=obsidian" alt="Obsidian" />
+  <img src="https://img.shields.io/badge/version-2.0.0-orange" alt="Version" />
   <img src="https://img.shields.io/badge/license-BSD%203--Clause-green" alt="License" />
 </p>
 
@@ -27,20 +28,23 @@
 
 ## Introduction
 
-OHsidian is an unofficial port of Obsidian to HarmonyOS. It does not reimplement Obsidian: an ArkTS adapter layer plus a C++ native library wrap HarmonyOS APIs in an Electron-compatible surface, and the official `obsidian.asar` runs on top of it (a few compatibility patches are injected at build time).
+OHsidian is an unofficial port of Obsidian to HarmonyOS. It does not reimplement Obsidian: an ArkTS adapter layer plus a C++ native library wrap HarmonyOS APIs in an Electron-compatible surface, and the official `obsidian.asar` runs on top of it (compatibility patches are injected at build time).
 
-This repository is a fork of [HanversionOvO/OHSidian][upstream]. It removes Huawei cloud sync, Huawei account login and AGC initialization, and fixes window layout, touch input, drag-and-drop/share, and deletion safety.
+The project started from the Electron compatibility layer of [HanversionOvO/OHSidian][upstream] (by MikannQAQ) and is now **maintained independently, outside GitHub's fork network**. Upstream is treated as a historical baseline only: later changes are not synced back, because the extensive tablet and handwriting work is not intended to be merged upstream. Attribution and the BSD license are preserved.
 
-`com.mikannqaq.obsidian` · 1.4.2 (versionCode 1040002) · HarmonyOS 6.0.2+ (compatible API 22 / target API 24) · tablets / 2-in-1
+`com.mikannqaq.obsidian` · **2.0.0** (versionCode 2000000) · HarmonyOS 6.0.2+ (compatible API 22 / target API 24) · tablets / 2-in-1
 
 ## Features
 
+- **Stylus (v2 headline)**: Huawei M-Pencil pressure ink, hold-to-straighten, one-stroke shapes (square/circle), lasso move/copy, point prediction, barrel double-tap/squeeze; works on notes, PDF, embedded PDF and Canvas; PDF annotations are written back as real annotations. See the [stylus documentation][stylus] (Chinese).
 - **Real Obsidian core**: the full editing experience, with community plugins, themes, Markdown preview, graph view and backlinks.
 - **Multi-window**: main, sub, embedded and floating windows, with position and size persisted.
-- **Tablet-ready**: touch mode follows the system, keyboard avoidance, free windows clamped to the screen.
+- **Tablet-ready**: touch/desktop layout follows the system, keyboard avoidance, free windows clamped to the screen.
 - **External content**: drag-and-drop insertion, automatic retrieval of files from other apps, and Share Kit targets that land in the focused note.
 - **Safer deletes**: deleted notes go to `Documents/OHSidianTrash/`, auto-cleaned after 30 days and restorable from the file manager.
 - **Deep links**: `obsidian://` works, so browser OAuth in plugins such as Remotely Save works too.
+
+> Stylus mode is off by default: **Settings → Stylus → Stylus mode**. PDF write-back runs when leaving the PDF and backs up the original file before the first write.
 
 ## Build
 
@@ -50,21 +54,25 @@ Requires DevEco Studio 5.0+, HarmonyOS SDK API 24, and Node.js 18+.
 git clone https://github.com/PCFXPCFX/OHSidian.git
 cd OHSidian
 
-# obsidian.asar is not committed; the first build downloads and verifies it (~27 MB, one time)
-hvigorw install
-hvigorw assembleHap
-# Output: build/outputs/default/electron-default-signed.hap
+# obsidian.asar is not committed; the first build downloads, verifies and patches it (~27 MB, one time)
+hvigorw assembleHap --mode module -p product=default
+
+# Output: electron/build/default/outputs/default/*.hap
 ```
 
-You can also open the project in DevEco Studio and run **Build > Build HAP(s)**. Signing is configured in `build-profile.json5`; see `build-profile.example.json5`.
+You can also open the project in DevEco Studio and run **Build > Build HAP(s)**. Signing is configured in `build-profile.json5`; see `build-profile.example.json5`. The release build, signing, checksums and tag flow are documented in [docs/RELEASE.md](docs/RELEASE.md) (Chinese).
 
 ## Documentation
 
+Full index: [docs/README.md](docs/README.md) (Chinese).
+
+- [Features and differences from official Obsidian][features] (Chinese)
+- [Stylus design and regression harness][stylus] (Chinese)
+- [Release, signing and checksums][release] (Chinese)
+- [Architecture][architecture] (Chinese)
+- [Development environment][dev-env] (Chinese)
 - [Tablet feature demo][tablet-demo] (Chinese)
-- [Architecture and project layout][architecture] (Chinese)
-- [Feature details and fork changes][features] (Chinese)
-- [Release and checksums][release] (Chinese)
-- [Development environment setup][dev-env] (Chinese)
+- [Changelog][changelog] (Chinese)
 
 ## License
 
@@ -72,7 +80,7 @@ The source code is released under BSD 3-Clause; see [LICENSE][license-file]. Obs
 
 ## Acknowledgments
 
-[Obsidian][obsidian], [Electron][electron], [HarmonyOS][harmonyos], [InversifyJS][inversify].
+[Obsidian][obsidian], [Electron][electron], [HarmonyOS][harmonyos], [InversifyJS][inversify], and HanversionOvO (MikannQAQ), the original OHsidian porter.
 
 ---
 
@@ -84,8 +92,10 @@ The source code is released under BSD 3-Clause; see [LICENSE][license-file]. Obs
 [tablet-demo]: docs/tablet-demo.md
 [architecture]: docs/ARCHITECTURE.md
 [features]: docs/FEATURES.md
+[stylus]: docs/STYLUS.md
 [release]: docs/RELEASE.md
 [dev-env]: docs/DEV-ENV-SETUP.md
+[changelog]: docs/CHANGELOG.md
 [license-file]: LICENSE
 [obsidian]: https://obsidian.md
 [electron]: https://www.electronjs.org

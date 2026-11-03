@@ -6,7 +6,7 @@
 
 ![OHsidian 分层架构](images/architecture.png)
 
-*图：OHsidian 分层架构。图中已省略华为账号与云存储相关组件（本 Fork 移除）。*
+*图：OHsidian 分层架构。图中已省略华为账号与云存储相关组件（本移植版 移除）。*
 
 **分层说明**（自上而下）：
 
@@ -15,7 +15,7 @@
 - **JSBind 桥接层**：连接 JS 运行时与 ArkTS 原生层，把 Electron API 调用转发到对应的适配器。
 - **C++ 原生库**：`libadapter.so` 提供核心系统级 API 对接。
 - **ArkTS 适配层**：约 50 个适配器，把 HarmonyOS API 包装为 Electron 兼容接口。
-- **HarmonyOS 底层**：系统原生能力，包括 Ability 组件、ArkUI 界面等（华为账号与云存储已在本 Fork 移除）。
+- **HarmonyOS 底层**：系统原生能力，包括 Ability 组件、ArkUI 界面等（华为账号与云存储已在本移植版 移除）。
 
 ## 模块结构
 
@@ -51,7 +51,7 @@ AdapterModule → ContextAdapter, DragDropAdapter, MultiInputAdapter,
 
 | Ability | 页面 | 用途 |
 |---------|------|------|
-| `EntryAbility` | Index.ets | 主入口（本 Fork 已移除华为云 / AGC 初始化） |
+| `EntryAbility` | Index.ets | 主入口（本移植版 已移除华为云 / AGC 初始化） |
 | `BrowserAbility` | WindowNode.ets | 浏览器进程窗口 |
 | `StatelessAbility` | Index.ets | 无状态窗口 |
 | `BrowserEmbeddedAbility` | EmbeddedWindow.ets | 嵌入 UI |
@@ -65,7 +65,7 @@ AdapterModule → ContextAdapter, DragDropAdapter, MultiInputAdapter,
 | `WindowNode.ets` | 浏览器窗口节点 |
 | `SubWindow.ets` | 子窗口（弹窗、设置等） |
 | `EmbeddedWindow.ets` | 嵌入式窗口 |
-| `Login.ets` | 华为账号登录页（本 Fork 已停用，无入口） |
+| `Login.ets` | 华为账号登录页（本移植版 已停用，无入口） |
 | `StatusBarPage.ets` | 状态栏页面 |
 | `WebPage.ets` | 隐私协议等 WebView 页面 |
 
@@ -87,7 +87,7 @@ web_engine/src/main/ets/adapter/
 ├── BluetoothLowEnergy.ets      # 低功耗蓝牙
 ├── BrowserPolicy.ets           # 浏览器安全策略
 ├── CertManager.ets             # 证书管理
-├── CloudSync.ets               # 华为云同步（本 Fork 已停用，未接线）
+├── CloudSync.ets               # 华为云同步（本移植版 已停用，未接线）
 ├── Context.ets                 # 应用上下文
 ├── ContextPath.ets             # 文件路径解析
 ├── Cursor.ets                  # 自定义光标

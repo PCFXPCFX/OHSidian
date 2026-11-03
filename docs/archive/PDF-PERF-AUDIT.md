@@ -2,7 +2,7 @@
 
 > **实施状态（同日）**：P0（墨迹 PDF 叠层不启用不挂载、可见页上限、单页重绘、页表清理、dpr≤2）
 > 与 P1（高 DPI 触摸设备 `capCanvasAreaFactor:0`，PC 保持 `200`）已落地，见
-> `docs/CHANGES-2026-10.md` 第 190–191 轮、`docs/STYLUS-PEN.md` v38。
+> `docs/CHANGES-2026-10.md` 第 190–191 轮、`docs/STYLUS.md` v38。
 > 第 193 轮进一步修复 `app://` 无 Content-Type 导致的 fake worker（B6 成立）、写回重载、
 > 注释重复/填充；真机探针见 `tools/device-agent/`。P2/P3 仍未做。
 > 文中 `ohsidian-ink.js` 行号为修复前（v35）位置；v38 已改动 PDF surface，定位请以函数名
@@ -200,7 +200,7 @@ pdf.js 的页渲染是"把整页画进 2D context"，成本与 canvas 像素数�
 
 **量级**：墨迹层开启或关闭都一样，PDF 每页内存 **×2**（38.8 → 77.6 MB），
 滚动时额外 N² 次全画布清除；`pages` 表让"翻过的页"继续持有内存。
-这正是 `STYLUS-PEN.md` 风险表 `R9 长文档/大 PDF 性能` 与 v25/v26 记录过的同一类问题，
+这正是 `STYLUS.md` 风险表 `R9 长文档/大 PDF 性能` 与 v25/v26 记录过的同一类问题，
 只是发生在"页集合"尺度。
 
 ### B2（P1）每页 canvas 按 2.249 全分辨率、上限宽到无意义

@@ -42,9 +42,9 @@ on:
         required: false
         default: ''
       compatible_sdk:
-        description: 'compatibleSdkVersion (default = device-validated combo)'
+        description: 'compatibleSdkVersion (default = API 22, minimum installable system)'
         required: false
-        default: '6.1.1(24)'
+        default: '6.0.2(22)'
       target_sdk:
         description: 'targetSdkVersion'
         required: false
@@ -242,7 +242,7 @@ jobs:
 
       - name: Generate build-profile.json5 (unsigned, target API 24)
         run: |
-          export COMPATIBLE_SDK="${{ inputs.compatible_sdk || '6.1.1(24)' }}"
+          export COMPATIBLE_SDK="${{ inputs.compatible_sdk || '6.0.2(22)' }}"
           export TARGET_SDK="${{ inputs.target_sdk || '6.1.1(24)' }}"
           node scripts/ci/gen-build-profile.js
 

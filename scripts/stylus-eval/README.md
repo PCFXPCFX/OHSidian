@@ -1,6 +1,6 @@
 # stylus-eval
 
-手写特性回归评测 + 宣传素材生成。完整说明见 [`docs/STYLUS-EVAL.md`](../../docs/STYLUS-EVAL.md)。
+手写特性回归评测 + 宣传素材生成。完整说明见 [`docs/STYLUS.md`](../../docs/STYLUS.md) 第 9–10 节。
 
 ```powershell
 # 列场景
