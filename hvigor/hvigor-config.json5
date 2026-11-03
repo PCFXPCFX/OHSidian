@@ -6,7 +6,7 @@
   // 注意:实测只压缩 libs/**.so,asar/icudtl/pak/PNG 等其余条目仍是 STORED,
   // 因为打包工具没有“压缩非 so 条目”的开关。实测 222 MB -> 120.5 MB,构建 19 s -> 34 s。
   // 副作用:.so 改为安装时解压(extractNativeLibs 默认 true),需真机回归安装/启动。
-  // 详见 docs/RELEASE.md 第五节。
+  // 详见 docs/archive/HAP-SIZE.md。
   "properties": {
     "ohos.pack.compressLevel": "standard"
   },

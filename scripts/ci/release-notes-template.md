@@ -1,6 +1,12 @@
 OHSidian 是 [Obsidian](https://obsidian.md) 的非官方 HarmonyOS 移植版：在 HarmonyOS **平板 / 2in1 电脑**上直接运行原版 Obsidian。仅支持平板与 2in1 电脑，暂不支持手机。
 
-> 目标系统：HarmonyOS NEXT / HarmonyOS 6（API 24 真机验证）。遇到问题欢迎提 [Issue](https://github.com/PCFXPCFX/OHSidian/issues)。
+> 目标系统：HarmonyOS 6.0.2 起（compatible API 22 / target API 24，真机验证）。遇到问题欢迎提 [Issue](https://github.com/PCFXPCFX/OHSidian/issues)。
+
+## 本版亮点
+
+- **手写笔 v2**：华为 M-Pencil 压感墨迹、长按拉直、一笔成形、套索、压感橡皮；笔记 / PDF / 内嵌 PDF / Canvas 均可书写。
+- **PDF 写回**：标注写回真实注释，离开 PDF 时按脏页批量写入，首次写入前自动备份。
+- 完整说明与验收项见 [docs/STYLUS.md](https://github.com/PCFXPCFX/OHSidian/blob/main/docs/STYLUS.md)。
 
 ## 下载
 
@@ -14,7 +20,7 @@ OHSidian 是 [Obsidian](https://obsidian.md) 的非官方 HarmonyOS 移植版：
 
 ## 安装与签名
 
-HAP **未签名**，不能直接安装到设备。推荐使用图形化工具完成签名安装：
+HAP 是否可直接安装取决于文件名：含 `unsigned` 的需要先签名，含 `signed` 的已由项目证书签名。推荐使用图形化工具完成签名安装：
 
 1. **小白调试助手**（原名 Auto-Installer）—— 基于 OpenHarmony HDC 工具的
    Flutter 图形化安装器：<https://github.com/likuai2010/auto-installer>
