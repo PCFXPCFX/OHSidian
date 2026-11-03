@@ -9176,9 +9176,11 @@ var OHSIDIAN_INK_REV = "58";
     setTimeout(function () { perfRafSample("idle", 3000); }, 6000);
     // Scroll the PDF container while sampling: first with the ink overlays,
     // then with the layer temporarily disabled, so the overlay's compositing
-    // cost is measurable instead of guessed. Agent builds run it once; set
-    // window.__ohsidianPerfScroll=false to skip it in a long device session.
-    if (window.__ohsidianPerfScroll !== false) setTimeout(function () {
+    // cost is measurable instead of guessed. OPT-IN only: this physically
+    // scrolls the reader for 6 s and must never run during a normal writing
+    // session (it was the reported "PDF 自己往下滑"). Enable with
+    // `window.__ohsidianPerfScroll = true` in an agent build.
+    if (window.__ohsidianPerfScroll === true) setTimeout(function () {
       try {
         var s = activeSurfaceNow();
         var el = s && s.kind === "pdf" && s.viewer && s.viewer.container;

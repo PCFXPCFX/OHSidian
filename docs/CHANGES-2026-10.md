@@ -4715,3 +4715,43 @@ decor/视口/边框复位全部回落到修复前的分支。没有 2in1 真机�
 - agent 包已安装，等待真机复测：同一 PDF 页画一笔，写回后应不再偏移。
 - 若仍有偏移，下一步给 `pdfPage` 探针加 `MediaBox/CropBox/Rotate` 原值，
   直接确认是页面盒还是旋转问题，不再猜。
+
+## 第 209 轮 (2026-11-03): PDF 自己往下滑 = 性能探针；agent 包独立打包
+
+### 一、“PDF 自己往下滑”的根因
+
+不是写回坐标，也不是 PDF.js 自己滚，是 **agent 构建里的性能探针**：
+
+`install()` 启动 12s 后，如果当前表面是 PDF，会跑一段 `pdfscroll` 采样：
+
+```js
+var timer = setInterval(function () { el.scrollTop += 240; }, 50);
+```
+
+连续 3s，关掉墨迹层后再来 3s，最后才 `el.scrollTop = origin`。这段代码
+原本写的是 `if (window.__ohsidianPerfScroll !== false)`，也就是 **agent 包默认开启**。
+用户一打开 PDF 看两页，12 秒后它就开始把页面往下推；高倍缩放时还会落到空白页，
+看起来像“PDF 自己滑走 / 页面白了”。日志里 `pdfPage` 每 100ms 一条、`scale`
+从 2.888 跳到 5.28/6.227/9，就是这段采样在跑。
+
+**修复**：改成 `if (window.__ohsidianPerfScroll === true)`，只有显式打开才跑。
+普通写作、评测、演示都不会再动 PDF 滚动位置。
+
+### 二、agent 包独立出来
+
+新增 `scripts/build-agent.mjs`：
+
+1. `update-obsidian.mjs --repatch --agent`；
+2. 构建 HAP；
+3. 复制到 `artifacts/agent/OHSidian-agent-<版本>-<时间>.hap`，**不覆盖 release 包**；
+4. `finally` 里无条件 repatch 回 release 并跑 `verify-release`。
+
+release HAL 与 agent 包从此路径分离：日常发版直接 `hvigorw`，需要演示/评测时
+才跑 `node scripts/build-agent.mjs`；脚本结束工作区已经回到 release asar。
+
+### 三、产物
+
+- agent 包：`OHSidian-agent-2.0.0-20261103-165144.hap`
+  121,150,237 B / SHA-256 `BFE81A06857A54AE87B4D9152E4CD251FA332C45C26DCEFA229DBB99A0CD0699`
+- release asar 已恢复，`verify-release` 通过（`probeHook` 0）。
+- `docs/STYLUS-EVAL.md` / README 的安装命令改为 `build-agent.mjs` + `artifacts/agent/`。

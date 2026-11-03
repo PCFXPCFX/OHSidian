@@ -91,19 +91,28 @@ release 构建由 `scripts/update-obsidian.mjs` 的 `stripDevProbeCalls()` 剥�
 ### 1. 生成带探针的安装包
 
 ```powershell
-node scripts/update-obsidian.mjs --repatch --agent
-hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-daemon
+node scripts/build-agent.mjs
 ```
 
-> `--agent` 只用于评测；发版仍走不带 `--agent` 的 release 构建。
+它会：
+
+1. `--repatch --agent` 注入探针；
+2. 构建 HAP；
+3. 复制到 `artifacts/agent/OHSidian-agent-<版本>-<时间>.hap`（**不覆盖 release 包**）；
+4. 无论构建成功与否，都重新 repatch 回 release 并跑 `verify-release`。
+
+> agent 包只用于演示/评测，**绝不发布**。日常发版走普通 `hvigorw`；
+> `build-agent.mjs` 结束后工作区的 asar 已经恢复成 release 状态。
+> 性能探针里的“滚动 PDF 采样”默认关闭，只有显式
+> `window.__ohsidianPerfScroll = true` 才会运行，避免评测时 PDF 自己往下滑。
 
 ### 2. 第一次：安装 + 推测试素材
 
 ```powershell
 node scripts/stylus-eval/run.mjs --mode list
 node scripts/stylus-eval/run.mjs --mode doctor   # 先确认 hdc/hilog/录屏/探针
-node scripts/stylus-eval/run.mjs --mode capture --version v1.4.2 `
-  --install electron/build/default/outputs/default/electron-default-signed.hap `
+node scripts/stylus-eval/run.mjs --mode capture --version v2.0.0 `
+  --install artifacts/agent/OHSidian-agent-2.0.0-<时间>.hap `
   --push-fixtures --vault "/storage/Users/currentUser/Documents/Obsidian Vault"
 ```
 
