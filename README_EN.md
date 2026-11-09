@@ -30,13 +30,13 @@
 
 OHsidian is an unofficial port of Obsidian to HarmonyOS. It does not reimplement Obsidian: an ArkTS adapter layer plus a C++ native library wrap HarmonyOS APIs in an Electron-compatible surface, and the official `obsidian.asar` runs on top of it (compatibility patches are injected at build time).
 
-The project started from the Electron compatibility layer of [HanversionOvO/OHSidian][upstream] (by MikannQAQ) and is now **maintained independently, outside GitHub's fork network**. Upstream is treated as a historical baseline only: later changes are not synced back, because the extensive tablet and handwriting work is not intended to be merged upstream. Attribution and the BSD license are preserved.
+This project is based on [HanversionOvO/OHSidian][upstream] (by MikannQAQ): Huawei Cloud Sync, Huawei account sign-in and AGC initialization have been removed, and issues with window layout, touch input, drag and drop, sharing, and deletion safety have been fixed.
 
 `com.mikannqaq.obsidian` · **2.0.0** (versionCode 2000000) · HarmonyOS 6.0.2+ (compatible API 22 / target API 24) · tablets / 2-in-1
 
 ## Features
 
-- **Stylus (v2 headline)**: Huawei M-Pencil pressure ink, hold-to-straighten, one-stroke shapes (square/circle), lasso move/copy, point prediction, barrel double-tap/squeeze; works on notes, PDF, embedded PDF and Canvas; PDF annotations are written back as real annotations. See the [stylus documentation][stylus] (Chinese).
+- **Stylus**: Huawei M-Pencil pressure ink, hold-to-straighten, one-stroke shapes (square/circle), lasso move/copy, point prediction, barrel double-tap/squeeze; works on notes, PDF, embedded PDF and Canvas; PDF annotations are written back as real annotations. See the [stylus documentation][stylus] (Chinese).
 - **Real Obsidian core**: the full editing experience, with community plugins, themes, Markdown preview, graph view and backlinks.
 - **Multi-window**: main, sub, embedded and floating windows, with position and size persisted.
 - **Tablet-ready**: touch/desktop layout follows the system, keyboard avoidance, free windows clamped to the screen.

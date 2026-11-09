@@ -30,13 +30,13 @@
 
 OHsidian 是 Obsidian 在 HarmonyOS 上的非官方移植。它不重写 Obsidian：ArkTS 适配层加 C++ 原生库把 HarmonyOS 能力包装成 Electron 兼容接口，直接运行官方 `obsidian.asar`（构建时注入兼容补丁）。
 
-本项目基于 [HanversionOvO/OHSidian][upstream] 移除了华为云同步、华为账号登录与 AGC 初始化，并修复了窗口布局、触摸输入、拖拽与分享、删除安全等问题。
+本项目基于 [HanversionOvO/OHSidian][upstream]（作者 MikannQAQ）移除了华为云同步、华为账号登录与 AGC 初始化，并修复了窗口布局、触摸输入、拖拽与分享、删除安全等问题。
 
 `com.mikannqaq.obsidian` · **2.0.0**（versionCode 2000000）· HarmonyOS 6.0.2 起（compatible API 22 / target API 24）· 平板 / 2in1
 
 ## 主要特性
 
-- **手写笔（v2 主线）**：华为 M-Pencil 压力墨迹、长按拉直、一笔成形（方形/圆形）、套索移动/复制、点预测、笔杆双击/轻捏；笔记、PDF、内嵌 PDF 与 Canvas 均可书写；PDF 标注可写回真实注释。见[手写笔文档][stylus]。
+- **手写笔**：华为 M-Pencil 压力墨迹、长按拉直、一笔成形（方形/圆形）、套索移动/复制、点预测、笔杆双击/轻捏；笔记、PDF、内嵌 PDF 与 Canvas 均可书写；PDF 标注可写回真实注释。见[手写笔文档][stylus]。
 - **原版内核**：完整 Obsidian 编辑体验，兼容社区插件与主题、Markdown 预览、图谱与反向链接。
 - **多窗口**：主窗口、子窗口、嵌入窗口与浮动窗口，位置与大小持久化。
 - **平板适配**：触摸/桌面布局跟随系统、键盘避让、自由窗口钳制到屏幕内。
