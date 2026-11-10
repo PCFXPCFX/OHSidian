@@ -51,9 +51,17 @@ execFileSync(process.execPath, [path.join(repo, 'scripts/verify-asar.cjs')], {
 });
 if (fs.existsSync(asarPath)) {
   try {
-    fs.copyFileSync(asarPath, asarPath + '.bak');
+    // Outside resfile: that directory is packed into the HAP verbatim (audit N-1).
+    const backupDir = path.join(repo, '.cache', 'asar-backup');
+    fs.mkdirSync(backupDir, { recursive: true });
+    fs.copyFileSync(asarPath, path.join(backupDir, 'obsidian.asar.bak'));
   } catch (e) {
-    console.log('WARN: could not keep obsidian.asar.bak: ' + e.message);
+    console.log('WARN: could not keep the previous kernel: ' + e.message);
+  }
+  try {
+    // Legacy location inside resfile (ships in the HAP, audit N-1).
+    fs.rmSync(asarPath + '.bak', { force: true });
+  } catch (e) {
   }
 }
 fs.renameSync(out, asarPath);

@@ -4837,3 +4837,56 @@ release HAL 与 agent 包从此路径分离：日常发版直接 `hvigorw`，需
 - `node scripts/update-obsidian.mjs --repatch`（离线缓存内核）+ `verify-asar`：**全绿**（新增 5 条门禁：模式文件字段化合并、迁移等待保存、恢复重置标志、onRename 原子迁移、设置开关 label）。补丁版本 `190 → 191`，墨迹版本 `58 → 59`。
 - 安装路径已确认：`obsidian.asar`（25.2 MiB）+ 旧内核 `obsidian.asar.bak`；`*.asar.bak` 已加入 `.gitignore`。
 - **未做真机验证**：本轮无 HAP 构建（本机无 DevEco/SDK 环境）。需要真机回归的点：① 外接鼠标在主窗/子窗/内嵌窗滚动与捏合，且笔迹书写不拖页；② 插件路径删除 31 天前的文件 → 重启 → 60s purge 后文件仍在；③ 切仓前 1 秒内输入文字，切回后内容完整；④ 写回两页（含荧光笔）→ 恢复原始 → 高亮笔仍可见、PDF 内注释已清；⑤ 双窗口打开同一 PDF 同时写回不报错/不互相覆盖；⑥ 设置页开关仍可正常点灭（补丁 191）。
+
+## 第 211 轮 (2026-11-10): 发版终审报告复核——N-1/N-4/N-6/N-7 属实并修复，N-2/N-3/N-5 接受
+
+> 来源：外部《OHSidian 发版终审报告（Release Gate Audit）》，审计对象 `7779d4b`，结论"有条件 GO"，新发现 N-1~N-7（均 P3）。
+> 本轮先逐条复核，再动手：**N-1、N-4、N-6 属实且必须修**（前两项会让本地包多带 25MB 且闸门存在盲区，N-6 存在永久卡死路径）；N-7 顺手补上发送端预检；N-2、N-3 属已接受的有界/罕见行为，只做小加固；N-5 为 P3 已知限制，见下。
+
+### 一、N-1（属实，已修）`obsidian.asar.bak` 落在 resfile → 本地 HAP 多带 25MB
+
+**复核**：`web_engine/src/main/resources/resfile/` 下的一切都会被 hvigor 原样打进 HAP（仓库里既有证据：`docs/PLATFORM-ADAPTATION.md` 记着 `@electron/remote` 整包"随 HAP"、`verify-asar.cjs` 注释写"包装层 main.js 随 HAP 打包"）。上一轮新增的 `.bak` 就在这个目录，实测 26,386,094 B；本地每次构建都会带上，CI 因文件被 gitignore 不受影响。CI 无感 → 只有开发者机器会中，正是那种"没人发现"的问题。
+
+**修复**：
+- 三个安装脚本（`update-obsidian` / `refresh-app-patch` / `repack-b-native-asar`）的上一版内核备份改写到 `<repo>/.cache/asar-backup/obsidian.asar.bak`（gitignore 覆盖），并顺手删除 resfile 里的旧位置 `.bak`；
+- **同一类问题的另一半**：`update-obsidian.mjs` 的暂存文件原本是 `asar 路径 + ".new"`，也在 resfile 里（copy 与 rename 之间崩溃就会留下一个 25MB 垃圾文件进包）。改为 `.cache/asar-stage/obsidian.asar`（同卷，rename 仍是原子的）；
+- `ensure-obsidian-asar.mjs` 新增 `relocateLegacyBak()`，在**快速 no-op 退出之前**执行：老机器上残留的 `obsidian.asar.bak` 会被移到 `.cache/asar-backup/`（已有则直接删），保证任何一次构建都不会把它打进包。
+- 坏包重建路径不再连带删除备份（备份已在 resfile 之外，留着还能手工回滚）。
+
+**验证**：`--repatch` 后 `resfile/resources/app/` 只剩 `node_modules icon.png main.js obsidian.asar ohsidian-flags.json package.json`；`ensure` 实跑输出 `removed the legacy obsidian.asar.bak from the HAP resources`；`.cache/asar-backup/obsidian.asar.bak` 存在。
+
+### 二、N-4（属实，已修）ensure 闸门的 touch 标记检查是盲区
+
+**复核**：实测 app.js 4,435,040 字符，`__ohsidianInkPatch` 在 902，`__ohsidianTouchPatch` 在 **358,075**——而闸门只 `toString('utf8', 0, 262144)`。即"ink 在、touch 丢了"的半补丁包永远判绿。
+
+**修复**：去掉截断，对 `extractFile` 返回的完整内容做标记检查（多读约 4.4MB，仍在毫秒级）。四个安装点的安装前校验本来就走全文件检查的 `verify-asar.cjs`，盲区只在 ensure 的快速体检。
+
+### 三、N-6（属实，已修）锁目录可见 + 非空即永久卡死
+
+**复核**：`<pdf>.hso-lock` 会被 Obsidian 文件树列出、可能被同步插件带走；释放与陈旧自解都只用 `rmdirSync`，一旦目录里出现任何文件（同步冲突文件、用户误放），`rmdir` 永久 `ENOTEMPTY` 且被静默吞掉 → 该 PDF 的写回/恢复**永久失败**，60s 陈旧自解对"非空"这一形态无效。
+
+**修复**（`PdfInkWriter`）：
+- 锁名改为隐藏形式 `<dir>/.<basename>.hso-lock`，Obsidian 默认忽略点开头条目，不再出现在文件树；
+- 新增 `removeLockDir()`：先递归清空目录内容（子目录递归、文件 unlink），再 `rmdir`；若锁名被一个普通文件占住则 `unlink`——释放与陈旧自解都走它，任何形态都能自愈。
+
+### 四、N-7（建议，已采纳）发送端缺页预算预检
+
+渲染层 `pdfWritePage` 发送前统计本页点数/笔画数：超 `80000` 点或 `1500` 笔立即本地失败并给出明确文案，不再白跑一次多MB IPC 往返再被写回端拒绝。常量注释明确要求与 `PdfInkWriter.MAX_POINTS/MAX_STROKES` 同步，`verify-asar` 新增门禁 `app pdf write page budget precheck` 锁住两侧。
+
+### 五、N-2 / N-3（接受，仅加固）
+
+- **N-2**：抢锁忙等上限 5s，主路径在 taskpool 工作线程；只有 taskpool 失败降级到 UI 线程时才会冻结，属有界、罕见、可自愈。保持现状。
+- **N-3**：`waitIdle` 的等待上限从 40×50ms（2s）提到 **200×50ms（10s）**，覆盖任何现实 sidecar 写；超时后仍按原语义继续迁移（最坏只是旧键留下一个过期孤儿文件，**不丢数据**）。
+
+### 六、N-5（未修，记为已知限制）
+
+`resetPdfWrittenFlags` 只重置**当前窗口**的内存态：同一 PDF 在第二个窗口打开时，该窗口仍认为笔画已烘焙 → 高亮笔在那一侧从屏幕消失，直到它重新载入该文档（重载即从 sidecar 读到 `written=false` 自愈），无数据丢失。
+为什么不在本轮修：两个窗口是独立渲染进程，现有唯一的跨进程通道是按窗口分配的回环 IPC 端口（无广播能力），要新增"渲染层 → 主进程 → 其它窗口"的广播通道属设计层改动，且无法在本机验证（无 DevEco/SDK），风险高于收益。已在文档中登记，留待有真机验证条件的单独一轮。
+
+### 七、验证
+
+- `node --check`：`ohsidian-ink.js` / 三个安装脚本 / `verify-asar.cjs` / `ensure-obsidian-asar.mjs` 全通过。
+- `node scripts/update-obsidian.mjs --repatch` → `verify-asar` **全绿**（新增 1 条门禁，共 6 条本轮相关门禁）；`node scripts/verify-release.cjs` → `RELEASE VERIFY: OK - no device-agent probe in app.js`（NF-012 新增的 `probeHook("inkPdfRestore")` 仍被剥离器正确处理）。
+- 墨迹版本 `59 → 60`（本轮只改 ink 层与构建脚本，补丁版本保持 191）。
+- `resfile/resources/app/` 已确认无 `.bak` / `.new`；`obsidian.asar` 25.2 MiB。
+- 仍未做真机验证，放行门禁仍为第 210 轮列出的 6 项（终审报告 §6 原样采纳）。

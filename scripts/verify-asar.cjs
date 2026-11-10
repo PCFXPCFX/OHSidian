@@ -207,6 +207,12 @@ try {
       app.includes('resetPdfWrittenFlags(s)'),
     // Audit NF-008: the sidecar rename migration must be atomic (tmp+rename) and
     // must cancel the debounced save armed for the old key.
+    // Audit N-7: the renderer enforces the writer's page budget before shipping
+    // the (up to several MB) request over the loopback IPC.
+    'app pdf write page budget precheck': app.includes('var INK_PDF_MAX_POINTS = 80000') &&
+      app.includes('if (totalPts > INK_PDF_MAX_POINTS)'),
+    // Audit NF-008: the sidecar rename migration must be atomic (tmp+rename) and
+    // must cancel the debounced save armed for the old key.
     'app ink rename migration atomic': app.includes('var waitIdle = function (fn)') &&
       app.includes('var timer = store.timers[oldKey];') &&
       app.includes('var tmp = dest + ".tmp";'),

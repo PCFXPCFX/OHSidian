@@ -552,7 +552,12 @@ async function main() {
   if (stageCheck.status !== 0) {
     throw new Error('staged asar failed verify-asar - refusing to install it');
   }
-  const staged = ASAR_PATH + '.new';
+  // Stage OUTSIDE resfile as well (audit N-1's neighbour): a copy left behind by
+  // a crash between copy and rename would otherwise be packed into the HAP just
+  // like the .bak was. .cache is on the same volume, so the swap stays a rename.
+  const stageDir = path.join(REPO_ROOT, '.cache', 'asar-stage');
+  fs.mkdirSync(stageDir, { recursive: true });
+  const staged = path.join(stageDir, 'obsidian.asar');
   fs.copyFileSync(patchedAsar, staged);
   const stagedSize = fs.statSync(staged).size;
   if (stagedSize !== fs.statSync(patchedAsar).size) {
@@ -560,10 +565,21 @@ async function main() {
     throw new Error(`staged asar is truncated (${stagedSize} bytes vs ${fs.statSync(patchedAsar).size})`);
   }
   if (fs.existsSync(ASAR_PATH)) {
+    // NOT next to the asar: everything under resfile is packed into the HAP, so
+    // a 25 MB .bak there would ship in every local build (audit N-1). Keep the
+    // previous kernel in the gitignored build cache instead.
     try {
-      fs.copyFileSync(ASAR_PATH, ASAR_PATH + '.bak');
+      const backupDir = path.join(REPO_ROOT, '.cache', 'asar-backup');
+      fs.mkdirSync(backupDir, { recursive: true });
+      fs.copyFileSync(ASAR_PATH, path.join(backupDir, 'obsidian.asar.bak'));
     } catch (e) {
-      log('WARN: could not keep the previous kernel as obsidian.asar.bak: ' + e.message);
+      log('WARN: could not keep the previous kernel as .cache/asar-backup/obsidian.asar.bak: ' + e.message);
+    }
+    // Drop a legacy .bak from an older installer: resfile is packed into the HAP
+    // verbatim, so leaving it there adds ~25 MB to every local build (audit N-1).
+    try {
+      fs.rmSync(ASAR_PATH + '.bak', { force: true });
+    } catch (e) {
     }
   }
   fs.renameSync(staged, ASAR_PATH);

@@ -151,12 +151,22 @@ execFileSync(process.execPath, [path.join(REPO_ROOT, 'scripts/verify-asar.cjs')]
 });
 
 // Replace atomically and keep the previous kernel for a manual rollback: the
-// asar is gitignored, so a plain copyFile over it had no way back.
+// asar is gitignored, so a plain copyFile over it had no way back. The backup
+// goes to .cache/, NOT next to the asar - resfile is packed into the HAP and a
+// 25 MB .bak there shipped in every local build (audit N-1).
 if (fs.existsSync(ASAR_PATH)) {
   try {
-    fs.copyFileSync(ASAR_PATH, ASAR_PATH + '.bak');
+    const backupDir = path.join(REPO_ROOT, '.cache', 'asar-backup');
+    fs.mkdirSync(backupDir, { recursive: true });
+    fs.copyFileSync(ASAR_PATH, path.join(backupDir, 'obsidian.asar.bak'));
   } catch (e) {
-    console.log('[refresh] WARN: could not keep obsidian.asar.bak: ' + e.message);
+    console.log('[refresh] WARN: could not keep the previous kernel: ' + e.message);
+  }
+  // Legacy location: resfile ships inside the HAP, so a stray .bak there costs
+  // ~25 MB per local build (audit N-1).
+  try {
+    fs.rmSync(ASAR_PATH + '.bak', { force: true });
+  } catch (e) {
   }
 }
 fs.renameSync(out, ASAR_PATH);

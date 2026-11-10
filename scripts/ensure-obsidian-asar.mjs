@@ -17,7 +17,7 @@
  * CI runs the same pipeline explicitly with caching (build-release.yml), so
  * this is a fast no-op there. Set OHSIDIAN_SKIP_ASAR_ENSURE=1 to disable.
  */
-import { existsSync, statSync, rmSync } from 'node:fs';
+import { existsSync, statSync, rmSync, mkdirSync, renameSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,11 +26,45 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ASAR_PATH = path.join(ROOT, 'web_engine', 'src', 'main', 'resources', 'resfile', 'resources', 'app', 'obsidian.asar');
 const SCRIPTS_DIR = path.join(ROOT, 'scripts');
 const ASAR_DEP = path.join(SCRIPTS_DIR, 'node_modules', '@electron', 'asar');
+const BACKUP_DIR = path.join(ROOT, '.cache', 'asar-backup');
+const BACKUP_PATH = path.join(BACKUP_DIR, 'obsidian.asar.bak');
+
+/**
+ * The previous kernel must not live next to the asar: EVERYTHING under
+ * `web_engine/src/main/resources/resfile` is packed into the HAP verbatim, so a
+ * 25 MB `obsidian.asar.bak` sitting there shipped in every local build until
+ * somebody deleted it by hand (audit N-1; CI is unaffected because the file is
+ * gitignored). This runs before the fast no-op exit, so any stray copy from an
+ * older installer is moved out of the resource tree on the next build.
+ */
+function relocateLegacyBak() {
+  const legacy = ASAR_PATH + '.bak';
+  if (!existsSync(legacy)) return;
+  if (existsSync(BACKUP_PATH)) {
+    rmSync(legacy, { force: true });
+    console.log('[asar-ensure] removed the legacy obsidian.asar.bak from the HAP resources');
+    return;
+  }
+  try {
+    mkdirSync(BACKUP_DIR, { recursive: true });
+    renameSync(legacy, BACKUP_PATH);
+    console.log('[asar-ensure] moved obsidian.asar.bak out of the HAP resources -> .cache/asar-backup');
+  } catch (e) {
+    try {
+      rmSync(legacy, { force: true });
+      console.log('[asar-ensure] removed obsidian.asar.bak from the HAP resources (' + e.message + ')');
+    } catch (e2) {
+      console.error('[asar-ensure] WARNING: cannot remove ' + legacy + ' - the next HAP ships an extra ~25 MB');
+    }
+  }
+}
 
 if (process.env.OHSIDIAN_SKIP_ASAR_ENSURE === '1') {
   console.log('[asar-ensure] skipped (OHSIDIAN_SKIP_ASAR_ENSURE=1)');
   process.exit(0);
 }
+
+relocateLegacyBak();
 
 /**
  * "The file exists" is not "the file is good" (audit NF-009). The asar is
@@ -53,8 +87,12 @@ async function asarProblem() {
       'main.js': ['__ohsidianConsoleBridge'],
     };
     for (const [name, needles] of Object.entries(markers)) {
-      const head = asar.extractFile(ASAR_PATH, name).toString('utf8', 0, 262144);
-      const missing = needles.filter((needle) => !head.includes(needle));
+      // The WHOLE file, not a prefix: app.js is ~4.4 MB and only the ink marker
+      // lives in the first 256 KB - the touch marker sits at ~358 KB, so a
+      // truncated window could never prove it (audit N-4). extractFile already
+      // returned the full buffer.
+      const body = asar.extractFile(ASAR_PATH, name).toString('utf8');
+      const missing = needles.filter((needle) => !body.includes(needle));
       if (missing.length > 0) {
         return `${name} is missing patch markers: ${missing.join(', ')}`;
       }
@@ -84,8 +122,9 @@ if (existsSync(ASAR_PATH)) {
   }
   console.error(`[asar-ensure] existing obsidian.asar is unusable (${problem}) - rebuilding it`);
   try {
+    // The previous kernel lives in .cache/asar-backup (see relocateLegacyBak),
+    // so it survives this delete and is still available for a manual rollback.
     rmSync(ASAR_PATH, { force: true });
-    rmSync(ASAR_PATH + '.bak', { force: true });
   } catch (e) {
     console.error('[asar-ensure] cannot delete the broken asar: ' + e.message);
     process.exit(1);

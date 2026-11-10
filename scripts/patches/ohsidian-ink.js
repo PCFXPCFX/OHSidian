@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "59";
+var OHSIDIAN_INK_REV = "60";
 (function () {
   "use strict";
 
@@ -6522,10 +6522,32 @@ var OHSIDIAN_INK_REV = "59";
     } catch (e) {}
   }
 
+  // Sender-side mirror of PdfInkWriter.MAX_POINTS (80000). The writer rejects an
+  // over-long page anyway, but only after shipping several MB over the loopback
+  // IPC and (since the 16MB cap) getting an error frame back - one wasted
+  // round trip per attempt (audit N-7). Keep the two values in sync.
+  var INK_PDF_MAX_POINTS = 80000;
+
   function pdfWritePage(rel, abs, vaultRoot, page, strokes, mode, replace, removeIds, style) {
     return new Promise(function (resolve) {
       if (!ensureIpc()) {
         resolve({ ok: false, error: "IPC 未连接" });
+        return;
+      }
+      var totalPts = 0;
+      for (var pi = 0; pi < strokes.length; pi++) {
+        var pts = strokes[pi] && strokes[pi].pts;
+        if (pts && pts.length) totalPts += pts.length;
+      }
+      if (totalPts > INK_PDF_MAX_POINTS) {
+        resolve({
+          ok: false,
+          error: "本页笔迹点数过多（" + totalPts + " > " + INK_PDF_MAX_POINTS + "），未写入 PDF"
+        });
+        return;
+      }
+      if (strokes.length > 1500) {
+        resolve({ ok: false, error: "本页笔画过多（" + strokes.length + " > 1500），未写入 PDF" });
         return;
       }
       var seq = state.seq++;
@@ -8938,7 +8960,10 @@ var OHSIDIAN_INK_REV = "59";
     var waitIdle = function (fn) {
       var tries = 0;
       var go = function () {
-        if (store.saving[oldKey] && tries++ < 40) {
+        // 50 ms x 200 = 10 s. Longer than any realistic sidecar write; if the
+        // save still has not settled we migrate anyway (worst case is a stale
+        // orphan under the OLD key, never lost strokes - audit N-3).
+        if (store.saving[oldKey] && tries++ < 200) {
           setTimeout(go, 50);
           return;
         }

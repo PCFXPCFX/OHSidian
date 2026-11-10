@@ -828,9 +828,20 @@ export class PdfInkWriter {
    * next to the PDF so both windows resolve the same path. Held for the swap
    * only, released in a finally, and broken after 60 s so a crashed writer
    * cannot wedge every later write.
+   *
+   * Hidden name (audit N-6): a plain "<pdf>.hso-lock" directory showed up in
+   * Obsidian's file explorer and could be picked up by sync plugins. A leading
+   * dot keeps it out of the vault UI.
    */
+  private static lockPathFor(src: string): string {
+    const slash: number = src.lastIndexOf('/');
+    const dir: string = slash >= 0 ? src.substring(0, slash + 1) : '';
+    const base: string = slash >= 0 ? src.substring(slash + 1) : src;
+    return dir + '.' + base + '.hso-lock';
+  }
+
   private static acquireSwapLock(src: string): string {
-    const lock: string = src + '.hso-lock';
+    const lock: string = PdfInkWriter.lockPathFor(src);
     const deadline: number = Date.now() + 5000;
     while (Date.now() < deadline) {
       try {
@@ -841,7 +852,10 @@ export class PdfInkWriter {
           const st = fileIo.statSync(lock);
           const ctimeMs: number = st.ctime > 100000000000 ? st.ctime : st.ctime * 1000;
           if (Date.now() - ctimeMs > 60000) {
-            try { fileIo.rmdirSync(lock); } catch (eStale) {}
+            // Recursive: a sync client or a stray file inside the lock dir makes
+            // plain rmdirSync fail with ENOTEMPTY forever, which would break
+            // every later write to this PDF (audit N-6).
+            PdfInkWriter.removeLockDir(lock);
             continue;
           }
         } catch (eStat) {
@@ -859,7 +873,35 @@ export class PdfInkWriter {
     if (!lock) {
       return;
     }
-    try { fileIo.rmdirSync(lock); } catch (e) {}
+    PdfInkWriter.removeLockDir(lock);
+  }
+
+  /** Best effort: clear the lock directory even if something was dropped in it. */
+  private static removeLockDir(lock: string): void {
+    try {
+      const names: Array<string> = fileIo.readdirSync(lock);
+      for (let i = 0; i < names.length; i++) {
+        const child: string = lock + '/' + names[i];
+        try {
+          const st = fileIo.statSync(child);
+          if (st.isDirectory()) {
+            PdfInkWriter.removeLockDir(child);
+          } else {
+            fileIo.unlinkSync(child);
+          }
+        } catch (eChild) {
+        }
+      }
+    } catch (eList) {
+    }
+    try {
+      fileIo.rmdirSync(lock);
+      return;
+    } catch (eDir) {
+    }
+    // Not a directory (a stray file took the name): unlink it so the next
+    // writer is not blocked by something rmdir can never remove.
+    try { fileIo.unlinkSync(lock); } catch (eUnlink) {}
   }
 
   private static looksLikePdf(path: string): boolean {
