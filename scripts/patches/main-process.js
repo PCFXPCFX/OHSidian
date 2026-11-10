@@ -292,7 +292,12 @@ var __ohTrashPurgeOnce=function(){try{
              between rename and utimes (old mtime, new ctime); never touch a
              freshly changed entry. */
           if(now-(st.ctimeMs||0)<recentGuard)continue;
-          var ageBase=st.mtimeMs;
+          /* Relocation is a rename: mtime stays the ORIGINAL content mtime
+             while ctime moves to "now". Without a sidecar the later of the two
+             is the truthful "entered the trash" time - the bare mtime purged
+             files that were merely old but deleted minutes ago (a note last
+             edited a month back was unlinked 60 s after the next launch). */
+          var ageBase=Math.max(st.mtimeMs||0,st.ctimeMs||0);
           /* F2: prefer the recorded deletion time over the file's own mtime
              (which is the ORIGINAL content mtime when utimesSync failed). */
           try{
@@ -364,6 +369,58 @@ var __vrSenderWindow=function(ev){
   }catch(e){}
   return null;
 };
+/* Harvesting an old vault window used to be a bare destroy(), which skips
+   beforeunload/unload - the exact hooks Obsidian uses for its ~2 s debounced
+   editor save and the workspace.json layout persist, so the last edits before
+   a vault switch were lost (audit NF-002). Ask the renderer to flush first
+   (its own app.workspace API, saved promises awaited), then destroy; the
+   1.2 s watchdog keeps a wedged save from holding the switch hostage. The
+   chooser is still the visible window the whole time, so no exit animation is
+   drawn and the switch keeps its instant feel. */
+var __vrFlushSource=[
+  "(async function(){",
+  "  try{",
+  "    var a=window.app;",
+  "    if(!a||!a.workspace)return 0;",
+  "    var ps=[];",
+  "    try{",
+  "      a.workspace.iterateAllLeaves(function(l){",
+  "        try{",
+  "          var v=l&&l.view;",
+  "          if(v&&typeof v.save==='function'){",
+  "            var p=v.save();",
+  "            if(p&&typeof p.then==='function')ps.push(p.then(function(){},function(){}));",
+  "          }",
+  "        }catch(e){}",
+  "      });",
+  "    }catch(e){}",
+  "    try{",
+  "      if(typeof a.workspace.saveLayout==='function')a.workspace.saveLayout();",
+  "      else if(typeof a.workspace.requestSaveLayout==='function')a.workspace.requestSaveLayout();",
+  "    }catch(e){}",
+  "    try{await Promise.all(ps);}catch(e){}",
+  "    return ps.length;",
+  "  }catch(e){return -1}",
+  "})()"
+].join("\n");
+var __vrFlushAndDestroy=function(w){
+  var done=false;
+  var finish=function(){
+    if(done)return;done=true;
+    try{if(w.isDestroyed&&w.isDestroyed())return}catch(e){}
+    try{if(w.destroy)w.destroy();else w.close()}catch(e){}
+  };
+  var watchdog=setTimeout(finish,1200);
+  var settle=function(){try{clearTimeout(watchdog)}catch(e){}finish()};
+  var wc=null;
+  try{wc=w.webContents}catch(e){}
+  if(!wc||(wc.isDestroyed&&wc.isDestroyed())){settle();return}
+  try{
+    var p=wc.executeJavaScript(__vrFlushSource,true);
+    if(p&&typeof p.then==="function")p.then(settle,settle);
+    else settle();
+  }catch(e){settle()}
+};
 __vrEl.ipcMain.on("vault-open",function(ev){
   try{
     if(!__vrTouch())return;
@@ -377,14 +434,14 @@ __vrEl.ipcMain.on("vault-open",function(ev){
         var u=(w.webContents&&w.webContents.getURL)?String(w.webContents.getURL()):"";
         if(/starter\.html|help|sandbox|devtools/i.test(u))continue;
         if(w.isDestroyed&&w.isDestroyed())continue;
-        /* destroy(): immediate - close() defers the real destroy by 3 s in the
-           engine ("close" handler setTimeout), which is what previously left
-           the old window on screen behind the switch. */
-        if(w.destroy)w.destroy();else w.close();
+        /* close() defers the real destroy by 3 s in the engine ("close"
+           handler setTimeout), which is what previously left the old window on
+           screen behind the switch. Flush, then destroy ourselves. */
+        __vrFlushAndDestroy(w);
         killed++;
       }catch(e){}
     }
-    try{console.log("[OHSidian] vault-open: closed "+killed+" old vault window(s) behind the chooser")}catch(e){}
+    try{console.log("[OHSidian] vault-open: flushed+closed "+killed+" old vault window(s) behind the chooser")}catch(e){}
   }catch(e){}
 });
 }catch(e){}})();

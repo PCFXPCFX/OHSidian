@@ -14,7 +14,9 @@ try { wrapper = fs.readFileSync(wrapperPath, 'utf8'); } catch (e) {
   console.log('  WARN wrapper main.js unreadable:', e.message);
 }
 
-const asarPath = path.join(__dirname, '..', 'web_engine/src/main/resources/resfile/resources/app/obsidian.asar');
+const asarPath = process.env.OHSIDIAN_ASAR_PATH
+  ? path.resolve(process.env.OHSIDIAN_ASAR_PATH)
+  : path.join(__dirname, '..', 'web_engine/src/main/resources/resfile/resources/app/obsidian.asar');
 try {
   const app = extractFile(asarPath, 'app.js').toString('utf8');
   const main = extractFile(asarPath, 'main.js').toString('utf8');
@@ -75,9 +77,11 @@ try {
       app.includes('if(!touch){try{if(!document.hasFocus())return}catch(eF){}}'),
     // Round 105: root back press reports "nothing consumed" back to the page
     // (which exits the ability), and the media-viewer lightbox joins the
-    // overlay rung so an open viewer is closed instead of exiting.
+    // overlay rung so an open viewer is closed instead of exiting. Audit NF-010:
+    // the ack is published through the field-owned merge, never by rewriting a
+    // whole stale snapshot of the mode file.
     'app back-press root ack (round 105)':
-      app.includes('c.backAck={seq:seq,handled:!!handled') && app.includes('.lightbox'),
+      app.includes('patchModeFile({backAck:{seq:seq,handled:!!handled') && app.includes('.lightbox'),
     'app back-press ladder fn (round 105)': app.includes('handled=backLadder(touch)===true'),
     'app media codec guidance (round 95 bug 1)': app.includes('ohsidianOfferSystemPlayer'),
     'app atomic mode-file write (H1)': app.includes('writeModeFileSync'),
@@ -189,6 +193,23 @@ try {
     'main deeplink cursor file (no main-file rewrite)': main.includes('.cursor.json'),
     'main default vault fix': main.includes('__ohsidianDefaultVault'),
     'main deeplink bridge': main.includes('__ohsidianDeepLink'),
+    // Audit NF-010: the mode file is a read-modify-write shared with ArkTS. Only
+    // a field-preserving merge keeps the renderer from rolling back the native
+    // keyboard/geometry fields it does not own.
+    'app mode file field-owned merge': app.includes('function patchModeFile') &&
+      app.includes('patchModeFile({backAck:') &&
+      !app.includes('c.backAck={seq:seq,handled:!!handled,ts:Date.now()};'),
+    // Audit NF-006/O-13: migration must wait for the editor saves it triggered.
+    'app migration waits for editor saves': app.includes('var flushThen=function(cb)') &&
+      app.includes('flushThen(function(){startMigration('),
+    // Audit NF-012: "restore original PDF" has to clear written/baked/pdfHl.
+    'app pdf restore resets written flags': app.includes('function resetPdfWrittenFlags') &&
+      app.includes('resetPdfWrittenFlags(s)'),
+    // Audit NF-008: the sidecar rename migration must be atomic (tmp+rename) and
+    // must cancel the debounced save armed for the old key.
+    'app ink rename migration atomic': app.includes('var waitIdle = function (fn)') &&
+      app.includes('var timer = store.timers[oldKey];') &&
+      app.includes('var tmp = dest + ".tmp";'),
   };
   let ok = true;
   for (const [k, v] of Object.entries(checks)) {

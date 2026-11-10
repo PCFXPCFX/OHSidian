@@ -140,14 +140,31 @@ for (const [file, patch, marker] of [
 const out = path.join(WORK, 'obsidian.patched.asar');
 await createPackage(patchedDir, out);
 
-// Replace: copy back over the original (same volume rename safe).
-fs.copyFileSync(out, ASAR_PATH);
+// Verify the NEW archive while the live kernel is still untouched (audit
+// NF-009): the old order replaced first and verified after, so a broken build
+// was already the installed kernel - and nothing else in the local pipeline
+// ever looked at "exists but corrupt".
+execFileSync(process.execPath, [path.join(REPO_ROOT, 'scripts/verify-asar.cjs')], {
+  cwd: path.join(REPO_ROOT, 'scripts'),
+  stdio: 'inherit',
+  env: { ...process.env, OHSIDIAN_ASAR_PATH: out },
+});
+
+// Replace atomically and keep the previous kernel for a manual rollback: the
+// asar is gitignored, so a plain copyFile over it had no way back.
+if (fs.existsSync(ASAR_PATH)) {
+  try {
+    fs.copyFileSync(ASAR_PATH, ASAR_PATH + '.bak');
+  } catch (e) {
+    console.log('[refresh] WARN: could not keep obsidian.asar.bak: ' + e.message);
+  }
+}
+fs.renameSync(out, ASAR_PATH);
 console.log('[refresh] replaced asar: ' + (fs.statSync(ASAR_PATH).size / 1048576).toFixed(2) + ' MiB');
 
-// Fresh-process verification (asar headers are cached per process!): the
-// standalone scripts/verify-asar.cjs does the syntax + marker checks.
-const { execFileSync: ex } = await import('node:child_process');
-ex('node', [path.join(REPO_ROOT, 'scripts/verify-asar.cjs')], {
+// Re-verify the installed path in a fresh process (asar headers are cached per
+// process!) so the file that lands in the HAP is the one that was checked.
+execFileSync(process.execPath, [path.join(REPO_ROOT, 'scripts/verify-asar.cjs')], {
   cwd: path.join(REPO_ROOT, 'scripts'),
   stdio: 'inherit',
 });

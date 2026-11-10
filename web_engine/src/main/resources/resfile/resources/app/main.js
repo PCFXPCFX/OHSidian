@@ -123,6 +123,50 @@ function getVaultTrashDirByFilesystem(targetPath) {
 	return path.join(path.dirname(targetPath), '.trash');
 }
 
+/* Deletion timestamp for entries this compat layer moves into a vault .trash.
+   The purge (scripts/patches/main-process.js) judges an entry's age from its
+   own mtime unless a sidecar carries the deletion time, and rename() keeps the
+   ORIGINAL content mtime: a note last edited 31 days ago and deleted through
+   shell.trashItem looked 31 days old in the trash and the next startup purge
+   unlinked it for good (STO-02, one layer down). Stamp exactly like the
+   renderer's hookTrash: utimes now, and a sidecar when utimes is refused. */
+const TRASH_META_SUFFIX = '.ohsidian-trash-meta.json';
+
+function stampTrashTime(targetPath) {
+	try {
+		let now = new Date();
+		fs.utimesSync(targetPath, now, now);
+		return;
+	} catch (e) {
+	}
+	try {
+		fs.writeFileSync(targetPath + TRASH_META_SUFFIX, JSON.stringify({deletedAt: Date.now()}), 'utf8');
+	} catch (e) {
+	}
+}
+
+function stampTrashEntry(targetPath, depth) {
+	if (depth > 64) return;
+	let st;
+	try {
+		st = fs.lstatSync(targetPath);
+	} catch (e) {
+		return;
+	}
+	if (st.isDirectory() && !st.isSymbolicLink()) {
+		let names = [];
+		try {
+			names = fs.readdirSync(targetPath);
+		} catch (e) {
+			names = [];
+		}
+		for (let name of names) stampTrashEntry(path.join(targetPath, name), depth + 1);
+		stampTrashTime(targetPath);
+	} else if (!st.isSymbolicLink()) {
+		stampTrashTime(targetPath);
+	}
+}
+
 function moveToVaultTrash(targetPath) {
 	let trashDir = getVaultTrashDir(targetPath);
 	if (!trashDir) return false;
@@ -134,6 +178,7 @@ function moveToVaultTrash(targetPath) {
 		trashPath = path.join(trashDir, parsed.name + '-' + Date.now() + parsed.ext);
 	}
 	fs.renameSync(targetPath, trashPath);
+	stampTrashEntry(trashPath, 0);
 	console.log('[HMOS-TRASH] moved to vault trash fallback', targetPath, '->', trashPath);
 	return true;
 }

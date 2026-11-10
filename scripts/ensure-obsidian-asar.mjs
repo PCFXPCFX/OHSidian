@@ -17,7 +17,7 @@
  * CI runs the same pipeline explicitly with caching (build-release.yml), so
  * this is a fast no-op there. Set OHSIDIAN_SKIP_ASAR_ENSURE=1 to disable.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, statSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,8 +32,64 @@ if (process.env.OHSIDIAN_SKIP_ASAR_ENSURE === '1') {
   process.exit(0);
 }
 
+/**
+ * "The file exists" is not "the file is good" (audit NF-009). The asar is
+ * gitignored and installed by copying tens of MB, so an ENOSPC / interrupted
+ * copy / half-finished repack leaves a truncated archive that this script used
+ * to accept silently - every later build then packed it into the HAP and the
+ * engine failed to load (white screen, dead kernel). Extracting app.js/main.js
+ * with @electron/asar throws on a truncated header and costs milliseconds;
+ * the marker check also catches an archive that was overwritten by an
+ * unpatched one.
+ */
+async function asarProblem() {
+  try {
+    const size = statSync(ASAR_PATH).size;
+    if (size < 1024 * 1024) return `only ${size} bytes`;
+    const asar = await loadAsar();
+    if (!asar) return '';
+    const markers = {
+      'app.js': ['__ohsidianTouchPatch', '__ohsidianInkPatch'],
+      'main.js': ['__ohsidianConsoleBridge'],
+    };
+    for (const [name, needles] of Object.entries(markers)) {
+      const head = asar.extractFile(ASAR_PATH, name).toString('utf8', 0, 262144);
+      const missing = needles.filter((needle) => !head.includes(needle));
+      if (missing.length > 0) {
+        return `${name} is missing patch markers: ${missing.join(', ')}`;
+      }
+    }
+  } catch (e) {
+    return e && e.message ? e.message : String(e);
+  }
+  return '';
+}
+
+let asarModule = null;
+async function loadAsar() {
+  if (asarModule) return asarModule;
+  if (!existsSync(ASAR_DEP)) return null; // deps not installed: size check only
+  try {
+    asarModule = await import('@electron/asar');
+  } catch (e) {
+    asarModule = null;
+  }
+  return asarModule;
+}
+
 if (existsSync(ASAR_PATH)) {
-  process.exit(0);
+  const problem = await asarProblem();
+  if (!problem) {
+    process.exit(0);
+  }
+  console.error(`[asar-ensure] existing obsidian.asar is unusable (${problem}) - rebuilding it`);
+  try {
+    rmSync(ASAR_PATH, { force: true });
+    rmSync(ASAR_PATH + '.bak', { force: true });
+  } catch (e) {
+    console.error('[asar-ensure] cannot delete the broken asar: ' + e.message);
+    process.exit(1);
+  }
 }
 
 console.log('[asar-ensure] obsidian.asar missing - generating it (official download, one-time per version, ~27 MB)');

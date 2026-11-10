@@ -4755,3 +4755,85 @@ release HAL 与 agent 包从此路径分离：日常发版直接 `hvigorw`，需
   121,150,237 B / SHA-256 `BFE81A06857A54AE87B4D9152E4CD251FA332C45C26DCEFA229DBB99A0CD0699`
 - release asar 已恢复，`verify-release` 通过（`probeHook` 0）。
 - `docs/STYLUS-EVAL.md` / README 的安装命令改为 `build-agent.mjs` + `artifacts/agent/`。
+
+## 第 210 轮 (2026-11-10): 外部回归审计（HEAD 3ac0c56）——13 项未修复缺陷逐条复核并修复
+
+> 来源：外部审计《OHSidian 手写笔引入以来回归审计报告》（2026-11-09，审计 HEAD `3ac0c56`）。
+> 处理方式：**逐条回到代码复核，再改**。13 项"未修复"缺陷在本地 HEAD 全部成立（编号、行号、因果链一致，无一项是误报）；本轮全部修复，另修 3 项流程性缺口。
+> 未处理：报告 §六 的 22 项观察项（O-1~O-17、V-1~V-5，均为设计权衡或窄边界窗口，报告也只是"留档/顺手修"建议）与 O-14（CHANGES 文件 BOM+CRLF，整文件重写的伪差异代价大于收益）。
+
+### 一、F-001（P1）鼠标滚轮/捏合转发被整体删除
+
+**真因复核**：`051b05f` 在 `MultiInputAdapter.isPanEventValid` 里加了 `SourceTool.Pen → false`（**这已经足够**），同时又删掉了 `WebWindow` / `WebSubWindow` / `WebEmbeddedWindow` 的 `.gesture(PanGesture/PinchGesture)`。`OnPanEvent` 是引擎唯一的滚轮入口（`MultiInputAdapter` 注释 + `docs/window-state-machine.md`），删掉手势等于掐断 MOUSE 滚轮/触控板捏合；`WebWindowNode`（BrowserAbility）没被删，所以同应用内行为不一致。三个组件里的 `multiInputAdapter` 保留成死代码，"看起来接了、实际没接"。
+
+**修复**：三处恢复与 `WebWindowNode` 一致的手势转发（`WebWindow`/`WebEmbeddedWindow` 含 Pan+Pinch，`WebSubWindow` 只恢复它原本就有的 Pan），并写明"笔的过滤在适配器里、手势是唯一滚轮来源"的注释。O-5 的 `fingerList[0].id===0` 判据保持原样（报告明确要求勿动）。
+
+### 二、NF-001（P1）`shell.trashItem` 旁路不盖删除时间
+
+**真因复核**：`resfile/.../main.js` 的 `moveToVaultTrash` 直接 `renameSync` 返回；rename 保留**内容原始 mtime**，而 purge 无 sidecar 时按 mtime 判龄 → 一个"上次编辑于一个月前"的笔记经插件 `shell.trashItem`（或 hookTrash 回退）进回收站后，下次启动 60s 被永久删除。10-19 的 STO-02 只修了渲染层 trashLocal 这一条路径。
+
+**修复**：`moveToVaultTrash` 成功后对目标（含目录树）执行与渲染层 `stampOne` 同语义的时间戳：`utimesSync(now)`，失败写 `<file>.ohsidian-trash-meta.json` 的 `deletedAt`。purge 侧第二道防线：无 sidecar 时判龄基准改为 `max(mtime, ctime)`——rename 把 ctime 推到"进回收站那一刻"，旧内容 mtime 再老也不会被误清。
+
+### 三、NF-002（P1）切仓 `destroy()` 丢未落盘编辑与布局
+
+**真因复核**：`vault-open` 收割窗口用 `w.destroy()`，不触发 beforeunload/unload，而 Obsidian 的编辑保存是约 2s 防抖、布局写 `workspace.json` 也在该时机。注释自认是为了绕开 `close()` 的 3s 退出动画。
+
+**修复**：改为"先让渲染层 flush，再 destroy"：对每个待收割窗口 `webContents.executeJavaScript` 一段脚本，遍历 `app.workspace.iterateAllLeaves` 调 `view.save()` 并 `Promise.all`，随后 `saveLayout()/requestSaveLayout()`；脚本 resolve 后立即 destroy，另加 1.2s 看门狗（写死的 save 不会拖住切仓）。chooser 全程是可见窗口，退出动画仍不会出现，观感不变。
+
+### 四、NF-003 / NF-004 / NF-005（P2）PDF 写回三处
+
+- **NF-003 备份键碰撞**：备份名原为 `basename + FNV-1a 32 位`，"已有备份就跳过创建"意味着第二个同名 PDF 会认领第一个的原件。改为双 32 位哈希（FNV-1a + djb2，约 62 位）；**保留旧键读取**（`findBackup`/写回路径先试新键再试旧键），升级后老用户的现有备份仍可恢复，且不会被"重新快照一份带注释的文件"顶掉。
+- **NF-004 restore 回退截断**：rename 失败后的 `fileIo.copyFileSync(tmp, src)` 是 `O_TRUNC` 语义，中途失败就把当前 PDF 截断——与函数自身注释相反。改为"同级临时名 copy → rename 覆盖"，rename 被拒时走 write 主链路同款的"旧文件移开→rename→失败回滚"。
+- **NF-005 跨窗口交换竞态**：`Index.ets` 的 `pdfInkBusy` 是每窗口实例字段，两个窗口打开同一 PDF 时两段 taskpool 写可并发进入"移开旧文件→rename 新文件"。新增**跨窗口交换锁**：`<pdf>.hso-lock` 目录（fileIo 没有 O_EXCL，mkdir 是唯一的原子独占原语），覆盖交换段，finally 释放，60s 陈旧自解（崩溃写者不会把该 PDF 永久锁死），最多等 5s 后返回明确错误"另一个窗口正在写入此 PDF"。渲染层收到失败会把该页重新标脏，下次写回自愈。
+
+### 五、NF-007（P2）IPC 1MB 行上限 vs 写回 3MB
+
+**真因复核**：`consumeNativeIpc` 在 `nativeBuffer.length > 1048576` 时整段清空且不回执；写回是"整页一行 JSON"，`MAX_POINTS=80000` × 约 30–38 字节 ≈ 3MB，26000 点处就先撞上限 → 该页写回永久超时。
+
+**修复**：上限提到 16MB（`NATIVE_IPC_MAX_LINE`，注释明确要求与 `PdfInkWriter.MAX_POINTS` 一起推理）；超限不再静默：回一帧 `pdfInkResult{seq:0,ok:false,error:'…超过 16MB 上限…'}`，渲染层 `resolvePdfResult` 识别 `seq===0` 后弹 Notice 并复位 `pdfInFlight`（不再干等 90s）。
+
+### 六、NF-008（P2）onRename 墨迹迁移的三处问题
+
+- **定时器竞争**：`saveSoon` 以改名前 `inkKey` 注册 900ms 定时器，`onRename` 既不清也不等。改为：迁移前先 `clearTimeout(store.timers[oldKey])`，再用 `waitIdle` 最多等 2s 让 `store.saving[oldKey]` 的在飞写落定。
+- **非原子写**：`ad.write(newPath,…)` 直写（全部墨迹写入点里唯一不 tmp+rename 的）→ 改为 tmp + rename，rename 被拒回退直写并清理 tmp。
+- **静默失败**：外层 `.catch(function(){})` 改为 `warn` + Notice（"墨迹随文件改名迁移失败：…"）。
+- 缓存里若有打开中的 doc，直接以内存态 `saveDoc` 到新键（sidecar 可能滞后 900ms），而不是回读磁盘旧内容——那正是丢尾部笔画的那条路径。
+- **未做**：`beforeunload/pagehide` 兜底 flush（报告的可选建议）。改名后未再书写即关闭应用仍可能丢尾部笔画，属跨层设计改动，留待单独一轮。
+
+### 七、NF-009（P2）asar 安装非原子 + "存在即可信"
+
+四个脚本统一为"验证 → 保留 .bak → 临时名 rename"：
+- `update-obsidian.mjs`：安装前用 `OHSIDIAN_ASAR_PATH` 指向**待装包**跑一次 `verify-asar`（新增环境变量支持），失败拒绝安装；`copyFileSync` 到 `.new` → 校验字节数 → 旧内核存 `obsidian.asar.bak` → `rename` 覆盖；**版本号写入放在安装成功之后**（不再留下"新 asar + 旧版本钉"组合）。
+- `refresh-app-patch.mjs`：由"先替换再校验"改为"先校验新包、再 .bak + rename"，最后对已安装路径再跑一次校验。
+- `repack-b-native-asar.mjs`：原先 `copyFileSync` 后**无任何验证**，补校验 + .bak + rename。
+- `ensure-obsidian-asar.mjs`：`existsSync` 即 no-op 改为完整性闸门——用 `@electron/asar` 抽 `app.js`/`main.js`（截断包会直接抛错），并要求补丁标记存在；判定不可用则**删除并自动重建**，绝不再把坏包静默打进 HAP。
+
+### 八、NF-010（P2）模式文件双侧无锁 RMW
+
+**真因复核**：`ackBackPress`（每次返回手势）、触屏模式命令、字号命令都是 `readMode → 改一个字段 → 整文件回写`。tmp+rename 只保证单次写不撕裂，不保证 RMW 不丢更新；ArkTS 侧 12 处 `publishModeFileAtomic`（键盘高度/insets/focusedWindow）在这些窗口期被回退成旧值。
+
+**修复**：新增 `patchModeFile(patch, removeKeys)`——写前**重新读盘**，只覆盖调用方拥有的字段（`override`/`fontScaleOverride`/`backAck`/`systemFontOverride`），原生字段保持原值；三处调用点改为只提交自己的字段；并修正注释里"原子 rename ⇒ RMW 安全"的错误论证。`verify-asar` 增加门禁，禁止 `c.backAck={…}` 这种整快照写法回归。
+
+### 九、NF-006（P3）迁移固定 300ms 抢跑
+
+`flushEditors()` 收集每个 `view.save()` 的 Promise，新增 `flushThen(cb)`（全部完成或 3s 上限后回调），两处迁移入口改为 `flushThen(...→startMigration)`，不再用固定 `setTimeout(300)`。
+
+### 十、NF-011（P3）pdfembed 套索副本 dy 未归一化
+
+`duplicateSelection` 里 `dx` 有 pdfembed 分支（0.02）而 `dy` 没有，克隆笔画整体 `y += 18`（归一化单位 = 18 个页高）落到页面外，再被写回成 PDF 垃圾注释。改为 pdfembed 分支 `dx = dy = 0.02`（pdf 分支保持原样：`dx=14/scale`，`dy=18` 用户坐标点）。
+
+### 十一、NF-012（P2）恢复原始 PDF 后 written/baked/pdfHl 未重置
+
+新增 `resetPdfWrittenFlags(surface)`：恢复成功回调里清掉该 doc 全部 `written/baked/pdfHl`，提示语改为"PDF 内注释已清除，再次书写会按需重建"，并触发一次 `inkRefreshSurfaces()`。
+为什么这样就够：`pdfDirtyPages()` 本来就把 `written===false` 的笔画按页收集，所以"下次任意写回"会自动重建注释；**故意不在恢复后立刻 schedulePdfWrite**——那会把用户刚恢复的 PDF 马上重新写满注释，等于让"恢复原始"失效。清 `baked` 则让荧光笔/普通笔迹重新回到叠加层，不再"从屏幕上消失"。
+
+### 十二、E-001（P3）IPC 会话按单例而非按连接
+
+`server.on('connect')` 原先把 `nativeClient/nativeAuthorized/nativeBuffer` 整体重置，第二条回环连接就能踢掉当前会话授权。改为：**授权后不再接受新连接**（直接 close 并记日志）；未授权的连接可以被替换（真实渲染层重连不受影响），被替换的旧连接主动关闭；`close` 回调按连接身份过滤，迟到的 close 不会清掉新会话。
+
+### 十三、验证
+
+- `node --check` 通过：`scripts/patches/{touch-mode,ohsidian-ink,main-process}.js`、`resfile/resources/app/main.js`、`verify-asar.cjs`、四个 `.mjs`。
+- `node scripts/update-obsidian.mjs --repatch`（离线缓存内核）+ `verify-asar`：**全绿**（新增 5 条门禁：模式文件字段化合并、迁移等待保存、恢复重置标志、onRename 原子迁移、设置开关 label）。补丁版本 `190 → 191`，墨迹版本 `58 → 59`。
+- 安装路径已确认：`obsidian.asar`（25.2 MiB）+ 旧内核 `obsidian.asar.bak`；`*.asar.bak` 已加入 `.gitignore`。
+- **未做真机验证**：本轮无 HAP 构建（本机无 DevEco/SDK 环境）。需要真机回归的点：① 外接鼠标在主窗/子窗/内嵌窗滚动与捏合，且笔迹书写不拖页；② 插件路径删除 31 天前的文件 → 重启 → 60s purge 后文件仍在；③ 切仓前 1 秒内输入文字，切回后内容完整；④ 写回两页（含荧光笔）→ 恢复原始 → 高亮笔仍可见、PDF 内注释已清；⑤ 双窗口打开同一 PDF 同时写回不报错/不互相覆盖；⑥ 设置页开关仍可正常点灭（补丁 191）。

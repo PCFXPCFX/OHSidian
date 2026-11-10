@@ -50,6 +50,15 @@ import CustomChildProcess from '../process/CustomChildProcess';
 // close the app, a stale one must never fire.
 const BACK_EXIT_CHECK_MS: number = 350;
 const BACK_EXIT_RETRIES: number = 1;
+
+// Cap for one newline-terminated IPC line. A pdfInk write-back carries every
+// stroke of one page as one JSON line, and PdfInkWriter.MAX_POINTS (80000
+// points, ~30-38 bytes each) puts the legitimate maximum near 3 MB - the old
+// 1 MiB cap dropped dense pages silently: the line never completed, the write
+// timed out, and "PDF write-back" stayed broken for that page forever
+// (audit NF-007). Keep this ABOVE PdfInkWriter's point budget; the two limits
+// live in different layers and must be reasoned about together.
+const NATIVE_IPC_MAX_LINE: number = 16 * 1024 * 1024;
  
 interface IStyleData {
   backgroundColor: string,
@@ -720,6 +729,32 @@ struct Index {
       this.nativeToken = util.generateRandomUUID();
       const server: socket.TCPSocketServer = socket.constructTCPSocketServerInstance();
       server.on('connect', (conn: socket.TCPSocketConnection) => {
+        // Exactly one AUTHORIZED session at a time (audit E-001). nativeClient/
+        // nativeAuthorized/nativeBuffer are single fields, so any additional
+        // loopback connection used to reset the live session and silently drop
+        // every later request until the window reloaded - a port scan or any
+        // local process could do that. An unauthenticated connection may still
+        // be replaced (the real renderer may connect while a scanner holds the
+        // slot); once the handshake succeeded the session is never taken over.
+        if (this.nativeAuthorized && this.nativeClient !== null) {
+          console.warn('NativeVideoIpc', 'second connection refused: session already authorized');
+          try {
+            conn.close().catch((err: BusinessError) => {
+              console.warn('NativeVideoIpc', 'refused connection close failed: ' + JSON.stringify(err));
+            });
+          } catch (eC) {
+          }
+          return;
+        }
+        const prevClient: socket.TCPSocketConnection | null = this.nativeClient;
+        if (prevClient !== null && prevClient !== conn) {
+          try {
+            prevClient.close().catch((err: BusinessError) => {
+              console.warn('NativeVideoIpc', 'stale connection close failed: ' + JSON.stringify(err));
+            });
+          } catch (eP) {
+          }
+        }
         this.nativeClient = conn;
         this.nativeBuffer = '';
         this.nativeAuthorized = false;
@@ -734,6 +769,11 @@ struct Index {
           }
         });
         conn.on('close', () => {
+          // A stale close (the old socket finishing after a new one was
+          // accepted) must not clear the CURRENT session.
+          if (this.nativeClient !== conn) {
+            return;
+          }
           this.nativeClient = null;
           this.nativeBuffer = '';
           this.nativeAuthorized = false;
@@ -771,8 +811,23 @@ struct Index {
 
   private consumeNativeIpc(text: string): void {
     this.nativeBuffer += text;
-    if (this.nativeBuffer.length > 1048576) {
+    if (this.nativeBuffer.length > NATIVE_IPC_MAX_LINE) {
+      // An over-long line means the renderer asked for something this port
+      // cannot carry. Dropping it silently left the renderer waiting for a
+      // result that never came; answer with an error frame instead so the ink
+      // layer can tell the user and re-queue the page.
       this.nativeBuffer = '';
+      console.warn('NativeVideoIpc', 'line over ' + NATIVE_IPC_MAX_LINE + ' bytes, dropped');
+      if (this.nativeAuthorized) {
+        this.sendNativeLine(JSON.stringify({
+          event: 'pdfInkResult',
+          seq: 0,
+          ok: false,
+          bytes: 0,
+          error: '写回数据超过 ' + Math.round(NATIVE_IPC_MAX_LINE / 1048576) + 'MB 上限，本页未写入',
+          backup: ''
+        }));
+      }
       return;
     }
     let idx: number = this.nativeBuffer.indexOf('\n');

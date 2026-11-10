@@ -3,6 +3,7 @@
 // This keeps the persistent-entry patch while updating the renderer bridge.
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import * as asar from '@electron/asar';
 
 const repo = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
@@ -38,5 +39,22 @@ fs.writeFileSync(appPath, app, 'utf8');
 const out = path.join(repo, '.cache/b-obsidian.asar');
 await asar.createPackage(tmp, out);
 const bytes = fs.statSync(out).size;
-fs.copyFileSync(out, asarPath);
+
+// Same install discipline as every other asar writer (audit NF-009): verify the
+// new archive, keep the previous kernel, swap by rename. This script used to
+// copyFileSync with no verification at all, so a bad repack went straight into
+// the next local build.
+execFileSync(process.execPath, [path.join(repo, 'scripts/verify-asar.cjs')], {
+  cwd: path.join(repo, 'scripts'),
+  stdio: 'inherit',
+  env: { ...process.env, OHSIDIAN_ASAR_PATH: out },
+});
+if (fs.existsSync(asarPath)) {
+  try {
+    fs.copyFileSync(asarPath, asarPath + '.bak');
+  } catch (e) {
+    console.log('WARN: could not keep obsidian.asar.bak: ' + e.message);
+  }
+}
+fs.renameSync(out, asarPath);
 console.log('repacked B renderer asar:', bytes, 'bytes');

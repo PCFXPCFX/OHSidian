@@ -25,9 +25,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import * as asar from '@electron/asar';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const SCRIPTS_DIR = path.join(REPO_ROOT, 'scripts');
 const APP_DIR = path.join(REPO_ROOT, 'web_engine/src/main/resources/resfile/resources/app');
 const PACKAGE_JSON = path.join(APP_DIR, 'package.json');
 const MAIN_JS = path.join(APP_DIR, 'main.js');
@@ -535,7 +537,36 @@ async function main() {
   await asar.createPackage(extractedDir, patchedAsar);
 
   // --- install ---
-  fs.copyFileSync(patchedAsar, ASAR_PATH);
+  // Never copy straight over the live kernel: an ENOSPC, a disk hiccup or a
+  // Ctrl-C in the middle leaves a truncated obsidian.asar, and the file is
+  // gitignored, so nothing can roll it back - worse, every later build used to
+  // treat "the file exists" as "the file is good" (audit NF-009). Verify the
+  // staged archive first, keep the previous kernel as .bak, rename into place,
+  // and only then record the version - so the version pin can never describe an
+  // asar that failed to install.
+  const stageCheck = spawnSync(process.execPath, [path.join(SCRIPTS_DIR, 'verify-asar.cjs')], {
+    stdio: 'inherit',
+    cwd: SCRIPTS_DIR,
+    env: { ...process.env, OHSIDIAN_ASAR_PATH: patchedAsar },
+  });
+  if (stageCheck.status !== 0) {
+    throw new Error('staged asar failed verify-asar - refusing to install it');
+  }
+  const staged = ASAR_PATH + '.new';
+  fs.copyFileSync(patchedAsar, staged);
+  const stagedSize = fs.statSync(staged).size;
+  if (stagedSize !== fs.statSync(patchedAsar).size) {
+    fs.rmSync(staged, { force: true });
+    throw new Error(`staged asar is truncated (${stagedSize} bytes vs ${fs.statSync(patchedAsar).size})`);
+  }
+  if (fs.existsSync(ASAR_PATH)) {
+    try {
+      fs.copyFileSync(ASAR_PATH, ASAR_PATH + '.bak');
+    } catch (e) {
+      log('WARN: could not keep the previous kernel as obsidian.asar.bak: ' + e.message);
+    }
+  }
+  fs.renameSync(staged, ASAR_PATH);
   const pkg = JSON.parse(fs.readFileSync(PACKAGE_JSON, 'utf8'));
   pkg.version = targetVersion;
   fs.writeFileSync(PACKAGE_JSON, JSON.stringify(pkg, null, '\t') + '\n');

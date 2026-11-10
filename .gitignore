@@ -67,6 +67,8 @@ build-profile.json5
 # Obsidian ASAR archive (large binary, distribution-restricted)
 *.asar
 !web_engine/src/main/resources/resfile/resources/app/obsidian.asar
+# Previous kernel kept by the atomic asar install (update-obsidian / refresh / repack)
+*.asar.bak
 
 # Signing materials
 **/*.p12

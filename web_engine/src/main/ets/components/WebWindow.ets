@@ -221,6 +221,42 @@ export struct WebWindow {
 
   build() {
     NodeContainer(this.windowNodeController)
+      /* Wheel / trackpad-pinch forwarding. This is the ONLY path that
+         synthesises Chromium wheel events: the engine has no other wheel
+         entry point (MultiInputAdapter -> nativeContext.OnPanEventCB). The
+         stylus round removed it here while also adding the pen filter inside
+         isPanEventValid(); the filter alone was the fix, and deleting the
+         gesture silently killed mouse-wheel scrolling and pinch-zoom in the
+         main window while BrowserAbility (WebWindowNode) kept working. Pen
+         drags are still dropped by isPanEventValid (SourceTool.Pen) so this
+         cannot resurrect "drawing scrolls the page". */
+      .gesture(
+        PanGesture({ direction: PanDirection.Vertical | PanDirection.Horizontal, distance: 1 })
+          .onActionStart((event: GestureEvent) => {
+            this.multiInputAdapter.OnPanEvent(PanAction.kStart, this.xComponentId, event);
+          })
+          .onActionUpdate((event: GestureEvent) => {
+            this.multiInputAdapter.OnPanEvent(PanAction.kUpdate, this.xComponentId, event);
+          })
+          .onActionEnd((event: GestureEvent) => {
+            this.multiInputAdapter.OnPanEvent(PanAction.kEnd, this.xComponentId, event);
+          })
+          .onActionCancel(() => {
+            this.multiInputAdapter.OnPanEvent(PanAction.kCancel, this.xComponentId, undefined);
+          })
+      )
+      .gesture(
+        PinchGesture()
+          .onActionStart((event: GestureEvent) => {
+            this.multiInputAdapter.OnPinchEvent("start", this.xComponentId, event);
+          })
+          .onActionUpdate((event: GestureEvent) => {
+            this.multiInputAdapter.OnPinchEvent("update", this.xComponentId, event);
+          })
+          .onActionEnd((event: GestureEvent) => {
+            this.multiInputAdapter.OnPinchEvent("end", this.xComponentId, event);
+          })
+      )
       .onDragEnter((event?: DragEvent) => {
         LogUtil.info(WebWindow.TAG, 'OhosDrag WebWindow onDragEnter xComponentId:' + this.xComponentId);
         this.dragDropAdapter.dragEnterData(this.xComponentId, (event as DragEvent).getSummary());

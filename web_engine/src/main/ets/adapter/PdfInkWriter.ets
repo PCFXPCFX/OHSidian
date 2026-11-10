@@ -571,14 +571,16 @@ export class PdfInkWriter {
     const siblingBackup: string = req.src + '.ohsidian-orig.pdf';
     try {
       fileIo.mkdirSync(req.backupDir, true);
-      const base: string = PdfInkWriter.backupKey(req.src);
-      const primary: string = req.backupDir + '/' + base + '.orig.pdf';
-      let hasBackup: boolean = false;
-      try {
-        const bs = fileIo.statSync(primary);
-        hasBackup = bs.isFile() && bs.size > 0;
-      } catch (eB) {
-        hasBackup = false;
+      const base: string = PdfInkWriter.strongBackupKey(req.src);
+      let primary: string = req.backupDir + '/' + base + '.orig.pdf';
+      // Backups created before the key was widened live under the 32-bit key.
+      // Reuse them instead of snapshotting again: the current file may already
+      // carry annotations, and restoring that would not be "the original".
+      const legacy: string = req.backupDir + '/' + PdfInkWriter.backupKey(req.src) + '.orig.pdf';
+      let hasBackup: boolean = PdfInkWriter.isNonEmptyFile(primary);
+      if (!hasBackup && PdfInkWriter.isNonEmptyFile(legacy)) {
+        primary = legacy;
+        hasBackup = true;
       }
       if (!hasBackup) {
         fileIo.copyFileSync(req.src, primary);
@@ -616,45 +618,61 @@ export class PdfInkWriter {
     // tablets, which surfaced as "替换原 PDF 失败". Copy into the PDF's own
     // directory first, then swap atomically; keep the old file until the new
     // one is in place.
-    const localNew: string = req.src + '.hso-new-' + token + '.pdf';
-    const localOld: string = req.src + '.hso-old-' + token + '.pdf';
+    //
+    // NF-005: the swap must be serialised ACROSS WINDOWS - Index.ets's
+    // pdfInkBusy flag is per window, so a second window showing the same PDF
+    // could enter "move old aside -> rename new in place" in between and end up
+    // renaming a half-swapped file. Lock right before the swap, release in the
+    // finally below (every early return passes through it).
+    const swapLock: string = PdfInkWriter.acquireSwapLock(req.src);
+    if (!swapLock) {
+      result.error = '另一个窗口正在写入此 PDF，请稍后重试';
+      PdfInkWriter.cleanup(cacheSrc, cacheOut);
+      return result;
+    }
     try {
-      fileIo.copyFileSync(cacheOut, localNew);
-      if (!PdfInkWriter.looksLikePdf(localNew)) {
-        result.error = '写出的本地临时文件不是有效 PDF，已放弃替换';
+      const localNew: string = req.src + '.hso-new-' + token + '.pdf';
+      const localOld: string = req.src + '.hso-old-' + token + '.pdf';
+      try {
+        fileIo.copyFileSync(cacheOut, localNew);
+        if (!PdfInkWriter.looksLikePdf(localNew)) {
+          result.error = '写出的本地临时文件不是有效 PDF，已放弃替换';
+          PdfInkWriter.cleanup(localNew, '');
+          PdfInkWriter.cleanup(cacheSrc, cacheOut);
+          return result;
+        }
+        try {
+          fileIo.renameSync(localNew, req.src);
+        } catch (eRename) {
+          // Platform refuses rename-over-existing: move old aside, then swap.
+          let movedOld: boolean = false;
+          try {
+            fileIo.renameSync(req.src, localOld);
+            movedOld = true;
+            fileIo.renameSync(localNew, req.src);
+          } catch (eSwap) {
+            if (movedOld) {
+              try { fileIo.renameSync(localOld, req.src); } catch (eRestore) {}
+            }
+            throw eSwap as Error;
+          }
+          if (movedOld) {
+            try { fileIo.unlinkSync(localOld); } catch (eOld) {}
+          }
+        }
+        try { bytes = fileIo.statSync(req.src).size; } catch (eB2) {}
+      } catch (e) {
+        const err = e as BusinessError;
+        result.error = '替换原 PDF 失败：' + err.code + '（备份在 ' + backupPath + '）';
+        result.backup = backupPath;
+        // Keep localOld if restoring it failed: it may be the only copy of the
+        // original PDF. Only the new temp file is safe to delete here.
         PdfInkWriter.cleanup(localNew, '');
         PdfInkWriter.cleanup(cacheSrc, cacheOut);
         return result;
       }
-      try {
-        fileIo.renameSync(localNew, req.src);
-      } catch (eRename) {
-        // Platform refuses rename-over-existing: move old aside, then swap.
-        let movedOld: boolean = false;
-        try {
-          fileIo.renameSync(req.src, localOld);
-          movedOld = true;
-          fileIo.renameSync(localNew, req.src);
-        } catch (eSwap) {
-          if (movedOld) {
-            try { fileIo.renameSync(localOld, req.src); } catch (eRestore) {}
-          }
-          throw eSwap as Error;
-        }
-        if (movedOld) {
-          try { fileIo.unlinkSync(localOld); } catch (eOld) {}
-        }
-      }
-      try { bytes = fileIo.statSync(req.src).size; } catch (eB2) {}
-    } catch (e) {
-      const err = e as BusinessError;
-      result.error = '替换原 PDF 失败：' + err.code + '（备份在 ' + backupPath + '）';
-      result.backup = backupPath;
-      // Keep localOld if restoring it failed: it may be the only copy of the
-      // original PDF. Only the new temp file is safe to delete here.
-      PdfInkWriter.cleanup(localNew, '');
-      PdfInkWriter.cleanup(cacheSrc, cacheOut);
-      return result;
+    } finally {
+      PdfInkWriter.releaseSwapLock(swapLock);
     }
 
     PdfInkWriter.cleanup(cacheSrc, cacheOut);
@@ -705,28 +723,35 @@ export class PdfInkWriter {
   }
 
   static backupPathFor(src: string, backupDir: string): string {
-    return backupDir + '/' + PdfInkWriter.backupKey(src) + '.orig.pdf';
+    return backupDir + '/' + PdfInkWriter.strongBackupKey(src) + '.orig.pdf';
   }
 
   /** Primary vault backup, or the sibling fallback created when it failed. */
   static findBackup(src: string, backupDir: string): string {
     const primary: string = PdfInkWriter.backupPathFor(src, backupDir);
-    try {
-      const st = fileIo.statSync(primary);
-      if (st.isFile() && st.size > 0) {
-        return primary;
-      }
-    } catch (e) {
+    if (PdfInkWriter.isNonEmptyFile(primary)) {
+      return primary;
+    }
+    // Pre-widening key (see strongBackupKey): an existing 32-bit backup is still
+    // the correct original for this file.
+    const legacy: string = backupDir + '/' + PdfInkWriter.backupKey(src) + '.orig.pdf';
+    if (PdfInkWriter.isNonEmptyFile(legacy)) {
+      return legacy;
     }
     const sibling: string = src + '.ohsidian-orig.pdf';
-    try {
-      const st2 = fileIo.statSync(sibling);
-      if (st2.isFile() && st2.size > 0) {
-        return sibling;
-      }
-    } catch (e2) {
+    if (PdfInkWriter.isNonEmptyFile(sibling)) {
+      return sibling;
     }
     return primary;
+  }
+
+  private static isNonEmptyFile(path: string): boolean {
+    try {
+      const st = fileIo.statSync(path);
+      return st.isFile() && st.size > 0;
+    } catch (e) {
+      return false;
+    }
   }
 
   /**
@@ -741,14 +766,47 @@ export class PdfInkWriter {
         result.error = '原始备份不存在或不是有效 PDF';
         return result;
       }
-      tmp = cacheDir + '/pdfink/restore-' + Date.now().toString(36) + '.pdf';
-      fileIo.mkdirSync(cacheDir + '/pdfink', true);
-      fileIo.copyFileSync(backup, tmp);
+      const swapLock: string = PdfInkWriter.acquireSwapLock(src);
+      if (!swapLock) {
+        result.error = '另一个窗口正在写入此 PDF，请稍后重试';
+        return result;
+      }
       try {
-        fileIo.renameSync(tmp, src);
-      } catch (eR) {
-        fileIo.copyFileSync(tmp, src);
-        try { fileIo.unlinkSync(tmp); } catch (eU) {}
+        tmp = cacheDir + '/pdfink/restore-' + Date.now().toString(36) + '.pdf';
+        fileIo.mkdirSync(cacheDir + '/pdfink', true);
+        fileIo.copyFileSync(backup, tmp);
+        // copyFileSync into the target truncates it BEFORE writing (POSIX open
+        // with O_TRUNC), so a failing fallback left the user with a truncated
+        // PDF - the very thing the comment above promises not to do. Always
+        // copy next to the target and rename it into place instead.
+        const localNew: string = src + '.hso-new-restore-' + Date.now().toString(36) + '.pdf';
+        const localOld: string = src + '.hso-old-restore-' + Date.now().toString(36) + '.pdf';
+        try {
+          fileIo.copyFileSync(tmp, localNew);
+          try {
+            fileIo.renameSync(localNew, src);
+          } catch (eR) {
+            // Platform refuses rename-over-existing: move old aside, then swap.
+            let movedOld: boolean = false;
+            try {
+              fileIo.renameSync(src, localOld);
+              movedOld = true;
+              fileIo.renameSync(localNew, src);
+            } catch (eSwap) {
+              if (movedOld) {
+                try { fileIo.renameSync(localOld, src); } catch (eBack) {}
+              }
+              throw eSwap as Error;
+            }
+            if (movedOld) {
+              try { fileIo.unlinkSync(localOld); } catch (eOld) {}
+            }
+          }
+        } finally {
+          PdfInkWriter.cleanup(localNew, '');
+        }
+      } finally {
+        PdfInkWriter.releaseSwapLock(swapLock);
       }
       result.ok = true;
       try { result.bytes = fileIo.statSync(src).size; } catch (eS) { result.bytes = 0; }
@@ -762,6 +820,46 @@ export class PdfInkWriter {
       }
       return result;
     }
+  }
+
+  /**
+   * Cross-window lock for the destructive swap. A directory is the only
+   * exclusive-create primitive fileIo offers (OpenMode has no O_EXCL); it sits
+   * next to the PDF so both windows resolve the same path. Held for the swap
+   * only, released in a finally, and broken after 60 s so a crashed writer
+   * cannot wedge every later write.
+   */
+  private static acquireSwapLock(src: string): string {
+    const lock: string = src + '.hso-lock';
+    const deadline: number = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      try {
+        fileIo.mkdirSync(lock);
+        return lock;
+      } catch (e) {
+        try {
+          const st = fileIo.statSync(lock);
+          const ctimeMs: number = st.ctime > 100000000000 ? st.ctime : st.ctime * 1000;
+          if (Date.now() - ctimeMs > 60000) {
+            try { fileIo.rmdirSync(lock); } catch (eStale) {}
+            continue;
+          }
+        } catch (eStat) {
+        }
+        // Contention is the other window's two-rename swap: spin briefly.
+        const spinUntil: number = Date.now() + 20;
+        while (Date.now() < spinUntil) {
+        }
+      }
+    }
+    return '';
+  }
+
+  private static releaseSwapLock(lock: string): void {
+    if (!lock) {
+      return;
+    }
+    try { fileIo.rmdirSync(lock); } catch (e) {}
   }
 
   private static looksLikePdf(path: string): boolean {
@@ -798,6 +896,24 @@ export class PdfInkWriter {
       h = Math.imul(h, 16777619) >>> 0;
     }
     return PdfInkWriter.baseName(path) + '-' + h.toString(36);
+  }
+
+  /**
+   * Current backup key: two independent 32-bit hashes (~62 bits) over the full
+   * path. A single 32-bit FNV-1a pass collided for same-named PDFs in different
+   * folders, and because "a backup already exists" means "skip creating one",
+   * the second file adopted the first one's original - "restore original"
+   * then wrote PDF A's content into PDF B (audit NF-003).
+   */
+  private static strongBackupKey(path: string): string {
+    let h1: number = 2166136261;
+    let h2: number = 5381;
+    for (let i = 0; i < path.length; i++) {
+      const c: number = path.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
+      h2 = (Math.imul(h2, 33) + c) >>> 0;
+    }
+    return PdfInkWriter.baseName(path) + '-' + h1.toString(36) + h2.toString(36);
   }
 
   private static baseName(path: string): string {

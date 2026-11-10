@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "58";
+var OHSIDIAN_INK_REV = "59";
 (function () {
   "use strict";
 
@@ -5539,8 +5539,17 @@ var OHSIDIAN_INK_REV = "58";
     var before = snapshotSpace(sel.doc, sel.space);
     var dx = 18, dy = 18;
     try {
-      if (sel.surface.kind === "pdf") dx = 14 / (sel.surface.widthScaleOn(sel.entry) || 1);
-      else if (sel.surface.kind === "pdfembed") dx = 0.02;
+      if (sel.surface.kind === "pdf") {
+        dx = 14 / (sel.surface.widthScaleOn(sel.entry) || 1);
+      } else if (sel.surface.kind === "pdfembed") {
+        // pdfdom coordinates are normalised to 0..1 of the page. The pdf branch
+        // above only overrides dx, so the default dy = 18 (canvas pixels)
+        // stayed in place for pdfembed too: every copy jumped 18 page-heights
+        // down, landed outside the page and was then written into the PDF as a
+        // garbage annotation (audit NF-011). Both axes use page fractions.
+        dx = 0.02;
+        dy = 0.02;
+      }
     } catch (e) {}
     var newIds = [];
     var total = sel.doc.strokes.length;
@@ -6495,6 +6504,15 @@ var OHSIDIAN_INK_REV = "58";
   // PDF write-back
   // ---------------------------------------------------------------------
   function resolvePdfResult(msg) {
+    if (msg && msg.seq === 0) {
+      // Transport-level failure not tied to a request: the ArkTS side dropped a
+      // line that exceeded its IPC cap (audit NF-007). No promise is waiting on
+      // seq 0, so report it and let the pipeline recover instead of leaving the
+      // caller to time out after 90 s.
+      notice("PDF 写回被拒绝：" + (msg.error || "IPC 错误"), 8000);
+      state.pdfInFlight = false;
+      return;
+    }
     var pending = state.pdfPending[msg.seq];
     if (!pending) return;
     delete state.pdfPending[msg.seq];
@@ -6873,6 +6891,32 @@ var OHSIDIAN_INK_REV = "58";
     inkWritePdf(s, true);
   }
 
+  /**
+   * Clear every "this stroke lives in the PDF" flag of a document. Called after
+   * "restore original PDF": written/baked/pdfHl describe the annotation layer
+   * of the file that was just replaced, and pdfDirtyPages() derives the pages
+   * that need a rewrite from written === false, so clearing them both brings
+   * the ink back on screen and lets the next write rebuild the annotations.
+   */
+  function resetPdfWrittenFlags(surface) {
+    var doc = docFor(surface);
+    if (!doc || !doc.strokes) return 0;
+    var n = 0;
+    for (var i = 0; i < doc.strokes.length; i++) {
+      var st = doc.strokes[i];
+      if (!st) continue;
+      if (st.written !== true && st.baked !== true && st.pdfHl !== true) continue;
+      st.written = false;
+      st.baked = false;
+      st.pdfHl = false;
+      n++;
+    }
+    if (n) {
+      try { saveSoon(doc); } catch (eS) {}
+    }
+    return n;
+  }
+
   function inkRestorePdf(surface) {
     var s = surface || state.activeSurface || activeSurfaceNow();
     if (!s || (s.kind !== "pdf" && !(s.kind === "pdfembed" && s.pdfDom))) {
@@ -6901,13 +6945,24 @@ var OHSIDIAN_INK_REV = "58";
     state.pdfPending[seq] = {
       resolve: function (msg) {
         if (msg.ok) {
-          inkStatus("已恢复 PDF 原始备份", 4000);
+          // The file is back to the untouched original, so none of this page's
+          // ink is inside the PDF any more. The flags used to survive the
+          // restore: baked strokes are skipped by the overlay redraw (the
+          // highlighter simply vanished) and annotationFresh stayed true with
+          // no dirty page, so the write-back never rebuilt the annotations
+          // ("restore" also silently destroyed the portable copy) - NF-012.
+          var cleared = resetPdfWrittenFlags(s);
+          inkStatus("已恢复 PDF 原始备份（PDF 内注释已清除，再次书写会按需重建）", 5000);
           try {
             if (s.leaf.view && typeof s.leaf.view.loadFile === "function") {
               var r = s.leaf.view.loadFile(s.leaf.view.file);
               if (r && typeof r.catch === "function") r.catch(function () {});
             }
           } catch (eR) {}
+          setTimeout(function () {
+            try { inkRefreshSurfaces(); } catch (eRd) {}
+          }, 80);
+          probeHook("inkPdfRestore", { cleared: cleared });
         } else {
           notice("恢复失败：" + (msg.error || "未知错误"), 6000);
         }
@@ -8863,26 +8918,89 @@ var OHSIDIAN_INK_REV = "58";
   function onRename(file, oldPath) {
     if (!file || !oldPath || file.path === oldPath) return;
     var oldKey = inkKey(oldPath);
+    var newKey = inkKey(file.path);
     var doc = store.cache[oldKey];
     var ad = adapter();
     if (!ad) return;
-    ad.exists(pathFor(oldKey)).then(function (exists) {
-      if (!exists) return;
-      return ad.read(pathFor(oldKey)).then(function (txt) {
-        var parsed = JSON.parse(txt);
-        parsed.target = file.path;
-        parsed.updated = Date.now();
-        var newKey = inkKey(file.path);
-        store.cache[oldKey] = null;
-        store.cache[newKey] = parsed;
-        ensureDirs().then(function () {
-          ad.write(DOCS + "/" + newKey + ".json", JSON.stringify(parsed)).then(function () {
-            ad.remove(pathFor(oldKey)).catch(function () {});
-          }).catch(function () {});
-        });
+    // Kill the 900 ms debounce that was armed for the OLD key before touching
+    // anything: it writes the old path, so it either fires after the sidecar
+    // was moved (orphan entry holding the tail strokes) or races the migration
+    // (the moved file keeps the pre-rename content and the tail is lost). The
+    // ink layer has no beforeunload flush, so those strokes were gone for good
+    // (audit NF-008).
+    var timer = store.timers[oldKey];
+    if (timer) {
+      clearTimeout(timer);
+      store.timers[oldKey] = 0;
+    }
+    // A saveDoc for the old key may already be in flight; migrating underneath
+    // it would recreate the old sidecar right after we remove it.
+    var waitIdle = function (fn) {
+      var tries = 0;
+      var go = function () {
+        if (store.saving[oldKey] && tries++ < 40) {
+          setTimeout(go, 50);
+          return;
+        }
+        fn();
+      };
+      go();
+    };
+    if (doc) {
+      // The open document is the freshest state (the sidecar can lag by up to
+      // 900 ms), so publish IT under the new key instead of re-reading disk.
+      store.cache[oldKey] = null;
+      store.cache[newKey] = doc;
+      doc.target = file.path;
+      doc._dirty = false;
+      waitIdle(function () {
+        saveDoc(doc).then(function (ok) {
+          if (!ok) {
+            // Keep the old sidecar: it is the only copy if this failed.
+            warn("ink doc rename: save under the new path failed", newKey);
+            return;
+          }
+          ad.remove(pathFor(oldKey)).catch(function () {});
+        }, function () {});
       });
-    }).catch(function () {});
-    if (doc) doc.target = file.path;
+      return;
+    }
+    waitIdle(function () {
+      ad.exists(pathFor(oldKey)).then(function (exists) {
+        if (!exists) return;
+        return ad.read(pathFor(oldKey)).then(function (txt) {
+          var parsed = JSON.parse(txt);
+          parsed.target = file.path;
+          parsed.updated = Date.now();
+          var dest = pathFor(newKey);
+          var body = JSON.stringify(parsed);
+          var tmp = dest + ".tmp";
+          // tmp + rename like saveDoc: this was the only ink write that wrote
+          // in place, and a crash mid-write left a truncated sidecar that
+          // parses as "no strokes" and is then overwritten by the next save.
+          return ensureDirs().then(function () {
+            return ad.write(tmp, body).then(function () {
+              return ad.rename(tmp, dest).then(function () {}, function () {
+                return ad.write(dest, body).then(function () {
+                  try { ad.remove(tmp); } catch (eRm) {}
+                });
+              });
+            });
+          }).then(function () {
+            store.cache[oldKey] = null;
+            store.cache[newKey] = parsed;
+            return ad.remove(pathFor(oldKey)).catch(function () {});
+          });
+        });
+      }).catch(function (e) {
+        // Was a bare .catch(function(){}) - a failed migration just looked like
+        // "the ink disappeared".
+        warn("ink doc rename migrate failed", oldKey, e && e.message);
+        try {
+          notice("墨迹随文件改名迁移失败：" + ((e && e.message) || "未知错误"), 6000);
+        } catch (eN) {}
+      });
+    });
   }
 
   /* ---- device-agent perf sampling (local builds only) ------------------ */

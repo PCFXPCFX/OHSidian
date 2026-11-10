@@ -97,6 +97,28 @@ function writeModeFileSync(cfg){
     return true;
   }catch(e){return false}
 }
+/* Field-owned mode-file write (audit NF-010). Both sides do
+   read-modify-write on the SAME json, and tmp+rename only keeps a single write
+   from tearing - it does NOT keep a stale snapshot from rolling back somebody
+   else's fields. The renderer owns override / fontScaleOverride /
+   systemFontOverride / backAck; ArkTS owns windows / insets / keyboard /
+   focusedWindow / geometry (12 publishModeFileAtomic sites, some firing per
+   IME animation frame). Re-read the file here and apply only the caller's keys,
+   so a back gesture can no longer restore a stale keyboard height/geometry
+   (the toolbar then positioned itself from the old insets until the next native
+   event). */
+function patchModeFile(patch,removeKeys){
+  try{
+    var dir=dataDir();if(!dir)return false;
+    var cur=readMode()||{};
+    var next={};
+    var k;
+    for(k in cur)next[k]=cur[k];
+    if(patch)for(k in patch)next[k]=patch[k];
+    if(removeKeys)for(var i=0;i<removeKeys.length;i++)delete next[removeKeys[i]];
+    return writeModeFileSync(next);
+  }catch(e){return false}
+}
 /* Resolve the user-visible Documents root ONLY when the permission is really
    granted. ArkTS publishes documentsDirGranted alongside documentsDir (Sprint
    2, 2026-10-19); older mode files (field absent) keep the previous rule so an
@@ -1998,14 +2020,15 @@ document.addEventListener("loadedmetadata",function(ev){
    navigation object, and History.go(-1) with an empty backHistory neither
    loops nor navigates (it returns once n===t). */
 var lastBackSeq=(function(){try{var b=(readMode()||{}).backPress;return (b&&typeof b.seq==="number")?b.seq:0}catch(e){return 0}})();
-/* Publish the verdict for this gesture. RMW is safe: the ArkTS side writes
-   the mode file only when it ACTS (a gesture, a geometry/focus change),
-   never in a tight loop, and both sides publish with atomic rename. */
+/* Publish the verdict for this gesture. NOTE: "both sides write atomically"
+   does NOT make this read-modify-write safe - atomic rename only prevents a
+   torn single write, while a stale snapshot still rolls back fields the ArkTS
+   side published in between (keyboard height, insets, focused window: the
+   toolbar is positioned from them). Hence patchModeFile, which re-reads and
+   merges only our own fields. */
 function ackBackPress(seq,handled){
   try{
-    var c=readMode()||{};
-    c.backAck={seq:seq,handled:!!handled,ts:Date.now()};
-    writeModeFileSync(c);
+    patchModeFile({backAck:{seq:seq,handled:!!handled,ts:Date.now()}});
   }catch(e){}
 }
 /* One pass of the ladder; returns true when the app consumed the gesture. */
@@ -2956,7 +2979,12 @@ function migrateVaultToVisibleFolder(){
     var remote=require("@electron/remote");
     if(!remote||!remote.dialog){try{new Notice("OHSidian: 无法调起文件夹选择器")}catch(e){}return}
     var fsMod=require("fs"),pathMod=require("path");
+    /* Collect the save() promises instead of firing and forgetting: save() is
+       async, and migration used to start copying a fixed 300 ms later, so a big
+       file that was still being written was copied half-done into the target
+       (audit NF-006 / O-13). */
     var flushEditors=function(){
+      var pending=[];
       try{
         if(window.app&&window.app.workspace&&typeof window.app.workspace.iterateAllLeaves==="function"){
           window.app.workspace.iterateAllLeaves(function(leaf){
@@ -2971,11 +2999,26 @@ function migrateVaultToVisibleFolder(){
                 try{console.warn("[OHSidian] skip save of non-text view:",vf)}catch(eL){}
                 return;
               }
-              if(leaf&&leaf.view&&typeof leaf.view.save==="function")leaf.view.save();
+              if(leaf&&leaf.view&&typeof leaf.view.save==="function"){
+                var r=leaf.view.save();
+                if(r&&typeof r.then==="function")pending.push(r.then(function(){},function(){}));
+              }
             }catch(eS){}
           });
         }
       }catch(e){}
+      if(!pending.length)return Promise.resolve();
+      return Promise.all(pending);
+    };
+    /* Run cb once every flush finished or after a hard 3 s ceiling (a wedged
+       plugin save must not block the migration dialog forever). */
+    var flushThen=function(cb){
+      var done=false,go=function(){if(done)return;done=true;try{cb()}catch(e){}};
+      var p;
+      try{p=flushEditors()}catch(e){p=null}
+      if(!p||typeof p.then!=="function"){go();return}
+      p.then(go,go);
+      setTimeout(go,3000);
     };
     var dirNonEmpty=function(p){
       try{
@@ -3082,9 +3125,8 @@ function migrateVaultToVisibleFolder(){
       remote.dialog.showOpenDialog(opts).then(function(res){
         try{
           if(!res||!res.filePaths||!res.filePaths.length)return;
-          flushEditors();
           var target=res.filePaths[0];
-          setTimeout(function(){startMigration(target)},300);
+          flushThen(function(){startMigration(target)});
         }catch(e){try{new Notice("OHSidian: 迁移失败 "+e.message)}catch(e2){}}
       },function(){/* canceled by user */});
     };
@@ -3104,9 +3146,8 @@ function migrateVaultToVisibleFolder(){
       for(var i=2;dirNonEmpty(dest);i++){
         dest=pathMod.join(docsDir,"OHSidian",name+" ("+i+")");
       }
-      flushEditors();
       try{new Notice("OHSidian: 当前仓库在应用沙箱内,卸载会丢数据。开始迁移到 "+dest+" …")}catch(e){}
-      setTimeout(function(){startMigration(dest)},300);
+      flushThen(function(){startMigration(dest)});
     }else{
       pickMigration();
     }
@@ -4107,7 +4148,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="190";
+var OHSIDIAN_PATCH_REV="191";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -4231,10 +4272,9 @@ var install=function(app){
         var cfg=readMode()||{};
         var cur=cfg.override||"auto";
         var next=cur==="auto"?"touch":(cur==="touch"?"desktop":"auto");
-        cfg.override=next;
-        var want=resolveWant(cfg);
+        var want=resolveWant({override:next,systemMode:cfg.systemMode});
         var label=next==="auto"?(("系统当前: "+(want?"触摸":"桌面"))):(next==="touch"?"始终触摸":"始终桌面");
-        var saved=writeModeFileSync(cfg);
+        var saved=patchModeFile({override:next});
         try{new Notice("OHSidian 触屏模式 → "+label+(saved?"":"(写入失败,重启后失效)"))}catch(e){}
         if(want!==null){lastWant=want;applyMobile(want,"手动切换")}
       }});
@@ -4298,12 +4338,13 @@ var install=function(app){
         if(idx<0)idx=0;
         idx=(idx+1)%FONT_STEPS.length;
         var next=FONT_STEPS[idx];
-        if(next==="auto")delete cfg.fontScaleOverride;else cfg.fontScaleOverride=next;
-        writeModeFileSync(cfg);
+        var saved=next==="auto"
+          ? patchModeFile(null,["fontScaleOverride"])
+          : patchModeFile({fontScaleOverride:next});
         var eff=next==="auto"?(cfg.fontScale||1):next;
         lastFontScale=-1;
         applyFontScale();
-        try{new Notice("OHSidian 界面文字 → "+(next==="auto"?("跟随系统 ("+Math.round((cfg.fontScale||1)*100)+"%)"):(Math.round(next*100)+"%")))}catch(e){}
+        try{new Notice("OHSidian 界面文字 → "+(next==="auto"?("跟随系统 ("+Math.round((cfg.fontScale||1)*100)+"%)"):(Math.round(next*100)+"%"))+(saved?"":"（写入失败）"))}catch(e){}
       }});
     /* Font FAMILY picker: cycle through the system font families published
        by ArkTS (cfg.systemFonts, from font.getSystemFontList). "跟随系统"
