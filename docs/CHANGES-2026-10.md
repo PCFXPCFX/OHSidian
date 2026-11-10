@@ -4890,3 +4890,51 @@ release HAL 与 agent 包从此路径分离：日常发版直接 `hvigorw`，需
 - 墨迹版本 `59 → 60`（本轮只改 ink 层与构建脚本，补丁版本保持 191）。
 - `resfile/resources/app/` 已确认无 `.bak` / `.new`；`obsidian.asar` 25.2 MiB。
 - 仍未做真机验证，放行门禁仍为第 210 轮列出的 6 项（终审报告 §6 原样采纳）。
+
+## 第 212 轮 (2026-11-10): CI 编译失败——`fileIo.readdirSync` 不存在；本地 SDK 编译验证通过，并实证 N-1
+
+> 触发：CI `CompileArkTS` 报 `Error Message: Property 'readdirSync' does not exist on type 'typeof fileIo'. Did you mean 'readSync'? At … PdfInkWriter.ets:882`。
+
+### 一、真因
+第 211 轮 N-6 的"递归清空锁目录"按 Node `fs` 的习惯写了 `fileIo.readdirSync`。但 HarmonyOS 的 `@ohos.file.fs` 没有这个成员，目录列举 API 是 **`listFileSync`**（本机 SDK 核对：`@ohos.file.fs.d.ts:1637 declare function listFileSync(path: string, options?: ListFileOptions): string[]`）。
+
+顺带核对本轮用到的其它成员，全部存在：`mkdirSync(path)`(1890) / `mkdirSync(path, recursion)`(1918) / `rmdirSync(path)`(3159)。仓库里 `WebAbility.ets:2063`、`DragParamManager.ets:544` 早已在用 `listFileSync`——本该照着抄。
+
+### 二、修复
+`PdfInkWriter.removeLockDir` 改用 `fileIo.listFileSync`，并把"清不掉"的兜底补完整（原实现若 `rmdir` 失败就到此为止，仍留永久卡死路径）：
+1. 递归清空（子目录递归、文件 `unlink`）；
+2. `rmdirSync`；
+3. 仍失败 → `renameSync` 把整个锁目录挪到 `<lock>.stale-<ts>`（rename 对**非空目录**有效），锁路径立刻释放；
+4. 若锁名被普通文件占据 → `unlink`。
+新增 `isDirectory()` 小工具（`statSync().isDirectory()` 包在 try 里）。
+
+### 三、本地编译验证（本轮新增能力）
+本机确有 DevEco SDK（`D:\program\DevEco Studio\sdk`），之前判断"无 SDK"有误。已用它跑真实构建：
+
+```
+DEVECO_SDK_HOME="D:\program\DevEco Studio\sdk"
+node "D:\program\DevEco Studio\tools\hvigor\bin\hvigorw.js" --mode module \
+     -p product=default -p module=electron@default assembleHap --no-daemon
+→ Finished :electron:default@CompileArkTS ... 12 s 272 ms
+→ BUILD SUCCESSFUL in 41 s 357 ms   exit=0
+```
+
+`electron/build/default/outputs/default/electron-default-signed.hap`（121,164,850 B）产出成功，`SignHap` 也通过。
+
+### 四、顺带实证 N-1（发版终审报告的新发现）
+直接解开上一步构建的 HAP 看 `resources/resfile/` 条目：
+
+| HAP 内路径 | 大小 |
+| --- | --- |
+| `resources/resfile/resources/app/obsidian.asar` | 26,387,501 |
+| `resources/resfile/resources/app/main.js` | 21,303 |
+| `resources/resfile/resources/app/icon.png` | 1,606,146 |
+| `resources/resfile/resources/app/node_modules/…` | 逐文件打包 |
+| **`resources/resfile/resources/app/obsidian.asar.bak`** | **不存在** |
+
+两点结论：① "resfile 下一切都会进 HAP"**由产物直接证实**（连 `node_modules` 都逐文件进去了），N-1 的前提成立、确实是真缺陷；② 修复生效——`.bak` 已不在包内（否则 HAP 会多 26MB）。
+
+### 五、教训
+新增 ArkTS 文件系统/系统 API 调用前，先在本机 SDK 的 `.d.ts` 里核对成员名与签名，不要按 Node/浏览器习惯推；仓库里已用过的成员优先。
+
+验证：`node --check`（4 个补丁 JS + 构建脚本）不变；本地 `assembleHap` 通过；`git status` 只剩本次 ArkTS 修复。

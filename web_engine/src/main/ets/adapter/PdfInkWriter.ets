@@ -879,12 +879,13 @@ export class PdfInkWriter {
   /** Best effort: clear the lock directory even if something was dropped in it. */
   private static removeLockDir(lock: string): void {
     try {
-      const names: Array<string> = fileIo.readdirSync(lock);
+      // @ohos.file.fs has no readdirSync; the directory listing API is
+      // listFileSync (already used by WebAbility/DragParamManager).
+      const names: Array<string> = fileIo.listFileSync(lock);
       for (let i = 0; i < names.length; i++) {
         const child: string = lock + '/' + names[i];
         try {
-          const st = fileIo.statSync(child);
-          if (st.isDirectory()) {
+          if (PdfInkWriter.isDirectory(child)) {
             PdfInkWriter.removeLockDir(child);
           } else {
             fileIo.unlinkSync(child);
@@ -899,9 +900,25 @@ export class PdfInkWriter {
       return;
     } catch (eDir) {
     }
-    // Not a directory (a stray file took the name): unlink it so the next
-    // writer is not blocked by something rmdir can never remove.
+    // Something rmdir can never remove (a stray file, a nested dir, a sync
+    // conflict copy) is still in the way. Rename works on a non-empty directory
+    // and frees the lock path at once, so the PDF can never be locked out
+    // forever by leftover content (audit N-6).
+    try {
+      fileIo.renameSync(lock, lock + '.stale-' + Date.now().toString(36));
+      return;
+    } catch (eMove) {
+    }
+    // Not a directory at all: unlink whatever took the name.
     try { fileIo.unlinkSync(lock); } catch (eUnlink) {}
+  }
+
+  private static isDirectory(path: string): boolean {
+    try {
+      return fileIo.statSync(path).isDirectory();
+    } catch (e) {
+      return false;
+    }
   }
 
   private static looksLikePdf(path: string): boolean {
