@@ -1,6 +1,6 @@
 # 发布流程：构建、门禁、签名与 Release
 
-> 适用版本：**v2.0.0（手写线首个版本）**。发布前按第 1 节逐项打勾；构建细节与
+> 适用版本：**v2.0.0（手写线首个正式版）**。发布前按第 1 节逐项打勾；构建细节与
 > CI 实现见第 2–5 节。安装包体积分析已归档到 [archive/HAP-SIZE](archive/HAP-SIZE.md)。
 
 ## 1. 发布前检查清单
@@ -156,7 +156,7 @@ Get-FileHash .\OHSidian-v2.0.0-*-icon-unsigned.hap -Algorithm MD5
 3. 打 tag 并推送：
 
    ```bash
-   git tag v2.0.0
+   git tag -a v2.0.0 -m "OHSidian 2.0.0（手写线首个正式版）"
    git push origin v2.0.0
    ```
 
