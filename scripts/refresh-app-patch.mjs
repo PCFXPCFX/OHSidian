@@ -103,6 +103,12 @@ for (const [file, patch, marker] of [
       ['var t=["Inter","Source Code Pro"];Xne=t;',
        'var t=["Inter","Source Code Pro"].concat(window.__ohsidianSystemFonts||[]);Xne=t;',
        'settings font list injection'],
+      // Plugin require() must not be gated by the mobile emulation: this renderer
+      // has full Node, so the shim's null is a false negative that killed every
+      // plugin requiring a Node module while in touch mode.
+      ['a=document.body.hasClass("emulate-mobile"),s=function(e){return u4.hasOwnProperty(e)?',
+       'a=!1,s=function(e){return u4.hasOwnProperty(e)?',
+       'plugin require unrestricted in touch mode'],
     ];
     for (const [bsrc, bdst, name] of bodyPatches) {
       // src first - see update-obsidian.mjs: the drawer dst also occurs in

@@ -12,6 +12,7 @@
 | A2 | `isPhone` 由**视口** `matchMedia` 判定 | `rd.isTablet=i.matches,rd.isPhone=!i.matches`，`i=window.matchMedia("(min-width:600px) and (min-height:600px)")`；该段**只在触摸模式的 EmulateMobile 分支里执行** | 桌面模式 `isPhone` 恒 false；触摸模式下按视口宽高判 tablet/phone，小窗触摸会被判成 phone 布局 | 目前无实际症状，观察为主 |
 | A3 | 更新链接硬拼平台 | `app.js@1170582`：`"win32"===t?"win":"darwin"===t?"mac":"linux"` | "检查更新"给出 linux/x64 安装包链接，鸿蒙上无法安装（当前更新器已禁，影响小） | 返回 HAP 下载页或官网 |
 | A4 | ctime 假设 | `app.js@3710117`：`"win32"!==pne&&"darwin"!==pne` | 文件时间戳分支按 Linux 走，优先级低 | 暂不处理 |
+| A5 | 插件 `require` 被移动模拟门控（**已修，2.0.0**） | `loadPlugin` 的 shim：`a=document.body.hasClass("emulate-mobile")`，命中时白名单（仅 `obsidian` + CodeMirror 6 + Lezer）之外的模块一律 `null` | 触屏模式下凡顶层 `require` Node 模块的插件直接抛错 →「插件加载失败」；懒加载的则设置页空白。**本移植的渲染层有完整 Node**（内核自己就用 `window.require` 取 `fs`/`electron`），`null` 是纯策略误判 | 已把判据常量化为 `a=!1`（保留白名单优先），触屏模式与桌面模式插件语义一致；`verify-asar` 有正/负断言。布局侧的 `isMobile/isTablet/isPhone` 分支不受影响 |
 
 ## 二、引擎能力
 

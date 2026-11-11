@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "60";
+var OHSIDIAN_INK_REV = "61";
 (function () {
   "use strict";
 
@@ -4381,6 +4381,14 @@ var OHSIDIAN_INK_REV = "60";
     return [x, y, pr.p, pr.tiltX, pr.tiltY, Math.round(nowMs() - (state.strokeT0 || nowMs()))];
   }
 
+  var penChromeHintAt = 0;
+  function penChromeHint() {
+    var t = nowMs();
+    if (t - penChromeHintAt < 20000) return;
+    penChromeHintAt = t;
+    notice("手写工具激活中：笔尖只画不点界面。请用手指操作，或把工具切回「指针」", 4000);
+  }
+
   function onPointerDownCapture(ev) {
     if (!state.installed || !ev || !state.enabled) return;
     if (window.__ohsidianAgentBuild && ev.pointerType === "touch" && !state.perfTouchStarted) {
@@ -4410,6 +4418,12 @@ var OHSIDIAN_INK_REV = "60";
           // (tabs/header/nav/sidebar/PDF toolbar/modal) is swallowed at the
           // down event, so Obsidian never starts a pen swipe on it. Hand
           // input remains the way to operate Obsidian UI.
+          //
+          // That rule is deliberate (palm rejection depends on it), but it is
+          // indistinguishable from a dead UI: a pen tap on the settings gear or
+          // a plugin's "选项" button used to do nothing at all, which reads as
+          // "设置页打不开". Say it once in a while - the swallow is unchanged.
+          try { penChromeHint(); } catch (eHint) {}
           state.blockedPointerId = ev.pointerId;
           try { ev.preventDefault(); } catch (eX1) {}
           try { ev.stopPropagation(); } catch (eX2) {}

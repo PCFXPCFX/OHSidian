@@ -205,8 +205,6 @@ try {
     // Audit NF-012: "restore original PDF" has to clear written/baked/pdfHl.
     'app pdf restore resets written flags': app.includes('function resetPdfWrittenFlags') &&
       app.includes('resetPdfWrittenFlags(s)'),
-    // Audit NF-008: the sidecar rename migration must be atomic (tmp+rename) and
-    // must cancel the debounced save armed for the old key.
     // Audit N-7: the renderer enforces the writer's page budget before shipping
     // the (up to several MB) request over the loopback IPC.
     'app pdf write page budget precheck': app.includes('var INK_PDF_MAX_POINTS = 80000') &&
@@ -216,6 +214,14 @@ try {
     'app ink rename migration atomic': app.includes('var waitIdle = function (fn)') &&
       app.includes('var timer = store.timers[oldKey];') &&
       app.includes('var tmp = dest + ".tmp";'),
+    // The plugin require() shim must never take the emulate-mobile branch: this
+    // renderer has full Node, and that branch returns null for every
+    // non-whitelisted module (top-level require -> TypeError -> "插件加载失败",
+    // in touch mode only). Assert the patched form positively AND the upstream
+    // test negatively, so a skipped body patch is loud instead of silent.
+    'app plugin require not gated by emulate-mobile':
+      app.includes('a=!1,s=function(e){return u4.hasOwnProperty(e)?') &&
+      !app.includes('a=document.body.hasClass("emulate-mobile"),s=function'),
   };
   let ok = true;
   for (const [k, v] of Object.entries(checks)) {

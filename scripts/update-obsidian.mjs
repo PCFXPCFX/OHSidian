@@ -413,6 +413,25 @@ async function main() {
   // sharpness matters more than the memory saving.
   const pdfCanvasSrc = 'maxCanvasPixels:16777216,';
   const pdfCanvasDst = 'maxCanvasPixels:16777216,capCanvasAreaFactor:(window.devicePixelRatio>=2&&((window.matchMedia&&window.matchMedia("(pointer: coarse)").matches)||navigator.maxTouchPoints>0)?0:200),';
+  // Plugin `require` must not be gated by the mobile emulation.
+  //
+  // Obsidian's loadPlugin hands each plugin a require() shim:
+  //     a = document.body.hasClass("emulate-mobile"),
+  //     s = function (e) { ...whitelist... : a ? (Notice + null) : sf(e) }
+  // where sf() is the real `window.require`. The whitelist only carries
+  // `obsidian` + CodeMirror 6 + Lezer, so on a REAL phone (no Node at all) the
+  // `a` branch turns a Node require into a clean "attempted to load NodeJS
+  // package" + null. Touch mode sets EmulateMobile, so this port inherited that
+  // branch - but this renderer is Electron with full Node (window.require is the
+  // very channel the kernel uses for fs/electron itself, and the diagnostics in
+  // touch-mode.js spawnSync through it), so the null was a false negative: every
+  // plugin with a top-level `require("fs"/"path"/"electron"/...)` threw and the
+  // user got "插件加载失败" - only in touch mode, i.e. exactly the reported
+  // "模式一换插件就坏". Force `a` to false: the whitelist still resolves first,
+  // everything else falls through to the real require, and `rd.isMobile` (the
+  // actual mobile LAYOUT) is untouched.
+  const pluginRequireSrc = 'a=document.body.hasClass("emulate-mobile"),s=function(e){return u4.hasOwnProperty(e)?';
+  const pluginRequireDst = 'a=!1,s=function(e){return u4.hasOwnProperty(e)?';
   const APP_BODY_PATCHES = [
     [drawerSwitchSrc, drawerSwitchDst, 'vault drawer switch routed to openVaultChooser',
       'vault drawer switch site not found (app.js layout changed?); ' +
@@ -426,6 +445,9 @@ async function main() {
     [pdfCanvasSrc, pdfCanvasDst, 'PDF page canvas capped at one screen on high-DPI touch devices',
       'PDF canvas config site not found (app.js layout changed?); ' +
       'wide PDF pages keep the full-resolution canvas (~39 MB/page on the tablet)'],
+    [pluginRequireSrc, pluginRequireDst, 'plugin require() no longer gated by EmulateMobile (touch mode)',
+      'loadPlugin require-shim site not found (app.js layout changed?); ' +
+      'touch mode will keep failing every plugin that requires a Node module'],
   ];
   for (const [src, dst, okMsg, warnMsg] of APP_BODY_PATCHES) {
     // src FIRST: the drawer dst token ("i.app.openVaultChooser()") also exists

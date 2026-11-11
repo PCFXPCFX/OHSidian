@@ -4938,3 +4938,72 @@ node "D:\program\DevEco Studio\tools\hvigor\bin\hvigorw.js" --mode module \
 新增 ArkTS 文件系统/系统 API 调用前，先在本机 SDK 的 `.d.ts` 里核对成员名与签名，不要按 Node/浏览器习惯推；仓库里已用过的成员优先。
 
 验证：`node --check`（4 个补丁 JS + 构建脚本）不变；本地 `assembleHap` 通过；`git status` 只剩本次 ArkTS 修复。
+
+## 第 213 轮 (2026-11-11): 触屏模式下插件加载失败（N-13）——require 被移动模拟门控，判据常量化为 false
+
+> 来源：外部《OHSidian「触屏模式 × 插件冲突」根因分析（合并版）》，对象 `e528275`。本轮**先逐条取证再动手**，主链确认属实并修复；辅链 A 按报告建议只加可感知性提示（不改吞没语义）。
+
+### 一、取证（与报告逐字对账）
+
+出货 asar 解包后 app.js 4,436,149 字符，`loadPlugin` 的 require shim 逐字如下（`scripts/.tmp-probe-emulate.cjs` 实测）：
+
+```js
+o=e,a=document.body.hasClass("emulate-mobile"),
+s=function(e){return u4.hasOwnProperty(e)?(...):c4.hasOwnProperty(e)?c4[e]
+  :a?(new Aw("".concat(o,' attempted to load NodeJS package: "')...),console.error(...),null)
+  :sf(e)},                      // sf(e) = window.require
+```
+
+- 白名单 `c4`/`u4` 实测只有 `obsidian` + `@codemirror/*` + `@lezer/*`，**没有 Node 内置模块、没有 `electron`**；
+- 真实通道 `var af=window.require; function sf(e){return af&&af(e)}` 同一文件内存在（内核自己也用它取 `fs`/`electron`）；
+- `emulate-mobile` 全文 4 处：启动翻转、`loadPlugin` shim、诊断文本、app.css 安全区变量 —— 与报告一致；
+- 触屏模式确实是通过 `localStorage.EmulateMobile` 翻转（`touch-mode.js` 的 `applyMobile`），因此 `a` 在触屏模式下恒真。
+
+结论：报告主链成立。本移植的渲染层有完整 Node，`null` 是**按真手机处境写的策略**，在此处为误判：顶层 `require("fs"/"path"/"electron"…)` 的插件抛 TypeError → `enablePlugin` catch →「插件加载失败」；懒加载的则设置页 `display()` 抛错、tab 空白。**与模式强相关**（桌面模式 `a=false` 走真实 require）。
+
+### 二、修复（选项 B / 改法一）
+
+把判据常量化为 false，白名单仍优先，其余一律走真实 `window.require`：
+
+```js
+// update-obsidian.mjs APP_BODY_PATCHES（+ refresh-app-patch.mjs 同步）
+src: 'a=document.body.hasClass("emulate-mobile"),s=function(e){return u4.hasOwnProperty(e)?'
+dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
+```
+
+- 只动 `require` 语义：`rd.isMobile`/`isTablet`/`isPhone`、`emulate-mobile` 类、移动工具栏/导航/抽屉/设置页分支**全部不变**（实测三个翻转锚点仍在）；
+- `verify-asar` 新增正/负断言 `app plugin require not gated by emulate-mobile`：既要求 `a=!1,…`，也要求上游式 `a=document.body.hasClass("emulate-mobile"),s=function` 不存在 —— 以后 body patch 被跳过或回滚会直接 FAIL（此前 verify-asar 对 loadPlugin 零断言）；
+- 升级内核时若锚点变化，`update-obsidian.mjs` 会打出 WARNING（既有机制），门禁同时 FAIL，不会静默。
+
+### 三、辅链 A：笔尖点不开设置页（只加提示，不改语义）
+
+`isExcluded` + 非「指针」工具 + 非自绘件时，笔的 pointerdown 在 window 捕获阶段被吞是**设计如此**（掌托/笔误触防护依赖它，报告 §2.5 也用代码排除了"手指也点不开"）。问题只是**完全无反馈**，与"设置页坏了"不可区分。
+
+新增 `penChromeHint()`：同一条件首次吞没时给一次 Notice（20 秒限频）——
+`手写工具激活中：笔尖只画不点界面。请用手指操作，或把工具切回「指针」`。吞没逻辑一行未改；ink rev 60 → 61。
+
+### 四、报告其余结论的核对与处置
+
+| 报告项 | 处置 |
+| --- | --- |
+| §1.6 四条失败文案判别（563 = 主链，565/566/567 = 内核黑名单） | 采纳，作为支持话术；未改代码 |
+| §5 排除清单 13 项 | 抽查一致（尤其 #3 `isDesktopOnly` 不触发、#7 touch-mode 只有 3 处窄域 preventDefault、#10 app-region 不覆盖设置弹窗） |
+| §8 选项 A/C/D | 未采用：A 与本次修复方向相反；C（解耦布局与插件语义）改动面过大；D 属附加提示，主链修好后无必要 |
+| §8 选项 F（补 verify-asar 断言） | 已做 |
+| §6 建议登记 NF-013 / NF-014 | 记入本轮与 `docs/PLATFORM-ADAPTATION.md` A5 行（`docs/BUG-BACKLOG.md` 仍未纳入版本库，未改动） |
+
+### 五、验证
+
+- `node --check`：`ohsidian-ink.js` / `update-obsidian.mjs` / `refresh-app-patch.mjs` / `verify-asar.cjs` 全通过；
+- `node scripts/update-obsidian.mjs --repatch`：输出 `plugin require() no longer gated by EmulateMobile (touch mode)`，`verify-asar` **全绿**（新增门禁在列）；
+- 出货 asar 实测：`a=!1,…` 出现 **1** 次、上游式 **0** 次、`emulate-mobile` 由 4 处降为 **3** 处；三个布局翻转锚点、白名单两项、`af=window.require`、笔提示文本均在；
+- 本地 `assembleHap` 通过（HAP 25.2 MiB asar 打入，`module.json` 仍是 2.0.0 / 2000000）。
+
+### 六、真机回归点（本轮无法覆盖）
+
+1. 触屏模式下重载 → 之前"插件加载失败"的 Node 依赖插件应正常加载，开关不再弹回；
+2. 桌面模式对照：同一批插件行为不变；
+3. 插件设置页（懒加载 Node 的）能正常打开并渲染；
+4. 触屏模式布局不变（移动工具栏/导航/抽屉仍在，`--safe-area-inset-*` 仍按真实系统条生效）；
+5. 笔选任意绘图工具后点设置齿轮 → 出现一次提示，手指点击仍正常；
+6. 反向风险观察：个别按 `Platform.isMobile` 分支的插件现在拿到 Node 后是否有异常行为（报告 §8 点名的风险项）。
