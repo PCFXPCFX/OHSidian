@@ -2,22 +2,17 @@ OHSidian 是 [Obsidian](https://obsidian.md) 的非官方 HarmonyOS 移植版：
 
 > 目标系统：HarmonyOS 6.0.2 起（compatible API 22 / target API 24，真机验证）。遇到问题欢迎提 [Issue](https://github.com/PCFXPCFX/OHSidian/issues)。
 
-## 本版亮点
+## 本版修复（2.0.1）
 
-- **手写笔**：华为 M-Pencil 压感墨迹、长按拉直、一笔成形、套索移动/复制/删除、压感橡皮、只擦荧光笔；
-  笔记 / PDF / 内嵌 PDF / Canvas 均可书写。
-- **PDF 写回**：标注写回真实注释，离开 PDF 时按脏页批量写入，首次写入前自动备份。
-- 完整说明与验收项见 [docs/STYLUS.md](https://github.com/PCFXPCFX/OHSidian/blob/main/docs/STYLUS.md)。
-
-## 相对 v1.4.2 的修复
-
-- **鼠标滚轮 / 触控板捏合恢复**：主窗口、弹窗、内嵌窗口都能正常滚动与缩放。
-- **删除更安全**：插件路径删除的旧文件不会再被清理逻辑当场永久删除。
-- **切换仓库不再丢字**：旧仓库最后几秒的编辑与窗口布局在关窗前落盘。
-- **PDF 写回更稳**：备份不再串到同名 PDF、双窗口同写不互相覆盖、"恢复原始 PDF"不再截断文件且荧光笔不会消失、单页笔迹过多会明确提示。
-- **改名/移动文件**：墨迹跟随迁移改为原子写入，失败会提示。
-- **设置页开关**：手写笔设置里的开关不会再有"只能开、点不灭"。
+- **触屏模式下依赖 Node 模块的插件不再"加载失败"**。内核只允许插件 `require` 白名单内的模块（`obsidian` + CodeMirror/Lezer），
+  其余在"模拟移动端"时返回 `null`；本移植的触屏模式正是靠模拟移动端实现，而渲染层其实有完整 Node，
+  于是插件一 `require("fs"/"path"/"electron")` 就报错。现已改为始终走真实 `require`。
+- 由此**触屏模式与桌面窗口模式的插件加载语义一致**，不会再"一动模式插件全变"；设置页里懒加载 Node 的插件也不再空白。
+- **手写笔**：绘图工具激活时，笔尖点在界面上会提示"笔尖只画不点界面，请用手指或切回「指针」"（拦笔行为不变）。
 - 完整清单见 [docs/CHANGELOG.md](https://github.com/PCFXPCFX/OHSidian/blob/main/docs/CHANGELOG.md)。
+
+**仍存在的插件失败面（与 2.0.1 无关，属内核策略）**：内核硬拒载名单（`settings-search`、旧版 `cmdr` / `obsidian-image-toolkit`、
+`better-pdf-plugin` 1.4.0）、deprecated 版本表、真正只支持移动端的插件、以及依赖原生模块或未实现 Electron API 的插件。
 
 **已知问题**：关闭应用前刚改过文件名、且此后再未书写时，最后一笔仍可能在退出时丢失（下一版补 `beforeunload` 兜底）；
 同一 PDF 在第二个窗口打开时，"恢复原始 PDF"只对执行恢复的窗口立即生效，另一窗口重开该文档后同步。

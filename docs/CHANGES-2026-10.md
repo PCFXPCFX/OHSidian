@@ -5007,3 +5007,45 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 触屏模式布局不变（移动工具栏/导航/抽屉仍在，`--safe-area-inset-*` 仍按真实系统条生效）；
 5. 笔选任意绘图工具后点设置齿轮 → 出现一次提示，手指点击仍正常；
 6. 反向风险观察：个别按 `Platform.isMobile` 分支的插件现在拿到 Node 后是否有异常行为（报告 §8 点名的风险项）。
+
+## 第 214 轮 (2026-11-11): 发布 2.0.1（插件 require 修复）——版本、文档与出货包审计
+
+> 2.0.0 已于 2026-11-10 发布（tag 指向 `bfae43a`，两个图标的 HAP 已在 Release），**不含**第 213 轮的插件修复，故本次以补丁版本 2.0.1 发出。
+
+### 一、版本与文档
+
+- `AppScope/app.json5`：`versionName 2.0.1` / `versionCode 2000001`（按 `主*1e6+次*1e4+修订`）；
+- `docs/CHANGELOG.md`：新增 `## 2.0.1（插件修复）`——主修复（触屏模式插件 require）、手写笔提示、已知问题（含"仍会失败的插件面"）；2.0.0 段保留为历史（`ink rev 60`）；
+- `docs/RELEASE.md`：适用版本、versionCode 示例、关于页版本、tag 命令、HAP 命名示例改为 2.0.1；
+- `docs/STYLUS.md`：状态行与验收条目 → `v2.0.1 / ink rev 61`、`versionName=2.0.1 / versionCode=2000001`；
+- `scripts/ci/release-notes-template.md`：Release 正文改为 2.0.1 的修复说明 + "仍存在的插件失败面（内核策略）" + 已知问题。
+
+### 二、审计（全部以出货产物为对象）
+
+| 审计项 | 方法 | 结果 |
+| --- | --- | --- |
+| 补丁唯一性 | 解出**构建产物 HAP** 内的 `obsidian.asar` → app.js，计数 | `a=!1,s=function(e){return u4.hasOwnProperty(e)?` = **1** 处；上游式 `a=document.body.hasClass("emulate-mobile"),s=function(` = **0** 处 |
+| 布局不受影响 | 同上，检查三个翻转锚点 | `rd.isMobile=!0,rd.isDesktop=!1`、`o.addClass("emulate-mobile")`、`rd.isTablet=i.matches,rd.isPhone=!i.matches` 均在 |
+| 影响面收敛 | `emulate-mobile` 计数 | 4 → **3**（正好少了 shim 那一处，其余三处原样） |
+| 白名单与真实通道 | 同上 | `code4` 白名单 `obsidian:d` / CodeMirror 仍在；`var af=window.require` 仍在（shim 现在总是落到它） |
+| 幂等性 | 跑 `refresh-app-patch.mjs`（对已打补丁的 asar 再施加一遍） | 输出 `body patch already applied: plugin require unrestricted in touch mode`，随后 `verify-asar` 全绿；再跑 `update-obsidian.mjs --repatch` 复原标准产物 |
+| 出货包门禁 | 把 HAP 内的 asar 抽出来，用 `OHSIDIAN_ASAR_PATH` 指向它跑 `verify-asar` | **全绿**，含新门禁 `app plugin require not gated by emulate-mobile` |
+| 版本落地 | 读 HAP 的 `module.json` | `versionName=2.0.1` / `versionCode=2000001` / `minAPIVersion=60002022` / `targetAPIVersion=60101024` |
+| 包卫生 | 列 HAP 的 `resources/resfile/resources/app/*` | 只有 `icon.png` / `main.js` / `obsidian.asar`(25.2 MiB) / `ohsidian-flags.json` / `package.json`，**无 `.bak`**（N-1 不复现） |
+| 探针 | `verify-release.cjs` + 在出货 app.js 里搜 `probeHook("inkPdfRestore"` | `RELEASE VERIFY: OK`；出货 asar 内该探针调用**不存在**（已被剥离，符合预期） |
+| 版本号一致性 | 出货 app.js | `OHSIDIAN_PATCH_REV=191`、`OHSIDIAN_INK_REV=61`，与 CHANGELOG/STYLUS 声明一致 |
+| 文档链接 | `check-docs.cjs` | 73 链接、0 失效、21 文件 |
+| 编译 | `assembleHap`（本机 DevEco SDK） | `BUILD SUCCESSFUL`，exit 0 |
+
+### 三、结论
+
+第 213 轮的修复**确实进入了本次要发布的二进制**（不是在源码里成立、包里没有）；改动只作用于插件 `require` 语义，布局与白名单未受影响；重复施加补丁安全；包内无历史遗留的备份文件。
+
+### 四、未覆盖（真机回归，发版后仍需确认）
+
+1. 触屏模式重启 → 原先「插件加载失败」的 Node 依赖插件开关不再弹回；
+2. 桌面窗口模式对照：同一批插件行为不变；
+3. 懒加载 Node 的插件设置页不再空白；
+4. 触屏模式布局（移动工具栏/导航/抽屉/安全区）与 2.0.0 一致；
+5. 绘图工具激活时笔尖点界面 → 出现一次提示，手指操作正常；
+6. 反向风险：个别按 `Platform.isMobile` 分支的插件拿到 Node 后是否有异常行为。

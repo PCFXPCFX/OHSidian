@@ -1,6 +1,6 @@
 # 手写笔（华为 M-Pencil）：方案、评测与验收
 
-> 状态：**v2.0.0 主线功能**，内核 `ink rev 60`。手写笔模式默认关闭，在
+> 状态：**v2.0.1 主线功能**，内核 `ink rev 61`。手写笔模式默认关闭，在
 > **设置 → 手写笔 → 手写笔模式** 开启。
 >
 > 本文合并了原《手写笔适配方案》与《手写特性回归评测》：前半部分讲实现，
@@ -247,7 +247,7 @@ MP4 + GIF，直接用于酷安/B 站宣传。
 |---|---|
 | **原版 Obsidian** | 官方 Obsidian（桌面/移动端），没有鸿蒙平板适配，也没有手写层 |
 | **平板适配版** | 本项目早期只做触摸/窗口/避让的提交（`initial` … `window frame update`） |
-| **手写魔改版** | 当前版本：在平板适配之上加了 M-Pencil、PDF 写回、一笔成形等（v2.0.0 / ink 60） |
+| **手写魔改版** | 当前版本：在平板适配之上加了 M-Pencil、PDF 写回、一笔成形等（v2.0.1 / ink 61） |
 
 报告里的“原版”列统一指**原版 Obsidian**；仓库里的 commit 都是本项目的平板改动，
 不再用某个旧 tag 冒充原版。
@@ -383,7 +383,7 @@ artifacts/stylus-eval/20261103-193000-v2.0.0/
 3. `--mode gate` 全绿（或明确记录 `manual` 项的人工结论）；
 4. release asar 已恢复，`node scripts/verify-release.cjs` 与
    `node scripts/verify-asar.cjs` 都通过；
-5. release HAP 的 `module.json` 为 `versionName=2.0.0`、`versionCode=2000000`、
+5. release HAP 的 `module.json` 为 `versionName=2.0.1`、`versionCode=2000001`、
    `minAPIVersion=60002022`，且 asar 内无 `probeHook`。
 
 真机手写（逐项）：
