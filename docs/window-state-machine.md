@@ -629,15 +629,23 @@ maximize（`reason:1`），不是代码保证的；WMS 不做时窗口就停在�
 
 `windowStatusChange` 的 `MAXIMIZE`/`FULL_SCREEN` 分支原来调用
 `writeTouchModeFile(this.pcModeEnabled)`，而 `writeTouchModeFile` 对
-`phone/tablet/2in1` 一视同仁：`2in1` 上 `window_pcmode_switch_status` 不保证存在
-（H15 因此跳过启动读取，读出来恒 `'false'`），于是**第一次最大化**就把
-`systemMode` 发布成 `touch` —— 启动路径又根本不写（缺键 = desktop），
-这条不对称正是"最大化 → 整页重载 → 移动布局"的确定性成因（Bug1 的 2in1 变体）。
+`phone/tablet/2in1` 一视同仁。**报障设备是鸿蒙电脑，其 `deviceInfo.deviceType`
+就是 `'2in1'`**（既不是「平板 + 键盘」专属形态，也不是「平板 PC 关 + 自由多窗」
+场景）；而 `window_pcmode_switch_status` 在 2in1 上不保证存在（H15 因此跳过启动
+读取，读出来恒 `'false'`），于是**第一次最大化**就把 `systemMode` 发布成 `touch`
+—— 启动路径又根本不写（缺键 = desktop），这条不对称正是「最大化 → 整页重载 →
+移动布局」的确定性成因。
 
-**改动**：`2in1` 从该共享分支里拆出，发布值为**档案常量 `desktop`**（规格 §6.2
-的 `profile == P-2IN1 → desktop`）。启动路径（`deviceType === 'tablet'` 才读键）
-不动，H15 的警告继续成立；渲染层 `override`（desktop/touch）仍然生效，所以
-"2in1 上强制用移动布局"这个用户意图没有被拿走。
+**改动**（两处）：
+
+1. `2in1` 从该共享分支里拆出，发布值为**档案常量 `desktop`**（规格 §6.2 的
+   `profile == P-2IN1 → desktop`）。启动路径（`deviceType === 'tablet'` 才读键）
+   不动，H15 的警告继续成立；渲染层 `override`（desktop/touch）仍然生效，所以
+   「2in1 上强制用移动布局」这个用户意图没有被拿走。
+2. **启动自愈**：`onWindowStageCreate` 里 2in1 在内容加载前按常量回写一次。旧版本
+   已经写过 `systemMode='touch'` 的机器，`resolveWant` 启动时仍会读到 `touch` ——
+   只改发布点的话用户升级后**看不到修复效果**，要等下一次最大化/恢复事件才被纠正。
+   回写在值已是 `desktop` 时只做一次小读就返回，不产生写盘。
 
 ### 7.3 已落地：`setFullScreen` 形态守卫（WM-2 / G-1 入口 4）
 
@@ -653,13 +661,22 @@ maximize（`reason:1`），不是代码保证的；WMS 不做时窗口就停在�
    否则等于把规格 §6.4 的"其余 → S5"也一起砍掉；
 2. 状态读失败时**保持原行为**（继承审计 P2-2：失败方向不得改变现状）。
 
+**退出方向（第 216 轮补）**：守卫最初对 `true`/`false` 一视同仁，于是
+"平板 PC 关 + 自由窗 → F11 进沉浸"之后**退不出来**（退出调用被同一个守卫
+吞掉）。现在按窗口 id 记录"由本桥进入的沉浸"（`bridgeImmersiveId`）：进入
+方向照旧守卫，退出方向放行自己开的那一次；不是本桥开的触摸 S1 窗口仍然不可
+退出。`AppWindow.UnMaximize` 的直接 binding **不加盲守卫**——它是 S5→S2 的
+正常退出通道，这类"触摸窗不得变浮窗"的保护仍未全覆盖（记入 §7.7 待办）。
+
 ### 7.4 已落地：五枚举覆盖（WM-5 / G-4）
 
 监听器原来只认 `FLOATING` / `MAXIMIZE` / `FULL_SCREEN` 三值：
 
-- `SPLIT_SCREEN` 现在按自由窗族发布（`writeTouchModeFile(this.pcModeEnabled)`，
-  而 `freeWindowForm()` 对 SPLIT 本就返回 true → desktop）。**手机除外**：
-  手机上分屏仍是移动布局，不能跟随平板语义。
+- `SPLIT_SCREEN` 现在按自由窗族发布，**常量 `true`**（与 `FLOATING` 分支同一
+  语义：分屏就是自由窗形态）。**手机除外**：手机上分屏仍是移动布局。第 216 轮
+  修正了两处：① 第 215 轮把该分支写进了 `if (MAXIMIZE||FULL_SCREEN||FLOATING)`
+  **内层**，永远不可达（等价于没做）；② 发布值改常量后不再依赖
+  `freeWindowForm()` 的二次实时读——那次读若抛错会把平板分屏误发布成 `touch`。
 - `MINIMIZE` 与 enum 之外的值：显式不发布。最小化是可见性变化不是形态变化
   （恢复事件会按返回形状发布）；未知值继承"不改变"方向。
 
@@ -680,3 +697,23 @@ Bug1 四入口全部不再产生 `systemMode=touch` 日志 + V1-V15 核心行，
 按钮可见性四个决策写点、`SetMovable` 收编（I-D8）、浮窗/弹窗/子窗三条辅助线
 （I-D7/I-D9）属规格 §十二 步 3 的结构性收敛，验收矩阵 B1-B12 全在真机；
 单独落风险大于收益，等按钮报告 §5.6 的 3a→3d 顺序一次做完。
+
+
+### 7.7 第 216 轮收尾（三处守卫 + 一处死代码）
+
+| 项 | 内容 | 备注 |
+| --- | --- | --- |
+| WM-2 回归 | 守卫曾双向生效 → 平板自由窗 F11 进沉浸后退不出；改为 `bridgeImmersiveId` 记录 | 见 §7.3 退出方向 |
+| WM-5 死代码 | `SPLIT_SCREEN` 分支挪出外层三值白名单，发布常量 `true` | 见 §7.4 |
+| 16000067 兜底 | `showWindow` 的 MINIMIZE 兜底改为**形态无关**（原来被 `isTouchFormFactorStrict()` 门住，桌面窗口最小化后无人恢复） | 规格 §十 怪癖表要求"P-全部"；启动期冗余仍由 MINIMIZE 白名单排除 |
+| `restore()` 守卫 | 触摸形态 + 非最小化 → 忽略（否则把触摸窗还原成浮窗）；`bringWindowToFront` 内部直接调 `windowClass.restore()`，不受影响 | DB-6 / Round 111 不变式 1 |
+| I7 裸读 | `maximize()` 的幂等读与 `getWindowStatus` 桥补 try，读失败按"未最大化 / UNDEFINED"（不改变方向） | 同文件其他消费点早有 try |
+
+**2in1 的可见副作用（正确方向，写 release note 时说明）**：桌面布局恢复后，
+根返回不再退出应用（`BackPressBridge` 的 touch 分支不再命中）、切换仓库不再
+关闭兄弟窗口（`touch-mode.js` 的 touch 分支不再触发）。这两条都是"2in1 本来就
+该是桌面语义"的回归修复，对既有 2in1 用户是行为变化。
+
+**仍未闭环**：`AppWindow.Restore` / `AppWindow.UnMaximize` 的直接 binding 仍可能
+把触摸窗变成浮窗（第 215/216 轮只守了 `setFullScreen*` 与 `restore()`）；
+`phone` 的 `FLOATING` 仍会发布 desktop（手机小窗是否真以上报 FLOATING 待取证）。

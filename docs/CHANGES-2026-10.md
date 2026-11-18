@@ -5057,7 +5057,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 
 | 编号 | 内容 | 代码位置 | 为什么安全 |
 | --- | --- | --- | --- |
-| WM-3（=Bug1 R2 / D1） | 2in1 的模式发布值常量化：`windowStatusChange` 的 MAXIMIZE/FULL_SCREEN 分支不再按 `window_pcmode_switch_status` 发布 | `WebAbility.ets` `writeTouchModeFile()` | 2in1 上该键不保证存在（H15），旧代码在**第一次最大化**时把 `systemMode` 写成 `touch`，而启动路径根本不写——这正是报障用户（2in1 + 隐藏标题栏）"最大化→重载→移动布局"的确定性成因。改后发布值与启动默认一致（desktop）；渲染层 `override` 仍可强制任一布局，用户意图不丢失 |
+| WM-3（=Bug1 R2 / D1） | 2in1 的模式发布值常量化 + 启动自愈：`windowStatusChange` 的 MAXIMIZE/FULL_SCREEN 分支不再按 `window_pcmode_switch_status` 发布；启动时按档案常量回写一次，修掉旧版本留下的 `systemMode='touch'` | `WebAbility.ets` `writeTouchModeFile()` + `onWindowStageCreate` 启动分支 | **报障设备是鸿蒙电脑，其 `deviceInfo.deviceType` 就是 `'2in1'`**（不是"平板 + 键盘"专属形态，也不是"平板 PC 关 + 自由多窗"场景）。2in1 上该键不保证存在（H15），旧代码在**第一次最大化**时把 `systemMode` 写成 `touch`，而启动路径根本不写——这正是"最大化→重载→移动布局"的确定性成因。改后发布值与启动默认一致（desktop）；启动自愈保证**已被旧版本污染的机器**升级后立刻恢复（否则 `resolveWant` 仍会读到 `touch`，用户看不到修复效果）；渲染层 `override` 仍可强制任一布局，用户意图不丢失 |
 | WM-2（=G-1 入口 4 / DB-1） | `setFullScreen` / `setSimpleFullScreen` 补形态守卫 | `AppWindowAdapter.ets` | 与既有 maximize/minimize/setBounds 守卫同向：触摸形态下窗口本身就是整屏，`ENTER_IMMERSIVE` 只会再产生一次 MAXIMIZE/FULL_SCREEN 事件（Bug1 那条"事件→模式文件→重载"链路）。守卫用**实时窗口状态**判据（FULL_SCREEN/MAXIMIZE 才算"已经是整屏"），平板 PC 关下的真实自由窗（FLOATING）仍可进沉浸；状态读失败保持原行为 |
 | WM-5（=G-4） | 五枚举全覆盖：`SPLIT_SCREEN` 归入自由窗族发布 desktop（手机除外），`MINIMIZE`/未知值显式不发布 | `WebAbility.ets` 状态监听器 | 分屏在平板本就属于自由窗形态（`freeWindowForm()` 对 SPLIT 已返回 true），旧代码只是没把它放进白名单，导致分屏后沿用上一形态的发布值；最小化/未知值按"不改变"方向显式留空 |
 | WM-10（=DB-3） | 4 处"引擎不实现 `-webkit-app-region`"的过时注释更正 | `WebAbility.ets` ×2、`AppWindowAdapter.ets`、`docs/window-state-machine.md` | 第 182/183 轮真机已定案：引擎**会**把 web 侧 app-region 转成窗口移动，只是仅限无边框路径。旧注释会把后来人引向错误的兜底方案 |
@@ -5078,4 +5078,49 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 - 锚点复核：移交包基线 `e528275` 与当前 HEAD 差两个版本（2.0.0→2.0.1），`WebAbility.ets` / `AppWindowAdapter.ets` / `touch-mode.js` 行号已漂移，全部按唯一子串重定位后再改。
 - `verify-asar.cjs` 新增两条断言：`app pandoc probe EPERM verdict`、`app pandoc probe directory target`。
 - `node scripts/update-obsidian.mjs --repatch` → `verify-asar` 全绿；`verify-release` / `check-docs` 全绿；`assembleHap` BUILD SUCCESSFUL。
-- 真机仍需确认（本机不可替代）：① 2in1 隐藏标题栏 → 最大化不再重载、布局不变；② 平板 PC 关自由窗最大化行为与 2.0.1 一致（本轮**未**改这条）；③ F11/菜单全屏在触摸形态被忽略且日志可见；④ 平板分屏后发布 desktop、手机分屏仍移动布局；⑤ pandoc 诊断面板对 Cellar 目录与 EPERM 两条候选给出正确结论。
+- 真机仍需确认（本机不可替代）：① 鸿蒙电脑（deviceType 2in1）隐藏标题栏 → 最大化不再重载、布局不变，且**旧版本已污染的机器**升级后冷启动即为桌面布局；② 平板 PC 关自由窗最大化行为与 2.0.1 一致（本轮**未**改这条）；③ F11/菜单全屏在触摸形态被忽略且日志可见；④ 平板分屏后发布 desktop、手机分屏仍移动布局；⑤ pandoc 诊断面板对 Cellar 目录与 EPERM 两条候选给出正确结论。
+## 第 216 轮 (2026-11-18): 移交包第二批——线 A 三处收尾（含 215 轮自己引入的回归）+ 线 B 诊断面补全
+
+**背景**：215 轮落地后，用三个只读子代理分别复核线 A 残项、线 B 残项与 215 提交的回归风险。本轮修掉复核出的**一个自己引入的回归**与一处**死代码**，并把线 B 诊断面按报告补齐。另更正一条事实口径：**报障设备是鸿蒙电脑，其 `deviceInfo.deviceType` 就是 `'2in1'`**——不是"平板 + 键盘"专属形态，也不是"平板 PC 关 + 自由多窗"场景（215 轮的 WM-3 正对着它）。
+
+### 一、线 A 收尾（1 个回归修复 + 1 处死代码 + 3 项守卫补全）
+
+| 编号 | 内容 | 为什么必须改 |
+| --- | --- | --- |
+| 回归修复（215 轮引入） | WM-2 守卫原对 `setFullScreen(true)` 与 `setFullScreen(false)` 一视同仁：平板 PC 关下的自由窗经 F11 进入沉浸（S5）后，**退出调用被同一个守卫吞掉，窗口再也退不回来**。改为按窗口 id 记录"由本桥进入的沉浸"（`bridgeImmersiveId`）：进入方向照旧守卫，退出方向放行自己开的那次；触摸 S1 窗口（不是本桥开的）仍然不可退出 | 215 轮把"防误发布"的守卫加成了双向，制造了"进得去、出不来"。F11 按两下就能复现 |
+| WM-5 死代码 | 215 轮的 `SPLIT_SCREEN` 分支写在 `if (MAXIMIZE \|\| FULL_SCREEN \|\| FLOATING)` 的**内层**，永远不可达。改为同级 `else if`，只做发布、不重跑自由窗几何阶梯（rect/inset 由 rect/size 事件负责） | 外层三值白名单挡住 SPLIT，所谓"五枚举覆盖"实际只覆盖三值 |
+| 16000067 兜底放宽 | `showWindow` 的 MINIMIZE 兜底原被 `isTouchFormFactorStrict()` 门住 → 桌面窗口（2in1 / 平板 PC 模式）最小化后若 `showAbility` 被 16000067 拒，只剩一句 "left as-is"，窗口停在最小化。改为**形态无关 + MINIMIZE 白名单**（启动期那 3 次 show 的冗余仍被排除） | 规格 §十 怪癖表要求"P-全部"；Round 111 的约束是"仅 MINIMIZE"，不是"仅触摸" |
+| restore() 守卫（DB-6） | 触摸形态 + **非最小化**的 `restore()` 直接忽略 | 该组合会把窗口还原成浮窗，而触摸态应用本身就该是 display；Round 111 不变式 1 的漏项。`bringWindowToFront` 内部直接调 `windowClass.restore()`，不受影响 |
+| I7 裸读补 try | `maximize()` 的幂等读与 `getWindowStatus` 桥都在 try 外，异常会冒到引擎；改为读失败按"未最大化 / UNDEFINED"继续（不改变方向） | 同文件其他消费点都已包 try，这两处是唯一裸调 |
+
+**顺带记一条定性**：WM-2 现在的覆盖面是"**已经是整屏**的触摸窗口"，自由窗**起点**（平板 PC 关下的 FLOATING → F11 进沉浸）仍然开放，因为 `MAXIMIZE/FULL_SCREEN` 事件在平板仍是 `touch`（WM-1 待转移起点状态）。要彻底闭环只能等状态机步 2。
+
+另外两处必须一起记档：
+
+1. **2in1 的可见副作用（正确方向）**：桌面布局恢复后，2in1 上"根返回退出应用"与"切换仓库关闭兄弟窗口"不再发生——这两条本来就是触摸分支的行为，对既有 2in1 用户是**行为变化**，写 release note 时要说明；确实要移动布局的用户仍可用模式命令把 override 置为 touch。
+2. **仍未闭环的封堵面**：`AppWindow.Restore` / `AppWindow.UnMaximize` 的直接 binding 仍可能把触摸窗变成浮窗（本轮只守了 `setFullScreen*` 与 `restore()`；`unMaximize` 刻意不加盲守卫——它是 S5→S2 的正常退出通道）。
+
+### 二、线 B 诊断面补全（patch rev 192→193）
+
+| 编号 | 内容 | 用户可见差别 |
+| --- | --- | --- |
+| HB-7 | 设置项分组 `导出` → `Pandoc 诊断`，文案改为"只用于本页环境检查，本应用不执行导出，插件读它自己的配置" | 之前用户以为改这里能修导出，改完再报"还是不行" |
+| HB-8 | `EACCES` 按文件层证据分化：缺执行位 / X_OK 不过 → `exec-eacces-perm`（**可修**：chmod 或重装）；权限位正常才判沙箱/ACL | 之前把可修问题说成"应用层绕不过去，只能换位置或换方案" |
+| HB-9 | EPERM 结论后补"下一步三件事"（HiShell 自证执行域差异 / 对齐插件 `data.json` 路径 / 导出 Markdown 绕行）+ 报告落盘路径 | 之前只给 HNP、HiShell 两个开发者术语，用户不知道下一步做什么 |
+| HB-10 | 报告顶部加"结论汇总"（每个候选一行 verdict）+ 报告文件路径 | 三个候选各说各话，要通读完才知道主因 |
+| HB-11 | shell 模式改 `/bin/sh -c '"$0" --version' <path>`，路径作为 argv 传入 | 含引号/分号/`$()` 的插件路径不再被 shell 解释；同时消除"直接能跑、shell 不能跑"的**假分叉**（R5） |
+| WS-4a | 只对**绝对路径**候选做 execve 实测；相对路径/基名只做文件层并明确标注"未实测" | 收窄"插件 `data.json` 决定执行面"，是 HB-1 ④ 弱沙箱前的最低成本准备 |
+| WS-6a（部分） | `ETIMEDOUT` 文案改为"超时 ≠ 文件有问题，大文件首次执行含签名校验/冷启动，建议再点一次" | 超时不再被误判成坏文件 |
+
+### 三、仍然不做 / 待决策
+
+同 215 轮：WM-1/4/6/7/8/9/11/12/13/14、HB-1（产品路线）、WS-1/2b/5/6b/7/8、HB-4②、HB-6。另记录两处"**无证据不动**"：
+
+1. 手机 `FLOATING` 目前会发布 desktop（`if (status === FLOATING)` 无设备门），与手机小窗/悬浮窗语义可能冲突——但手机小窗是否真以上报 FLOATING 无证据，等取证；
+2. DB-7（801 `capFailed` 终态化）：需要 801 拒绝设备的现场证明"永久性"，否则会把瞬时失败固化成"永不自绘标题栏"。
+
+### 四、验证
+
+- patch rev **193**；`update-obsidian.mjs --repatch` → `verify-asar` 全绿，新增 5 条断言：`app pandoc probe exec-bit EACCES split`、`app pandoc report verdict index`、`app pandoc shell probe passes path as argv`、`app pandoc probe absolute paths only`、`app pandoc settings row is diagnostics-only`。
+- `assembleHap` BUILD SUCCESSFUL；HAP 内 `obsidian.asar` 复核 rev 193 与新文案，`modules.abc` 复核 `bridgeImmersiveId` / `windowIsMinimized` 已编入。
+- `verify-release` / `check-docs` 全绿。

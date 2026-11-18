@@ -80,6 +80,12 @@ export class AppWindowAdapter extends BaseAdapter {
   // limits anyway (device log 07:39:36.951 and 07:39:59.646 both requested
   // 450x282 and both produced "could not update new size").
   private lastLimitsKey: string = '';
+  // Handover WM-2 (exit direction): the engine window id whose immersive state
+  // was entered THROUGH setFullScreen/setSimpleFullScreen. A window that the
+  // touch regime already owned (S1) must stay un-exitable, but a free window
+  // that this bridge pushed into immersive (S5) must remain exitable - without
+  // this record the form-factor guard would trap it in fullscreen forever.
+  private bridgeImmersiveId: number = -1;
 
   constructor(
     @inject(AbilityManager) abilityManager: AbilityManager,
@@ -153,6 +159,22 @@ export class AppWindowAdapter extends BaseAdapter {
       return st === window.WindowStatusType.FULL_SCREEN || st === window.WindowStatusType.MAXIMIZE;
     } catch (exception) {
       LogUtil.warn(TAG, 'fullscreen guard status read failed: ' + JSON.stringify(exception));
+      return false;
+    }
+  }
+
+  // One question, one place: is this window MINIMIZED? Used by the 16000067
+  // fallback (form-factor independent - a desktop window can equally be left
+  // minimized by a rejected showAbility) and by the restore() guard. A read
+  // failure answers false, i.e. it keeps the old behaviour.
+  private windowIsMinimized(windowClass: window.Window | undefined): boolean {
+    if (!windowClass) {
+      return false;
+    }
+    try {
+      return windowClass.getWindowStatus() === window.WindowStatusType.MINIMIZE;
+    } catch (exception) {
+      LogUtil.warn(TAG, 'minimize status read failed: ' + JSON.stringify(exception));
       return false;
     }
   }
@@ -599,17 +621,16 @@ export class AppWindowAdapter extends BaseAdapter {
         // Obsidian calls show() two or three times during startup while the
         // window is already FULL_SCREEN, and an unconditional window.show()
         // there would be a redundant WMS round-trip on every launch.
-        if (this.isTouchFormFactorStrict()) {
-          const windowClass = proxy?.getWindow();
-          try {
-            if (windowClass &&
-              windowClass.getWindowStatus() === window.WindowStatusType.MINIMIZE) {
-              this.bringWindowToFront(windowClass);
-              return;
-            }
-          } catch (statusException) {
-            LogUtil.warn(TAG, 'read window status failed: ' + JSON.stringify(statusException));
-          }
+        // Handover (spec §十 quirk table): the fallback is MINIMIZE-only and
+        // form-factor INDEPENDENT - a desktop window (2in1 / tablet PC mode) can
+        // equally be left minimized by a rejected showAbility, and the startup
+        // redundancy is excluded by the MINIMIZE whitelist, not by the device
+        // type. isTouchFormFactorStrict() used to gate this and silently dropped
+        // the recovery on every desktop window.
+        const windowClass = proxy?.getWindow();
+        if (windowClass && this.windowIsMinimized(windowClass)) {
+          this.bringWindowToFront(windowClass);
+          return;
         }
         LogUtil.info(TAG, 'showAbility rejected by WMS (16000067), window left as-is');
         return;
@@ -656,54 +677,76 @@ export class AppWindowAdapter extends BaseAdapter {
 
   @LogMethod
   setFullScreen(fullScreen: boolean, id: number) {
-    // Handover WM-2: see touchWindowAlreadyDisplay. Window form factors keep the
-    // engine's explicit intent (F11 / View menu / plugin) unchanged.
-    if (this.touchWindowAlreadyDisplay(this.getWindow(id))) {
-      LogUtil.info(TAG, 'setFullScreen(' + fullScreen + ') ignored: window ' + id +
+    // Handover WM-2: window form factors keep the engine's explicit intent
+    // (F11 / View menu / plugin) unchanged; only a touch window that is ALREADY
+    // the display is a no-op. See touchWindowAlreadyDisplay + bridgeImmersiveId.
+    const windowClass = this.getWindow(id);
+    if (!fullScreen) {
+      // Exit direction: an immersive opened through this bridge must stay
+      // exitable, otherwise F11 traps a free window in S5 (the "can enter, can
+      // never leave" regression the guard introduced before bridgeImmersiveId).
+      if (this.touchWindowAlreadyDisplay(windowClass) && this.bridgeImmersiveId !== id) {
+        LogUtil.info(TAG, 'setFullScreen(false) ignored: window ' + id +
+          ' is the display on the touch form factor');
+        return;
+      }
+      if (this.bridgeImmersiveId === id) {
+        this.bridgeImmersiveId = -1;
+      }
+      this.unMaximize(id);
+      return;
+    }
+    if (this.touchWindowAlreadyDisplay(windowClass)) {
+      LogUtil.info(TAG, 'setFullScreen(true) ignored: window ' + id +
         ' is already the display on the touch form factor');
       return;
     }
-    if (fullScreen) {
-      let windowClass = this.getWindow(id);
-      if (!windowClass) {
-        LogUtil.error(TAG, 'Failed to obtain the main window.');
-        return;
-      }
-
-      windowClass.maximize(window.MaximizePresentation.ENTER_IMMERSIVE)
+    if (!windowClass) {
+      LogUtil.error(TAG, 'Failed to obtain the main window.');
+      return;
+    }
+    windowClass.maximize(window.MaximizePresentation.ENTER_IMMERSIVE)
+      .then(() => {
+        this.bridgeImmersiveId = id;
+      })
       .catch((err: BusinessError) => {
         LogUtil.error(TAG, 'Failed to maximize the window. Cause:' + JSON.stringify(err));
       });
-    } else {
-      this.unMaximize(id);
-    }
   }
 
   @LogMethod
   setSimpleFullScreen(fullScreen: boolean, id: number) {
-    // Handover WM-2: same guard as setFullScreen (the F11/double-click simple
-    // fullscreen path is the second entry into ENTER_IMMERSIVE).
-    if (this.touchWindowAlreadyDisplay(this.getWindow(id))) {
-      LogUtil.info(TAG, 'setSimpleFullScreen(' + fullScreen + ') ignored: window ' + id +
+    // Handover WM-2: same contract as setFullScreen (simple fullscreen is the
+    // second entry into ENTER_IMMERSIVE).
+    const windowClass = this.getWindow(id);
+    if (!fullScreen) {
+      if (this.touchWindowAlreadyDisplay(windowClass) && this.bridgeImmersiveId !== id) {
+        LogUtil.info(TAG, 'setSimpleFullScreen(false) ignored: window ' + id +
+          ' is the display on the touch form factor');
+        return;
+      }
+      if (this.bridgeImmersiveId === id) {
+        this.bridgeImmersiveId = -1;
+      }
+      this.unMaximize(id);
+      return;
+    }
+    if (this.touchWindowAlreadyDisplay(windowClass)) {
+      LogUtil.info(TAG, 'setSimpleFullScreen(true) ignored: window ' + id +
         ' is already the display on the touch form factor');
       return;
     }
-    if (fullScreen) {
-      let windowClass = this.getWindow(id);
-      if (!windowClass) {
-        LogUtil.error(TAG, 'Failed to obtain the main window.');
-        return;
-      }
-
-      windowClass.maximize(window.MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER)
-        .then(() => {
-          LogUtil.info(TAG, 'Succeeded in maximizing the window.');
-        }).catch((err: BusinessError) => {
-        LogUtil.error(TAG, 'Failed to maximize the window. Cause:' + JSON.stringify(err));
-      });
-    } else {
-      this.unMaximize(id);
+    if (!windowClass) {
+      LogUtil.error(TAG, 'Failed to obtain the main window.');
+      return;
     }
+    windowClass.maximize(window.MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER)
+      .then(() => {
+        this.bridgeImmersiveId = id;
+        LogUtil.info(TAG, 'Succeeded in maximizing the window.');
+      }).catch((err: BusinessError) => {
+      LogUtil.error(TAG, 'Failed to maximize the window. Cause:' + JSON.stringify(err));
+    });
   }
 
   @LogMethod
@@ -711,6 +754,17 @@ export class AppWindowAdapter extends BaseAdapter {
     let windowClass = this.getWindow(id);
     if (!windowClass) {
       LogUtil.error(TAG, 'Failed to obtain the main window.');
+      return;
+    }
+
+    // Handover DB-6 / Round 111 invariant 1: restore() means "come back from
+    // MINIMIZE". On the touch regime a NON-minimized window that gets restored
+    // is turned back into a floating window while the app is supposed to BE the
+    // display, so that combination is ignored; the MINIMIZE whitelist keeps
+    // every legitimate recovery (bringWindowToFront calls windowClass.restore()
+    // directly and is unaffected).
+    if (this.isTouchFormFactorStrict() && !this.windowIsMinimized(windowClass)) {
+      LogUtil.info(TAG, 'restore ignored: window ' + id + ' is not minimized on the touch form factor');
       return;
     }
 
@@ -917,7 +971,16 @@ export class AppWindowAdapter extends BaseAdapter {
       return;
     }
 
-    if (windowClass.getWindowStatus() === window.WindowStatusType.MAXIMIZE) {
+    // Handover I7: a status read can throw (the same reads elsewhere in this
+    // file are wrapped). Failure answers "not maximized" so the explicit call
+    // still runs - the direction that does not swallow the engine's intent.
+    let alreadyMaximized: boolean = false;
+    try {
+      alreadyMaximized = windowClass.getWindowStatus() === window.WindowStatusType.MAXIMIZE;
+    } catch (statusException) {
+      LogUtil.warn(TAG, 'maximize status read failed: ' + JSON.stringify(statusException));
+    }
+    if (alreadyMaximized) {
       return;
     }
 
@@ -1207,10 +1270,17 @@ export class AppWindowAdapter extends BaseAdapter {
 
   @LogMethod
   getWindowStatus(id: number): window.WindowStatusType {
-    let windowClass = this.getWindow(id);
-    let type = windowClass?.getWindowStatus();
-    if (type !== undefined) {
-      return type;
+    // Handover I7: this is a bridge the engine calls directly, so a throw here
+    // would surface as an engine-side failure; answer UNDEFINED instead (the
+    // engine already handles "unknown" by not changing anything).
+    try {
+      let windowClass = this.getWindow(id);
+      let type = windowClass?.getWindowStatus();
+      if (type !== undefined) {
+        return type;
+      }
+    } catch (statusException) {
+      LogUtil.warn(TAG, 'getWindowStatus bridge read failed: ' + JSON.stringify(statusException));
     }
     return window.WindowStatusType.UNDEFINED;
   }

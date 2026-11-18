@@ -3283,8 +3283,17 @@ function ohsidianProbeExecutable(exePath,opt){
     out.verdict="exec-enoent";
     out.human="execve 报 ENOENT：可执行文件或它的 #! 解释器不存在（软链接目标失效也算这个）";
   }else if(out.errno==="EACCES"){
-    out.verdict="exec-eacces";
-    out.human="execve 报 EACCES：文件存在但被拒绝执行 —— SELinux/沙箱限制，应用层绕不过去，只能换位置或换方案";
+    if(!out.execBits||!out.xOk){
+      /* HB-8: the file layer already answered "no execute permission". That one
+         is FIXABLE (chmod / reinstall), so it must not be reported as the
+         platform refusal the old single EACCES sentence claimed. */
+      out.verdict="exec-eacces-perm";
+      out.human="execve 报 EACCES：执行位缺失或 X_OK 不通过（权限位 " + out.mode +
+        "）—— 先 chmod +x 或重装该文件，这一条可以自己修";
+    }else{
+      out.verdict="exec-eacces";
+      out.human="execve 报 EACCES：权限位正常但仍被拒绝执行 —— SELinux/沙箱限制，应用层绕不过去，只能换位置或换方案";
+    }
   }else if(out.errno==="EPERM"){
     /* Audit HB-2: the harmonybrew binary is an adhoc/unsigned ELF, and the
        platform refuses execve of it from a strong-sandbox app domain. The old
@@ -3301,7 +3310,7 @@ function ohsidianProbeExecutable(exePath,opt){
     out.human="execve 报 ETXTBSY：文件正被写入/占用，稍后重试";
   }else if(out.errno==="ETIMEDOUT"){
     out.verdict="timeout";
-    out.human="探测超时（"+(opt.timeout||2500)+"ms），结论不可用";
+    out.human="探测超时（"+(opt.timeout||2500)+"ms）≠ 文件有问题：大文件首次执行含签名校验/冷启动，建议再点一次「检查」";
   }else if(out.status===0){
     out.verdict="ok";
     out.human="可以执行："+(out.version||"（无输出）");
@@ -3329,12 +3338,18 @@ function ohsidianPathReportLines(d){
     L.push("程序输出首行: "+(d.version||"（无）"));
   }
   L.push("");
-  if(d.verdict==="exec-eacces"){
+  if(d.verdict==="exec-eacces-perm"){
+    L.push("说明: 这是**可修**的问题——文件存在但没有执行权限。chmod +x 或重新安装该文件后再检查一次。");
+  }else if(d.verdict==="exec-eacces"){
     L.push("说明: 文件层检查通过、execve 仍被拒 → 这是系统级执行限制（不是路径写错，也不是文件损坏）。");
   }else if(d.verdict==="exec-eperm"){
     L.push("说明: 程序根本没有启动 —— 平台在 execve 处拒绝了这个文件（强制代码签名 + 应用执行域裁决）。");
     L.push("      这不是路径写错、不是权限位问题、也不是程序内部报错；应用侧改路径/chmod/换调用方式都不会改变结局。");
-    L.push("      可行方向：随包分发（HNP 携带并签名二进制）或在系统终端（HiShell）里使用；见 docs/PLATFORM-ADAPTATION.md A6。");
+    L.push("      下一步可以做三件事：");
+    L.push("      ① 在系统终端（HiShell）里执行同一路径的 --version —— 若那里能跑，就坐实是执行域差异；");
+    L.push("      ② 把插件 data.json 里的路径与上面「候选」逐字对齐（插件读的是它自己的配置）；");
+    L.push("      ③ 临时绕行：改为导出 Markdown，再到电脑上用 pandoc 转换（本应用不执行外部二进制是平台策略，不是缺功能）。");
+    L.push("      长远方向是随包分发（HNP）或申请弱沙箱权限，属于产品路线决策；见 docs/PLATFORM-ADAPTATION.md A6。");
   }else if(d.verdict==="target-is-directory"){
     L.push("说明: 插件配置指向的是一个 keg 目录。execve 目录永远失败（EACCES），与 SELinux/沙箱无关。");
     L.push("      正确写法是目录里的可执行文件全路径（Cellar/pandoc/<版本>/bin/pandoc）。");
@@ -3437,8 +3452,12 @@ function ohsidianProbeExecModes(exePath,timeout){
     res.direct.err=String((r&&r.stderr)||"").split("\n")[0].slice(0,160);
   }catch(e1){res.direct.errno="throw";res.direct.err=String(e1&&e1.message||e1)}
   try{
-    var q=/\s/.test(exePath)?('"'+exePath+'"'):exePath;
-    var r2=cp.spawnSync("/bin/sh",["-c",q+" --version"],{timeout:timeout||2000,encoding:"utf8"});
+    /* Handover HB-11: hand the path over as $0 instead of pasting it into the
+       command string. A plugin-configured path containing spaces, quotes,
+       semicolons or $(...) used to be interpreted by the shell - which both
+       executed attacker-controlled text and produced the "direct execve works,
+       /bin/sh fails" false divergence this probe exists to explain. */
+    var r2=cp.spawnSync("/bin/sh",["-c",'"$0" --version',exePath],{timeout:timeout||2000,encoding:"utf8"});
     res.shell.errno=(r2&&r2.error&&(r2.error.code||String(r2.error.errno)))||"";
     res.shell.status=(r2&&typeof r2.status==="number")?r2.status:null;
     res.shell.out=String((r2&&r2.stdout)||"").split("\n")[0].slice(0,90);
@@ -3449,6 +3468,16 @@ function ohsidianProbeExecModes(exePath,timeout){
 /* One sweep over: the path from the settings row, then whatever the installed
    plugins actually point at (so a mismatch is visible instead of guessed).
    Pure: returns {lines, report}; showing or writing is the caller's business. */
+function ohsidianVerdictLabel(v){
+  var m={ok:"可执行",missing:"路径不存在", "exec-eperm":"平台拒绝执行（EPERM）",
+    "exec-eacces":"被拒绝执行（EACCES/沙箱）", "exec-eacces-perm":"缺执行权限（可修）",
+    "target-is-directory":"目标是目录（不是可执行文件）", "exec-enoent":"可执行文件或解释器缺失",
+    "exec-noexec":"架构或格式不符", "exec-txtbusy":"文件被占用", "timeout":"执行超时（再点一次检查）",
+    "fs-ok":"文件层通过（未实测执行）", "fs-suspect":"文件层可疑", "stat-eacces":"连 stat 都被拒",
+    "stat-error":"文件预检失败", "no-node":"渲染进程没有 fs", "no-child_process":"引擎没有 child_process",
+    "spawn-threw":"探测调用抛错", "spawn-null":"探测无结果"};
+  return m[v]||v||"?";
+}
 function ohsidianBuildPandocReport(){
   var lines=[],report={configured:ohsidianPandocPath(),candidates:[],at:new Date().toISOString()};
   var cands=[{path:report.configured,source:"OHSidian 设置"}];
@@ -3474,6 +3503,18 @@ function ohsidianBuildPandocReport(){
       report.candidates.push({source:c.source,file:d,direct:null,shell:null});
       continue;
     }
+    if(c.path.charAt(0)!=="/"){
+      /* Handover WS-4a (HB-1 ④ 的最低成本准备): a plugin's data.json may hold
+         any string ending in "pandoc" - a bare name (PATH lookup) or a relative
+         path. Executing those from here would run something the plugin itself
+         resolves differently, so only absolute paths get a real execve; the
+         rest keep their file-layer result plus this note. */
+      lines.push("");
+      lines.push("→ 未实测 execve：这不是绝对路径（插件可能按 PATH 解析），本应用不代为执行。");
+      lines.push("  文件层结果仍然有效；要实测请在插件里改成绝对路径，或把绝对路径填进上面的设置项。");
+      report.candidates.push({source:c.source,file:d,direct:null,shell:null});
+      continue;
+    }
     var modes=ohsidianProbeExecModes(c.path,2000);
     lines.push("");
     lines.push("→ 直接 execve（Pandoc Plugin 的调用方式）: "+
@@ -3491,10 +3532,22 @@ function ohsidianBuildPandocReport(){
   lines.push("· Pandoc Plugin 用 spawn()，而且没有挂 error 监听 —— execve 失败时它既不报错也不结束，这就是\"没有报错原因\"的来源。");
   lines.push("· Pandoc GUI 用 exec()（/bin/sh -c），同一个失败会显示成 /bin/sh: … inaccessible or not found。");
   lines.push("· 两种方式都失败、且 errno 都是 EPERM → 平台拒绝执行（强制代码签名 + 执行域裁决），不是路径写错，应用层无解。");
-  lines.push("· errno 是 EACCES → 先看「目标类型」是否为目录（Cellar keg 目录）；是文件则查执行位/沙箱策略。");
+  lines.push("· errno 是 EACCES → 先看「目标类型」是否为目录；是文件再看执行位（缺权限可以 chmod 修），权限正常才按沙箱/ACL 查。");
   lines.push("· 只有 /bin/sh 那条失败 → 问题在 shell/引号/PATH，文件本身没问题。");
   lines.push("· 文件层就报 ENOENT（软链接悬空）→ 重新安装或改链接即可。");
-  return {lines:lines,report:report};
+  /* HB-10: an at-a-glance index first - three candidates each telling their own
+     story made the main cause readable only after reading the whole report. */
+  var head=["结论汇总（每行一个候选，详细依据见下方）:"];
+  for(var h=0;h<report.candidates.length;h++){
+    var hc=report.candidates[h];
+    head.push("  候选 "+(h+1)+"／"+report.candidates.length+"  ["+hc.source+"]  "+
+      ohsidianVerdictLabel(hc.file&&hc.file.verdict)+
+      (hc.direct&&hc.direct.errno?("  · 直接: "+hc.direct.errno):"")+
+      (hc.shell&&hc.shell.errno?("  · shell: "+hc.shell.errno):""));
+  }
+  head.push("报告文件：应用数据目录/ohsidian-pandoc-check.json（反馈时一并附上）");
+  head.push("─────────────────────────────────────────");
+  return {lines:head.concat(lines),report:report};
 }
 function ohsidianWritePandocReport(report){
   try{
@@ -3696,9 +3749,10 @@ function ohsidianSettingsRows(root){
       });
     /* 手写笔设置现在是独立的“手写笔”选项卡，见 ohsidianBuildStylusTab(). */
     /* --- 诊断 --- */
-    var diag=newGroup("导出");
+    var diag=newGroup("Pandoc 诊断");
     var pathCtl=itemEl(diag,"Pandoc 路径",
-      "导出 Word 时使用的 pandoc。留空或填回默认值即恢复默认：" + OHSIDIAN_PANDOC_DEFAULT);
+      "只用于本页的环境检查，本应用不会用它执行导出。导出由第三方插件自己做，插件读的是它自己的配置——"+
+      "把插件里填的路径粘到这里就能检查那条路径。留空或填回默认值即恢复默认：" + OHSIDIAN_PANDOC_DEFAULT);
     if(pathCtl){
       var inp=document.createElement("input");
       inp.type="text";
@@ -4186,7 +4240,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="192";
+var OHSIDIAN_PATCH_REV="193";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the

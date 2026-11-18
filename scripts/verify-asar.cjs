@@ -137,6 +137,15 @@ try {
     'app pandoc environment check (feature)': app.includes('ohsidianBuildPandocReport') && app.includes('ohsidianPandocPath'),
     'app pandoc probe EPERM verdict': app.includes('execve 报 EPERM'),
     'app pandoc probe directory target': app.includes('target-is-directory') && app.includes('isDirectory&&'),
+    // Handover HB-8/9/10/11 + WS-4a: EACCES split by the exec-bit evidence, the
+    // EPERM "what to do next" block, the verdict index at the top of the report,
+    // the shell probe passing the path as argv ($0) instead of pasting it into
+    // the command string, and exec only for absolute paths.
+    'app pandoc probe exec-bit EACCES split': app.includes('exec-eacces-perm'),
+    'app pandoc report verdict index': app.includes('结论汇总（每行一个候选'),
+    'app pandoc shell probe passes path as argv': app.includes('"$0" --version'),
+    'app pandoc probe absolute paths only': app.includes('这不是绝对路径（插件可能按 PATH 解析）'),
+    'app pandoc settings row is diagnostics-only': app.includes('只用于本页的环境检查'),
     // BUG-005: the mobile toolbar must not be a window drag region - this
     // engine implements -webkit-app-region and turned every tap into a move.
     'app toolbar not a drag region': app.includes('ohsidian-toolbar-hit') && app.includes('applyToolbarHitFix'),

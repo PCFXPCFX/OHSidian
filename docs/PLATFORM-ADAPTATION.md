@@ -13,7 +13,7 @@
 | A3 | 更新链接硬拼平台 | `app.js@1170582`：`"win32"===t?"win":"darwin"===t?"mac":"linux"` | "检查更新"给出 linux/x64 安装包链接，鸿蒙上无法安装（当前更新器已禁，影响小） | 返回 HAP 下载页或官网 |
 | A4 | ctime 假设 | `app.js@3710117`：`"win32"!==pne&&"darwin"!==pne` | 文件时间戳分支按 Linux 走，优先级低 | 暂不处理 |
 | A5 | 插件 `require` 被移动模拟门控（**已修，2.0.1**） | `loadPlugin` 的 shim：`a=document.body.hasClass("emulate-mobile")`，命中时白名单（仅 `obsidian` + CodeMirror 6 + Lezer）之外的模块一律 `null` | 触屏模式下凡顶层 `require` Node 模块的插件直接抛错 →「插件加载失败」；懒加载的则设置页空白。**本移植的渲染层有完整 Node**（内核自己就用 `window.require` 取 `fs`/`electron`），`null` 是纯策略误判 | 已把判据常量化为 `a=!1`（保留白名单优先），触屏模式与桌面模式插件语义一致；`verify-asar` 有正/负断言。布局侧的 `isMobile/isTablet/isPhone` 分支不受影响 |
-| A6 | 应用内 execve 外部二进制被内核拒绝（**诊断已修正，第 215 轮**） | 诊断面板三候选：`.../Cellar/pandoc/3.12.1/bin/pandoc` 文件层全绿却 `EPERM`；`.local/share/pandoc` `ENOENT`；`harmonybrew/Cellar/pandoc` `EACCES`（目标是目录） | 旧探针模板只有 ENOENT/EACCES/ENOEXEC/ETXTBSY/超时，`EPERM` 落到"能启动但退出码非零"的兜底句 → 误报"问题在这个程序内部"；目录目标被误报成 SELinux/沙箱拒绝 | 已补 `EPERM` 分支（强制代码签名 + 应用执行域裁决，路径/chmod/调用方式均无效，应用层无解：HNP 随包或 HiShell）与 `isDirectory()` 特判（给出正确写法 `<keg>/<版本>/bin/pandoc`，并跳过无意义的 execve 实测）。能力出路本身是产品决策（HB-1） |
+| A6 | 应用内 execve 外部二进制被内核拒绝（**诊断已修正，第 215/216 轮**） | 诊断面板三候选：`.../Cellar/pandoc/3.12.1/bin/pandoc` 文件层全绿却 `EPERM`；`.local/share/pandoc` `ENOENT`；`harmonybrew/Cellar/pandoc` `EACCES`（目标是目录） | 旧探针模板只有 ENOENT/EACCES/ENOEXEC/ETXTBSY/超时，`EPERM` 落到"能启动但退出码非零"的兜底句 → 误报"问题在这个程序内部"；目录目标被误报成 SELinux/沙箱拒绝 | 已补 `EPERM` 分支（强制代码签名 + 应用执行域裁决，路径/chmod/调用方式均无效，应用层无解：HNP 随包或 HiShell）与 `isDirectory()` 特判（给出正确写法 `<keg>/<版本>/bin/pandoc`，并跳过无意义的 execve 实测）。第 216 轮再把 `EACCES` 按文件层证据分化（缺执行位/X_OK → `exec-eacces-perm`，**可修**）、只对绝对路径实测、shell 侧改 argv 传参，并在报告顶部给「结论汇总」+ HiShell 自证与「导出 Markdown 到电脑端转换」两步绕行。能力出路本身是产品决策（HB-1） |
 
 ## 二、引擎能力
 

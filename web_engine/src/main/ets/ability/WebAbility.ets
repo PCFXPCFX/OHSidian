@@ -2784,6 +2784,18 @@ export class WebAbility extends WebBaseAbility {
       // through the observer for both form factors.
       if (deviceInfo.deviceType === 'tablet') {
         this.updateWindowPcmodeSwitchStatus(context);
+      } else {
+        // D1 self-heal (handover Bug1 R2 persistence): 2in1 never publishes
+        // touch, but a mode file written by a build that still did (<= 2.0.1:
+        // its maximize path) keeps systemMode='touch' forever. resolveWant reads
+        // that file at startup, so an affected PC would STILL boot into the
+        // mobile layout after the upgrade and its owner would see no fix until
+        // the next maximize/restore event. Publishing the profile constant here
+        // repairs the file before the content loads; when it already says
+        // 'desktop' the writer returns after one small read, and the renderer's
+        // explicit `override` still wins over systemMode either way. The
+        // boolean is ignored for 2in1 (see writeTouchModeFile's D1 branch).
+        this.writeTouchModeFile(false);
       }
     } else {
       // phone: the tablet's touch regime without a pcmode setting to read.
@@ -2822,25 +2834,34 @@ export class WebAbility extends WebBaseAbility {
             // free window must publish the touch layout again.
             if (status === window.WindowStatusType.FLOATING) {
               this.writeTouchModeFile(true);
-            } else if (status === window.WindowStatusType.FULL_SCREEN ||
-              status === window.WindowStatusType.MAXIMIZE) {
-              this.writeTouchModeFile(this.pcModeEnabled);
-            } else if (status === window.WindowStatusType.SPLIT_SCREEN &&
-              deviceInfo.deviceType !== 'phone') {
-              // Handover WM-5 (G-4): SPLIT_SCREEN is one of the five official
-              // window status values and belongs to the free-window family on a
-              // tablet - the desktop layout FLOATING already publishes. It used
-              // to fall outside this whitelist and publish nothing, so a split
-              // window kept whatever the previous shape had published. Phones
-              // are excluded on purpose: there SPLIT is still the mobile layout.
+            } else {
+              // FULL_SCREEN / MAXIMIZE
               this.writeTouchModeFile(this.pcModeEnabled);
             }
-            // MINIMIZE and any value outside the official enum publish
-            // NOTHING: minimizing is a visibility change, not a form change
-            // (S6 - the restore event publishes the returning shape), and a
-            // failed/unknown read must not move the layout (S7, same
-            // "failure must not change anything" direction as audit P2-2).
+          } else if (status === window.WindowStatusType.SPLIT_SCREEN &&
+            deviceInfo.deviceType !== 'phone') {
+            // Handover WM-5 (G-4): SPLIT_SCREEN is one of the five official
+            // window status values and belongs to the free-window family on a
+            // tablet - the desktop layout FLOATING already publishes. It used to
+            // fall outside this whitelist and publish nothing, so a split window
+            // kept whatever the previous shape had published. Phones are
+            // excluded on purpose: there SPLIT is still the mobile layout.
+            // Only the PUBLISH happens here: the rect/inset refresh for a split
+            // transition arrives through windowRectChange/windowSizeChange, and
+            // this handler deliberately does not re-run the free-window geometry
+            // ladder for a shape it does not drive (round 87/92/153 stay as-is).
+            // The publish value is the FLOATING branch's constant `true` (this IS
+            // the free-window family) and not `this.pcModeEnabled`: passing the
+            // switch would make the value depend on a SECOND live status read
+            // inside freeWindowForm(), and a throw there would publish `touch`
+            // (mobile layout) for a split window.
+            this.writeTouchModeFile(true);
           }
+          // MINIMIZE and any value outside the official enum publish NOTHING:
+          // minimizing is a visibility change, not a form change (the restore
+          // event publishes the returning shape), and a failed/unknown read must
+          // not move the layout (same "failure must not change anything"
+          // direction as audit P2-2).
           // Round 153: in the touch form factor the window must BE the
           // display. A status event that reports a floating/maximized window
           // means the rect correction did not land (or a PC-mode layout was
