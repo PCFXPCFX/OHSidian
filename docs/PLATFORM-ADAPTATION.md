@@ -155,6 +155,16 @@
 默认构建**不带**这两条权限（`weak-sandbox.mjs revert` 回到原样）：声明了却拿不到
 ACL 的包不能当发行包用。
 
+**本机实测（2026-11-18）**：`node scripts/weak-sandbox.mjs status` 会直接读
+`build-profile.json5` 指向的 `.p7b`（华为签名的 profile，JSON 载荷是明文，可只读解析）
+并列出 `acls.allowed-acls`。当前调试 profile **已有 7 条 ACL**——
+`kernel.ALLOW_WRITABLE_CODE_MEMORY`、`READ_WRITE_DESKTOP_DIRECTORY`、`SYSTEM_FLOAT_WINDOW`、
+`READ_WRITE_DOCUMENTS_DIRECTORY`、`READ_PASTEBOARD`、`FILE_ACCESS_PERSIST`、
+`READ_WRITE_DOWNLOAD_DIRECTORY`——说明 ACL 申请流程本来就在用；**缺的正是
+`CUSTOM_SANDBOX` 与 `READ_WRITE_USER_FILE`**，把这两条加进同一条申请流程、重新下载
+profile 再重签即可。离线改 profile 再自签**不可行**：profile 由 AGC 签名，改一个字节
+验签就失败（这也是 `weak-sandbox.mjs` 只做只读检查、不代改 profile 的原因）。
+
 ### 5.3 代码侧已落地（第 217 轮）
 
 | 部分 | 内容 | 位置 |

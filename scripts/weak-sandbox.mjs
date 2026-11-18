@@ -116,10 +116,34 @@ function status() {
   const userFile = hasEntry(text, 'ohos.permission.READ_WRITE_USER_FILE');
   console.log('module.json5: CUSTOM_SANDBOX=' + (declared ? 'declared' : 'absent') +
     ', READ_WRITE_USER_FILE=' + (userFile ? 'declared' : 'absent'));
+
+  // The profile is the half that actually grants the permission. It is a
+  // Huawei-signed PKCS#7 with the JSON payload embedded in clear, so its ACL list
+  // can be read locally - no device, no IDE. Signing it again is NOT possible
+  // offline (only AGC can), so this is a read-only check.
+  const prof = profileInfo();
+  console.log('');
+  if (!prof) {
+    console.log('signing profile: not declared in build-profile.json5 (automatic signing?)');
+  } else if (!prof.exists) {
+    console.log('signing profile: ' + prof.path + ' (missing on disk)');
+  } else {
+    const hasSandbox = prof.acls.includes('ohos.permission.CUSTOM_SANDBOX');
+    const hasUserFile = prof.acls.includes('ohos.permission.READ_WRITE_USER_FILE');
+    console.log('signing profile: ' + prof.path);
+    console.log('  acls CUSTOM_SANDBOX       : ' + (hasSandbox ? 'YES' : 'NO'));
+    console.log('  acls READ_WRITE_USER_FILE : ' + (hasUserFile ? 'YES' : 'NO'));
+    console.log('  acls 现有 ' + prof.acls.length + ' 条: ' + prof.acls.join(', '));
+    if (!hasSandbox || !hasUserFile) {
+      console.log('  => 该 profile 重签出的包只会是 sandbox=strong：先用 IDE/AGC 把缺的 ACL 加进');
+      console.log('     profile 再重新下载，然后重签，否则清单改了也不生效。');
+    }
+  }
+
   console.log('');
   console.log('To get sandbox=weak on device, ALL of these must hold:');
   console.log('  1. module.json5 declares both names            (node scripts/weak-sandbox.mjs apply)');
-  console.log('  2. the signing profile lists them under acls   (see below)');
+  console.log('  2. the signing profile lists them under acls   (see above)');
   console.log('  3. the HAP was rebuilt and re-signed afterwards');
   console.log('  4. the device runs API >= 18 (CUSTOM_SANDBOX since)');
   console.log('  5. docs/PLATFORM-ADAPTATION.md §五 V-WS-1..7 passed');
@@ -129,6 +153,33 @@ function status() {
   console.log('`acls` object of the unsigned profile template, re-sign, reinstall:');
   console.log('  ' + path.join('sdk', 'default', 'openharmony', 'toolchains', 'lib', 'UnsgnedDebugProfileTemplate.json'));
   console.log('  node scripts/weak-sandbox.mjs apply && then rebuild the HAP');
+}
+
+function profileInfo() {
+  const profilePath = 'build-profile.json5';
+  let bp = null;
+  try {
+    bp = fs.readFileSync(path.join(ROOT, profilePath), 'utf8');
+  } catch (e) {
+    return null;
+  }
+  const m = bp.match(/"profile"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (!m) return null;
+  const p = m[1].replace(/\\\\/g, '\\');
+  if (!fs.existsSync(p)) return { path: p, exists: false, acls: [] };
+  const raw = fs.readFileSync(p).toString('latin1');
+  const at = raw.indexOf('allowed-acls');
+  let acls = [];
+  if (at >= 0) {
+    const end = raw.indexOf(']', at);
+    const seg = end > at ? raw.slice(at, end) : raw.slice(at);
+    const re = /ohos\.permission\.[A-Za-z0-9_.]+/g;
+    let hit;
+    while ((hit = re.exec(seg)) !== null) {
+      if (!acls.includes(hit[0])) acls.push(hit[0]);
+    }
+  }
+  return { path: p, exists: true, acls };
 }
 
 const cmd = (process.argv[2] || 'status').toLowerCase();
