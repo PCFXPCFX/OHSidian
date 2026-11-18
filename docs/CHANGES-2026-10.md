@@ -5186,7 +5186,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 | `WebAbility.onWindowStageCreate` | 主窗 `bind` + `seedStatus(实时状态)`（S0→S1/S2，不发布）+ 启动日志 |
 | `windowStatusChange` | `onStatus(event)` → 形状迁移日志 → `applyShapePublish(result.publish)`；Round 153 自愈边改为 `result.correctTouchFullscreen`（形状条件，不再现读） |
 | 启动读 / PC 开关观察者 | `setPcMode(on)` → 机器给发布值；2in1 常量、H15 豁免、BUG-003 自由窗语义全部收在机器里 |
-| 多窗（I5） | `shouldPublishLayout()`：**只有主窗发布**，无主窗存活时才轮到子窗（G-3 的文件层竞争从结构上消失） |
+| 多窗（I5） | `shouldPublishLayout()`：**焦点窗发布**（`WINDOW_ACTIVE` 时记录 `focusedInstance`、bind 它的机器并重新发布）；无焦点信息时主窗；无主窗存活时才轮到子窗（G-3 的文件层竞争从结构上消失） |
 | `AppWindowAdapter` 六桥 | `maximize / minimize / restore / setFullScreen / setSimpleFullScreen` 全部问机器；**未绑定时回落原判据**（启动早期调用行为不变） |
 
 **由此关闭的缺陷**：
@@ -5207,7 +5207,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 2. **override（I8）仍在渲染层**：ArkTS 照写 `systemMode`，渲染层以 override 优先，语义与改造前一致；
 3. **横切 A（装饰）/ 横切 B（insets）未迁移**：`pushSafeAreaInsets`、`ensureSystemCaption`、`applyLayoutFullscreenForMode`、`forceFullscreenWindow` 仍用 `inWindowForm()/freeWindowForm()`（后者仍读实时状态），但它们**不参与发布判定**，I1 成立；迁移留到步 3；
 4. **SPLIT 只发布**，rect/inset 交给 `windowRectChange/windowSizeChange`；
-5. **焦点仲裁只做到"主窗发布"**，规格 §5.3 的"焦点窗形状优先"需要焦点事件面，下一批再做。
+5. **焦点仲裁已实现**：`windowEvent` 的 `WINDOW_ACTIVE/INACTIVE` 复用 Round 99 的焦点通道，切窗即按该窗形状重新发布。
 
 ### 五、验证
 

@@ -743,7 +743,7 @@ Bug1 四入口全部不再产生 `systemMode=touch` 日志 + V1-V15 核心行，
 | `windowStatusChange` | 事件里直接 `writeTouchModeFile(实时判据)`（Bug1 根因） | `onStatus(event)` → 形状迁移日志 → `applyShapePublish(result.publish)`（KEEP 不写盘，I3/I7） |
 | Round 153 自愈边 | `!inWindowForm() && (FLOATING\|\|MAXIMIZE)` 现读判据 | `result.correctTouchFullscreen`（形状条件，不现读） |
 | PC 开关观察者 / 启动读 | `writeTouchModeFile(pcMode)` 内含设备分支 | `setPcMode(on)` → 机器给发布值；2in1 常量、H15、BUG-003 全在机器里 |
-| 多窗仲裁（I5） | 每个窗口都写 mode 文件（G-3 竞争） | 只有**主窗**发布；无主窗存活时才轮到子窗（`shouldPublishLayout()`） |
+| 多窗仲裁（I5） | 每个窗口都写 mode 文件（G-3 竞争） | **焦点窗发布**（`WINDOW_ACTIVE` 设 `focusedInstance` 并重新发布它自己的形状）；无焦点信息时主窗发布；无主窗存活时才轮到子窗（`shouldPublishLayout()`） |
 | `maximize/minimize/restore/setFullScreen*` | 各自 `isTouchFormFactorStrict()` + 实时状态 | 问机器；**未绑定时回落到原判据**（启动早期调用行为不变） |
 
 ### 8.3 与规格的差异（如实记录）
@@ -752,7 +752,7 @@ Bug1 四入口全部不再产生 `systemMode=touch` 日志 + V1-V15 核心行，
 2. **override（I8）仍在渲染层**：`writeSystemMode` 照写，渲染层 `resolveWant` 以 override 优先，语义与改造前一致。
 3. **几何 / insets（横切 B）/ 装饰（横切 A）未迁移**：`pushSafeAreaInsets`、`ensureSystemCaption`、`applyLayoutFullscreenForMode`、`forceFullscreenWindow` 仍用 `inWindowForm()/freeWindowForm()`（其中 `freeWindowForm()` 仍读实时状态）。它们**不参与发布判定**（I1 成立），迁移留到步 3。
 4. **SPLIT 只发布**：分屏的 rect/inset 刷新交给 `windowRectChange/windowSizeChange`，不重跑自由窗几何阶梯（避免与 Round 87/92/153 打架）。
-5. **焦点仲裁只做到"主窗发布"**：规格 §5.3 的"焦点窗形状优先"需要焦点事件面（`nativeContext` 侧），下一批再做。
+5. **焦点仲裁已实现**：`windowEvent` 的 `WINDOW_ACTIVE/INACTIVE` 已有（Round 99 的 `publishFocusedWindow` 就用它），因此规格 §5.3 的"焦点窗形状优先"直接落地——切到哪个窗口就按那个窗口的形状重新发布，后台窗口不再写文件。剩余差异只有横切 A/B（装饰/insets）的迁移。
 
 ### 8.4 as-built 转移表（tablet；2in1 除发布恒 desktop 外同表）
 
@@ -776,6 +776,7 @@ Bug1 四入口全部不再产生 `systemMode=touch` 日志 + V1-V15 核心行，
 - 发布：`touch mode file updated: systemMode=…, override=…, profile=…, pcMode=…, shape=…`
 - 守卫拒绝：`maximize ignored (…)` / `minimize ignored (…)` / `restore ignored: …` /
   `setFullScreen(true|false) ignored: …`
+- 焦点仲裁：`focused window: <xcomponentId>` 之后应看到一次按该窗口形状的发布日志（或 `systemMode` 未变时的早退）
 - 启动：`window shape machine: profile=…, pcMode=false, shape=…`
 
 验收矩阵仍以规格 §十三 V1-V15 + 按钮报告 B1-B12 为准；本轮新增的重点三条：

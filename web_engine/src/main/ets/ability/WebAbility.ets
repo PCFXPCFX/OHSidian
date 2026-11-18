@@ -114,6 +114,10 @@ export class WebAbility extends WebBaseAbility {
   // when the first was destroyed - the surviving window then never received a
   // PC-mode switch. Register once, broadcast to every live instance.
   private static liveInstances: Array<WebAbility> = [];
+  // I5 (focus arbitration): the window that currently owns the layout. Set on
+  // WINDOW_ACTIVE, cleared on WINDOW_INACTIVE/destroy; null means "no focus
+  // information" and the publisher falls back to the main window.
+  private static focusedInstance: WebAbility | null = null;
   private static pcmodeObserverRegistered: boolean = false;
   private static pcmodeObserverContext: Context | undefined = undefined;
   // Round 106: process-wide once guards for side effects that write the SHARED
@@ -2947,8 +2951,20 @@ export class WebAbility extends WebBaseAbility {
           // publishFocusedWindow.
           if (type == window.WindowEventType.WINDOW_ACTIVE) {
             this.publishFocusedWindow(true);
+            // I5: focus decides BOTH who publishes the layout and whose layer-2
+            // state the window-command guards consult. Re-publishing on focus
+            // is what makes "whoever the user is looking at, wins" true without
+            // the background window ever writing the file (G-3).
+            WebAbility.focusedInstance = this;
+            WindowShapeMachine.bind(this.shapeMachine);
+            if (this.shouldPublishLayout()) {
+              this.applyShapePublish(this.shapeMachine.publishValue());
+            }
           } else if (type == window.WindowEventType.WINDOW_INACTIVE) {
             this.publishFocusedWindow(false);
+            if (WebAbility.focusedInstance === this) {
+              WebAbility.focusedInstance = null;
+            }
           }
           if (type == window.WindowEventType.WINDOW_SHOWN) {
             // Round 87 (A1): WINDOW_SHOWN is in the state machine §2 list -
@@ -3188,6 +3204,9 @@ export class WebAbility extends WebBaseAbility {
     // twice is a no-op; leaving a dead instance in the broadcast registry is
     // not.
     WebAbility.removeLiveInstance(this);
+    if (WebAbility.focusedInstance === this) {
+      WebAbility.focusedInstance = null;
+    }
     WindowShapeMachine.unbind(this.shapeMachine);
     // Keep the super chain intact (subclasses call super.onDestroy()).
     super.onDestroy();
@@ -3688,6 +3707,13 @@ export class WebAbility extends WebBaseAbility {
   // teardown ordering), so a browser/popup window can never flip the app layout
   // - the G-3 "two windows take turns reloading" file-level race.
   private shouldPublishLayout(): boolean {
+    const focused: WebAbility | null = WebAbility.focusedInstance;
+    if (focused !== null) {
+      // Spec §5.3 rule 1: the FOCUSED window shape is authoritative. A
+      // background window never flips the app layout.
+      return focused === this;
+    }
+    // Rule 2: no focus information -> the main window.
     if (this.isMainAppWindow) {
       return true;
     }
