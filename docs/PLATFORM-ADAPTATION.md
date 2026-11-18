@@ -124,3 +124,67 @@
 - 引擎派发 `contextmenu` 的代码行（符号已剥离，`HandleGestureLongPress` 等 0 命中）；
 - `reload` 后 `quit()` 的实际结果；
 - pinch 是否被转成 `wheel+ctrlKey`（建议在图片视图加一个 `wheel` capture 探针，一次两指张合即可判定）。
+## 五、弱沙箱（`CUSTOM_SANDBOX`）落地：决策与操作面
+
+> 决策：2026-11-18，采纳移交包 HB-1 的**第 ④ 条**——申请 ACL 权限
+> `ohos.permission.CUSTOM_SANDBOX`，让应用域可以 execve harmonybrew 的 adhoc 产物
+> （pandoc 等），代价是沙箱强度降级。这是四条路线里**唯一零随包体积、直接复用 brew
+> 生态**的一条；① HNP 随包（离线导出独有优势）、③ 云端/桌面侧导出仍是备选。
+
+### 5.1 权限事实（SDK `toolchains/lib/PermissionDefinitions.json` 实测）
+
+| 权限 | grantMode | availableLevel | since | 含义 |
+| --- | --- | --- | --- | --- |
+| `ohos.permission.CUSTOM_SANDBOX` | `system_grant` | `system_basic`（**ACL**） | 18 | 弱沙箱：允许应用域 execve 非系统签名产物 |
+| `ohos.permission.READ_WRITE_USER_FILE` | `system_grant` | `system_basic`（**ACL**） | 13 | 被 execve 的程序读写用户家目录（pandoc 输入/输出、`~/.pandoc`） |
+
+两条都是 `system_grant`：**没有用户授权弹窗**，授予与否只取决于签名 profile 的
+`acls` 列表。因此"装完没效果"的唯一可能原因是 profile 没挂 ACL（B-WS-5）。
+
+### 5.2 生效的五个条件（缺一条都退回强沙箱）
+
+1. `electron/src/main/module.json5` 的 `requestPermissions` 声明两条权限 →
+   `node scripts/weak-sandbox.mjs apply`；
+2. 签名 profile 的 `acls` 里含同两名（DevEco 26.0.0+ 在 IDE 里申请；
+   老工具链改 `sdk/default/openharmony/toolchains/lib/UnsgnedDebugProfileTemplate.json`
+   后重签）；
+3. 重新构建并**重签** HAP；
+4. 设备 API ≥ 18；
+5. 验证（§5.5）通过。
+
+默认构建**不带**这两条权限（`weak-sandbox.mjs revert` 回到原样）：声明了却拿不到
+ACL 的包不能当发行包用。
+
+### 5.3 代码侧已落地（第 217 轮）
+
+| 部分 | 内容 | 位置 |
+| --- | --- | --- |
+| 清单开关 | `apply` / `revert` / `status`，幂等，CRLF 安全；`status` 打印五行生效条件与 profile 路径 | `scripts/weak-sandbox.mjs` |
+| 运行时自检（WS-5） | 启动时 `checkAccessTokenSync(tokenID, CUSTOM_SANDBOX)` → 把 `sandbox: "weak"|"strong"` 写进 `ohsidian-mode.json`（字段自有合并），失败方向为 `strong` | `WebAbility.publishSandboxField()` |
+| 消费侧（WS-1） | 渲染层读该字段：诊断面板显示「沙箱形态」，pandoc 探针在**弱沙箱下 EPERM 不再讲签名故事**（B-WS-6），改为查 noexec/损坏/架构并提示先确认 ACL 生效 | `touch-mode.js` `ohsidianSandboxMode()` / `ohsidianProbeExecutable()` |
+
+### 5.4 边界（不要记错）
+
+- 弱沙箱放开的是**签名身份裁决**这一层：adhoc/自签产物可以 execve；
+- **SELinux 域策略不变**，所以仍可能出现 `EPERM`——那时原因不再是签名（B-WS-6），
+  而是域拒绝、`noexec` 挂载或文件损坏；
+- 它**不**让应用获得系统二进制/其它应用数据的访问；vault 与导出路径的可达性仍需
+  `READ_WRITE_USER_FILE` 与实际路径逐一验证（V-WS-2/V-WS-3）；
+- 开发者侧载渠道下 ACL 可调试态实测；若将来改上架，受限权限需重新过审。
+
+### 5.5 验证矩阵（弱沙箱 dev 包必跑，V-WS-1~7）
+
+1. **V-WS-1** 装完先在诊断面板确认「沙箱形态: 弱沙箱」（等价 `weak-sandbox.mjs status` + 模式文件 `sandbox=weak`）；
+2. **V-WS-2** 环境仿真：pandoc `--version` 可用后，同一路径在诊断里 verdict=`ok`；
+3. **V-WS-3** 数据边界：vault 读、导出写、`~/.pandoc` 数据目录三条路径都可达；
+4. **V-WS-4** 冷启动与 UI：大文件首次 execve 的耗时（探针超时文案已改为"超时≠坏文件"），不冻结主线程；
+5. **V-WS-5** 双形态共存：强沙箱包与弱沙箱包各自安装/升级后 `sandbox` 字段与文案都正确（B-WS-3 双版本文案漂移）；
+6. **V-WS-6** 重签回归：故意用不带 ACL 的 profile 重签一次，确认**降级为 strong 且文案不骗人**（B-WS-5）；
+7. **V-WS-7** 弱沙箱下 EPERM 残余的场景（noexec 挂载、坏二进制）文案指向正确，不再说"签名裁决"（B-WS-6）。
+
+### 5.6 仍未做（本决策的后续项）
+
+- **WS-2** 探针"环境仿真"段（真转一次 docx 的可行性判定）——需要弱沙箱包在手才能取数；
+- **WS-6** 探针异步化 + 超时预算分层——现在三段 execve 是同步的，弱沙箱下首次执行可能真的变慢；V-WS-4 取值后再决定；
+- **WS-3** 自有导出功能的 `spawn` 五条纪律（现在没有自有导出实现，先作为规范）；
+- **WS-4 收口**：插件路径执行面收窄到"只实测绝对路径"（已做第一步），"执行前确认清单"随弱沙箱包一起做。

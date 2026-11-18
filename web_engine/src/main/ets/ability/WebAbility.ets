@@ -51,6 +51,10 @@ import { PermissionManagerAdapter } from '../adapter/PermissionManagerAdapter';
 import { RunningLockAdapter } from '../adapter/RunningLockAdapter';
 import lazy { DragDropAdapter } from '../adapter/DragDropAdapter';
 import { ConfigurationConstant, common } from '@kit.AbilityKit';
+// Handover WS-5 (weak-sandbox decision): the sandbox type is a property of the
+// INSTALLED package (the signing profile's ACL list), so it is measured at
+// runtime through the access-token manager, never inferred from a build flag.
+import { abilityAccessCtrl, bundleManager } from '@kit.AbilityKit';
 // NOTE: the wantConstant re-exported by @kit.AbilityKit (@ohos.app.ability.
 // wantConstant) only knows ACTION_SEND_TO_DATA; the share actions live in
 // the legacy @ohos.ability.wantConstant namespace.
@@ -2803,6 +2807,13 @@ export class WebAbility extends WebBaseAbility {
       this.applyLayoutFullscreenForMode();
     }
 
+    // Handover WS-5 (weak-sandbox decision, HB-1 ④): publish the sandbox type
+    // before the content loads. The renderer's pandoc diagnostics consume it to
+    // tell a signature refusal (strong sandbox) from a weak-sandbox residual
+    // EPERM (B-WS-6), and a profile that silently lost its ACL shows up as
+    // sandbox=strong instead of being guessed (B-WS-5).
+    this.publishSandboxField();
+
     windowStage.getMainWindow((err, data) => {
       if (err.code) {
         LogUtil.error(TAG, 'Failed to obtain the main window: ' + JSON.stringify(err));
@@ -3700,6 +3711,57 @@ export class WebAbility extends WebBaseAbility {
         ', deviceType=' + deviceInfo.deviceType + ', pcMode=' + pcModeEnabled);
     } catch (err) {
       LogUtil.error(TAG, 'failed to write touch mode file: ' + JSON.stringify(err));
+    }
+  }
+
+  // Handover WS-5: 'weak' only when the ACL permission is actually granted.
+  // `ohos.permission.CUSTOM_SANDBOX` is system_basic / system_grant (SDK
+  // PermissionDefinitions.json, since API 18), so there is no user prompt: the
+  // signing profile either carries it in `acls` or the answer is DENIED. Any
+  // failure or unknown build answers 'strong', i.e. the direction that keeps the
+  // old diagnostic wording instead of promising an execution the app cannot do.
+  private sandboxMode(): string {
+    try {
+      const info = bundleManager.getBundleInfoForSelfSync(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_APPLICATION);
+      const tokenId: number = info.appInfo.accessTokenId;
+      const atManager = abilityAccessCtrl.createAtManager();
+      const granted: abilityAccessCtrl.GrantStatus =
+        atManager.checkAccessTokenSync(tokenId, 'ohos.permission.CUSTOM_SANDBOX');
+      return granted === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED ? 'weak' : 'strong';
+    } catch (exception) {
+      LogUtil.warn(TAG, 'sandbox probe failed, answering strong: ' + JSON.stringify(exception));
+      return 'strong';
+    }
+  }
+
+  // Publishes the sandbox type into the same field-owned mode file the renderer
+  // already polls. Field-owned merge: only `sandbox` is touched, every other
+  // field (systemMode/override/insets/...) survives exactly as it was.
+  private publishSandboxField(): void {
+    const sandbox: string = this.sandboxMode();
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const filePath: string = filesDir + '/ohsidian-mode.json';
+      let cfg: Record<string, Object> = {};
+      try {
+        if (fileIo.accessSync(filePath)) {
+          cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+          if (!cfg) {
+            cfg = {};
+          }
+        }
+      } catch (e) {
+        cfg = {};
+      }
+      if (cfg['sandbox'] === sandbox) {
+        return;
+      }
+      cfg['sandbox'] = sandbox;
+      this.publishModeFileAtomic(filePath, cfg);
+      LogUtil.info(TAG, 'sandbox mode published: ' + sandbox);
+    } catch (err) {
+      LogUtil.warn(TAG, 'failed to publish sandbox mode: ' + JSON.stringify(err));
     }
   }
 };

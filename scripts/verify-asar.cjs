@@ -146,6 +146,12 @@ try {
     'app pandoc shell probe passes path as argv': app.includes('"$0" --version'),
     'app pandoc probe absolute paths only': app.includes('这不是绝对路径（插件可能按 PATH 解析）'),
     'app pandoc settings row is diagnostics-only': app.includes('只用于本页的环境检查'),
+    // Weak-sandbox decision (HB-1 ④, 2026-11-18): ArkTS publishes the measured
+    // sandbox type into the shared mode file, the probe reads it, and EPERM in a
+    // weak-sandbox build gets the B-WS-6 wording instead of the signature story.
+    'app sandbox mode read from mode file': app.includes('function ohsidianSandboxMode') && app.includes('cfg.sandbox'),
+    'app pandoc probe weak-sandbox EPERM text': app.includes('当前是弱沙箱（CUSTOM_SANDBOX 已授予）'),
+    'app pandoc report sandbox line': app.includes('"沙箱形态: "+ohsidianSandboxLabel(sandbox)'),
     // BUG-005: the mobile toolbar must not be a window drag region - this
     // engine implements -webkit-app-region and turned every tap into a move.
     'app toolbar not a drag region': app.includes('ohsidian-toolbar-hit') && app.includes('applyToolbarHitFix'),

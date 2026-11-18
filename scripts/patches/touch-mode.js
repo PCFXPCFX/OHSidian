@@ -79,6 +79,24 @@ function readMode(){
     return JSON.parse(txt);
   }catch(e){return null}
 }
+/* Handover WS-1/WS-5 (weak-sandbox decision): ArkTS publishes the sandbox type
+   into the same mode file at boot ("sandbox": "weak"|"strong"), because the
+   sandbox strength is a property of the INSTALLED package (the signing profile's
+   ACL list), not of the JS bundle. 'weak' = ohos.permission.CUSTOM_SANDBOX is
+   granted = the app MAY execve adhoc binaries; '' = unknown (older build, or the
+   renderer booted before ArkTS wrote the field). */
+function ohsidianSandboxMode(){
+  try{
+    var cfg=readMode();
+    var s=cfg&&cfg.sandbox;
+    return (s==="weak"||s==="strong")?s:"";
+  }catch(e){return ""}
+}
+function ohsidianSandboxLabel(v){
+  if(v==="weak")return "弱沙箱（CUSTOM_SANDBOX 已授予，可执行外部二进制）";
+  if(v==="strong")return "强沙箱（CUSTOM_SANDBOX 未授予，外部二进制必然 EPERM）";
+  return "未知（旧版本，或模式文件里没有 sandbox 字段）";
+}
 /* Atomic mode-file publish (H1): writeFileSync truncates first, so a crash
    (or a concurrent ArkTS reader) could observe an empty/partial file between
    truncate and write. Write the temp file first, then rename over the
@@ -3298,10 +3316,16 @@ function ohsidianProbeExecutable(exePath,opt){
     /* Audit HB-2: the harmonybrew binary is an adhoc/unsigned ELF, and the
        platform refuses execve of it from a strong-sandbox app domain. The old
        template fell through to the "exit code" tail and told the user the
-       program had STARTED and failed internally - it never started at all. */
+       program had STARTED and failed internally - it never started at all.
+       B-WS-6: in a WEAK-sandbox build that gate is already open, so the same
+       errno means something else and must not repeat the signature story. */
     out.verdict="exec-eperm";
-    out.human="execve 报 EPERM：内核拒绝执行这个文件 —— 鸿蒙的强制代码签名 + 应用执行域裁决（与 SELinux 同级的系统策略），chmod/换路径/换调用方式都无效；" +
-      "应用层无解，只能随包分发（HNP）或在系统终端（HiShell）里使用";
+    if(opt.sandbox==="weak"){
+      out.human="execve 报 EPERM：当前是弱沙箱（CUSTOM_SANDBOX 已授予），所以这不是签名裁决 —— 逐项查：文件所在分区是否 noexec / 文件是否损坏 / 架构是否相符；刚重签过 profile 的话先确认 ACL 真的生效（诊断里的沙箱形态应为「弱沙箱」）";
+    }else{
+      out.human="execve 报 EPERM：内核拒绝执行这个文件 —— 鸿蒙的强制代码签名 + 应用执行域裁决（与 SELinux 同级的系统策略），chmod/换路径/换调用方式都无效；" +
+        "应用层无解，只能随包分发（HNP）、申请弱沙箱（CUSTOM_SANDBOX）或在系统终端（HiShell）里使用";
+    }
   }else if(out.errno==="ENOEXEC"){
     out.verdict="exec-noexec";
     out.human="execve 报 ENOEXEC：不是本机可执行格式（架构不符或缺解释器）";
@@ -3479,7 +3503,8 @@ function ohsidianVerdictLabel(v){
   return m[v]||v||"?";
 }
 function ohsidianBuildPandocReport(){
-  var lines=[],report={configured:ohsidianPandocPath(),candidates:[],at:new Date().toISOString()};
+  var sandbox=ohsidianSandboxMode();
+  var lines=[],report={configured:ohsidianPandocPath(),sandbox:sandbox,candidates:[],at:new Date().toISOString()};
   var cands=[{path:report.configured,source:"OHSidian 设置"}];
   try{
     var extra=ohsidianPluginPandocPaths();
@@ -3493,7 +3518,7 @@ function ohsidianBuildPandocReport(){
     var c=cands[i],d=null;
     lines.push("─────────────────────────────────────────");
     lines.push("候选 "+(i+1)+"／"+cands.length+"    来源: "+c.source);
-    try{d=ohsidianProbeExecutable(c.path,{timeout:2000})}catch(eP){d=null}
+    try{d=ohsidianProbeExecutable(c.path,{timeout:2000,sandbox:sandbox})}catch(eP){d=null}
     if(!d){lines.push("探针执行出错，跳过该候选");continue}
     var rl=ohsidianPathReportLines(d);
     for(var k=0;k<rl.length;k++)lines.push(rl[k]);
@@ -3535,6 +3560,7 @@ function ohsidianBuildPandocReport(){
   lines.push("· errno 是 EACCES → 先看「目标类型」是否为目录；是文件再看执行位（缺权限可以 chmod 修），权限正常才按沙箱/ACL 查。");
   lines.push("· 只有 /bin/sh 那条失败 → 问题在 shell/引号/PATH，文件本身没问题。");
   lines.push("· 文件层就报 ENOENT（软链接悬空）→ 重新安装或改链接即可。");
+  lines.push("· 弱沙箱下 EPERM 不再等于签名裁决；强沙箱下外部二进制必然失败，是平台策略而不是缺功能（见下方「沙箱形态」）。");
   /* HB-10: an at-a-glance index first - three candidates each telling their own
      story made the main cause readable only after reading the whole report. */
   var head=["结论汇总（每行一个候选，详细依据见下方）:"];
@@ -3545,6 +3571,7 @@ function ohsidianBuildPandocReport(){
       (hc.direct&&hc.direct.errno?("  · 直接: "+hc.direct.errno):"")+
       (hc.shell&&hc.shell.errno?("  · shell: "+hc.shell.errno):""));
   }
+  head.push("沙箱形态: "+ohsidianSandboxLabel(sandbox));
   head.push("报告文件：应用数据目录/ohsidian-pandoc-check.json（反馈时一并附上）");
   head.push("─────────────────────────────────────────");
   return {lines:head.concat(lines),report:report};
@@ -4240,7 +4267,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="193";
+var OHSIDIAN_PATCH_REV="194";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -4321,6 +4348,7 @@ function ohsidianBuildStatusLines(){
   row("窗口三键",(prefs.keepSystemTitleButtons===true?"保留":"不保留")+
     " · 网页字体 "+(prefs.webviewFonts===true?"开":"关"));
   row("Pandoc",(function(){try{return ohsidianPandocPath()}catch(e){return "?"}})());
+  row("沙箱",ohsidianSandboxLabel(ohsidianSandboxMode()));
   /* ---- 调试 --------------------------------------------------------- */
   sec("调试");
   var wantT=null;

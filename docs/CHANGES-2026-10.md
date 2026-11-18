@@ -5124,3 +5124,44 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 - patch rev **193**；`update-obsidian.mjs --repatch` → `verify-asar` 全绿，新增 5 条断言：`app pandoc probe exec-bit EACCES split`、`app pandoc report verdict index`、`app pandoc shell probe passes path as argv`、`app pandoc probe absolute paths only`、`app pandoc settings row is diagnostics-only`。
 - `assembleHap` BUILD SUCCESSFUL；HAP 内 `obsidian.asar` 复核 rev 193 与新文案，`modules.abc` 复核 `bridgeImmersiveId` / `windowIsMinimized` 已编入。
 - `verify-release` / `check-docs` 全绿。
+## 第 217 轮 (2026-11-18): 决策弱沙箱（HB-1 ④）——`CUSTOM_SANDBOX` 落地、沙箱形态自检与诊断分化
+
+**决策**：采纳移交包 HB-1 的**第 ④ 条**——申请 ACL 权限 `ohos.permission.CUSTOM_SANDBOX`，让应用域可以 execve harmonybrew 的 adhoc 产物（pandoc 等）。理由是四条路线里唯一**零随包体积、直接复用 brew 生态**的一条；① HNP 随包（离线导出独有优势）与 ③ 云端/桌面侧导出保留为备选。代价是沙箱强度降级，属产品级取舍，已记档。
+
+### 一、权限事实（SDK `toolchains/lib/PermissionDefinitions.json` 实测，不靠推测）
+
+| 权限 | grantMode | availableLevel | since |
+| --- | --- | --- | --- |
+| `ohos.permission.CUSTOM_SANDBOX` | `system_grant` | `system_basic`（**ACL**） | 18 |
+| `ohos.permission.READ_WRITE_USER_FILE` | `system_grant` | `system_basic`（**ACL**） | 13 |
+
+两条都是 `system_grant`：**没有授权弹窗**，授予与否只看签名 profile 的 `acls`。
+所以"装完没效果"的唯一成因就是 profile 没挂 ACL（B-WS-5），这也正是本轮要在诊断里把沙箱形态显式化（WS-5）的原因。
+
+### 二、已落地（4 项）
+
+| 编号 | 内容 | 位置 |
+| --- | --- | --- |
+| 清单开关 | `apply` / `revert` / `status` 三个动作，幂等、CRLF 安全（apply 后 revert 逐字节还原）；`status` 打印"生效五条件 + profile 模板路径" | `scripts/weak-sandbox.mjs`（新增） |
+| WS-5 运行时自检 | 启动时 `checkAccessTokenSync(tokenID, 'ohos.permission.CUSTOM_SANDBOX')`，把 `sandbox: "weak"|"strong"` 写进 `ohsidian-mode.json`（**字段自有合并**，不动 systemMode/override/insets 等任何其它字段）；任何异常一律答 `strong` | `WebAbility.publishSandboxField()` / `sandboxMode()` |
+| WS-1 消费侧 | 渲染层读该字段：设置→诊断显示「沙箱形态」一行；pandoc 报告顶部显示「沙箱形态」 | `touch-mode.js` `ohsidianSandboxMode()` / `ohsidianSandboxLabel()` |
+| B-WS-6 文案分化 | **弱沙箱下 EPERM 不再讲签名故事**（那层裁决已放开），改为查 noexec/损坏/架构并提示"先确认 ACL 真生效"；强沙箱下保留原文案并补"申请弱沙箱"这一出路 | `touch-mode.js` `ohsidianProbeExecutable()` EPERM 分支 |
+
+### 三、默认包不变（发版纪律）
+
+- 默认构建**不带**这两条权限：声明了却拿不到 ACL 的包不能当发行包；
+- 已验证：`apply` 后构建的 HAP，`module.json` 里两名都在（打包器接受）；`revert` 后重建的默认 HAP 里两名都不在（`IndexOf = -1`）；
+- 弱沙箱包必须由"带 ACL 的 profile 重签"产生，装完先在诊断里确认 `沙箱形态: 弱沙箱`。
+
+### 四、验证
+
+- `weak-sandbox.mjs` apply → `assembleHap` BUILD SUCCESSFUL（manifest 合法）→ revert → 重建 BUILD SUCCESSFUL；
+- HAP `ets/modules.abc` 内确认 `publishSandboxField` / `sandboxMode` 已编入；
+- HAP 内 `obsidian.asar`：`OHSIDIAN_PATCH_REV=194`、`ohsidianSandboxMode`、弱沙箱 EPERM 文案均在；
+- `verify-asar` 新增 3 条断言全绿：`app sandbox mode read from mode file`、`app pandoc probe weak-sandbox EPERM text`、`app pandoc report sandbox line`；`verify-release` / `check-docs` 全绿。
+
+### 五、后续（本轮不做）
+
+1. **profile ACL 由用户侧配置**：DevEco 26.0.0+ 在 IDE 里申请；老工具链改 `UnsgnedDebugProfileTemplate.json` 的 `acls` 后重签——步骤写进 `docs/PLATFORM-ADAPTATION.md` §五 5.2；
+2. **WS-2 环境仿真段 / WS-6 探针异步化与超时分层 / WS-4 执行面收口**：都要弱沙箱包在手才能取数（V-WS-2/4/7），V-WS 矩阵已补进 §五 5.5；
+3. **WS-3 自有导出 `spawn` 纪律**：现在没有自有导出实现，先作规范保留。
