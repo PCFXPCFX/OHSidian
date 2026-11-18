@@ -745,10 +745,11 @@ export class WebAbility extends WebBaseAbility {
       // setWindowTitleMoveEnabled(!hideTitleBar) with hideTitleBar=true
       // (frameless BrowserWindow), which DISABLES the drag capability.
       // Showing the decor buttons alone does not restore it - dragging
-      // stayed dead ("title bar cannot move the window"). The engine
-      // has no -webkit-app-region implementation either (verified in
-      // libelectron.so: no DraggableRegions interface), so the WMS
-      // caption is the only drag surface and it must always be movable.
+      // stayed dead ("title bar cannot move the window"). The engine DOES map
+      // web-side -webkit-app-region to a window move, but only on the
+      // borderless path (rounds 182/183, BUG-005); with the system caption
+      // forced on here that path is not the drag surface, so the WMS caption
+      // must always be movable.
       winObj.setWindowTitleMoveEnabled(true);
       this.captionApplied = true;
       return true;
@@ -2824,7 +2825,21 @@ export class WebAbility extends WebBaseAbility {
             } else if (status === window.WindowStatusType.FULL_SCREEN ||
               status === window.WindowStatusType.MAXIMIZE) {
               this.writeTouchModeFile(this.pcModeEnabled);
+            } else if (status === window.WindowStatusType.SPLIT_SCREEN &&
+              deviceInfo.deviceType !== 'phone') {
+              // Handover WM-5 (G-4): SPLIT_SCREEN is one of the five official
+              // window status values and belongs to the free-window family on a
+              // tablet - the desktop layout FLOATING already publishes. It used
+              // to fall outside this whitelist and publish nothing, so a split
+              // window kept whatever the previous shape had published. Phones
+              // are excluded on purpose: there SPLIT is still the mobile layout.
+              this.writeTouchModeFile(this.pcModeEnabled);
             }
+            // MINIMIZE and any value outside the official enum publish
+            // NOTHING: minimizing is a visibility change, not a form change
+            // (S6 - the restore event publishes the returning shape), and a
+            // failed/unknown read must not move the layout (S7, same
+            // "failure must not change anything" direction as audit P2-2).
           }
           // Round 153: in the touch form factor the window must BE the
           // display. A status event that reports a floating/maximized window
@@ -3032,11 +3047,13 @@ export class WebAbility extends WebBaseAbility {
         }
       }
       try {
-        // Title-drag lives on the SYSTEM caption (the engine has no
-        // -webkit-app-region support), and pushSafeAreaInsets re-shows the
-        // caption for free windows - so the move capability must follow the
-        // caption, not hideTitleBar. Enabling it unconditionally is safe:
-        // fullscreen windows have no caption strip to drag.
+        // Title-drag lives on the SYSTEM caption here: pushSafeAreaInsets
+        // re-shows the caption for free windows, so the move capability must
+        // follow the caption, not hideTitleBar. (The engine also maps web-side
+        // -webkit-app-region to a window move, but only on the borderless path
+        // - rounds 182/183 - so it is not a substitute while the caption is
+        // shown.) Enabling it unconditionally is safe: fullscreen windows have
+        // no caption strip to drag.
         mainWin.setWindowTitleMoveEnabled(true);
       } catch (exception) {
         LogUtil.warn(TAG, 'Failed to set window title move enabled: ' + JSON.stringify(exception));
@@ -3613,11 +3630,20 @@ export class WebAbility extends WebBaseAbility {
   private writeTouchModeFile(pcModeEnabled: boolean) {
     // systemMode follows the PC-mode switch on every touch-capable form
     // factor. H9: the phone previously hard-coded 'touch' even with PC mode
-    // on (external keyboard/mouse); H15: 2in1 joins so an observer-driven
-    // touch-mode switch reaches the renderer. Non-touch types keep 'desktop'.
+    // on (external keyboard/mouse). Non-touch types keep 'desktop'.
     let systemMode: string = 'desktop';
-    if (deviceInfo.deviceType === 'phone' || deviceInfo.deviceType === 'tablet' ||
-      deviceInfo.deviceType === '2in1') {
+    // Handover WM-3 / Bug1-R2 (D1 in docs/window-state-machine.md §7.2): 2in1 is
+    // a DESKTOP-only profile, so its publish value is a PROFILE CONSTANT and not
+    // a function of the PC switch. That switch is not guaranteed to exist on
+    // 2in1 (H15 skips the boot read, so it answers 'false'), which is why the
+    // old shared branch published systemMode='touch' on the FIRST maximize
+    // event: the boot path wrote nothing (desktop, missing key) while the event
+    // path wrote touch - the asymmetry the reporter saw as "maximize restarts
+    // into the mobile layout". The renderer's `override` still lets a 2in1 user
+    // force either layout, so no user intent is lost.
+    if (deviceInfo.deviceType === '2in1') {
+      systemMode = 'desktop';
+    } else if (deviceInfo.deviceType === 'phone' || deviceInfo.deviceType === 'tablet') {
       // BUG-003: a tablet free window is the desktop form even when the PC
       // switch reads false; otherwise the renderer applies the mobile layout
       // inside a 1960x1593 resizable window.

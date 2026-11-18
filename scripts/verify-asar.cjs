@@ -130,10 +130,13 @@ try {
     // this.setting.refreshSearch(). Passing null (rounds 168-176) killed the
     // registration with a message that pointed at the search component instead.
     'app settings tab constructed with the modal': app.includes('new Base(window.app,s)') && app.includes('ohsidianSettingsTabBase'),
-    // BUG-004 probe — TEMPORARY: ships so the reporter can answer "ENOENT vs
-    // EACCES" in one click. Remove this marker together with the probe code,
-    // its command and its settings button in the version after next.
+    // Pandoc diagnostics: permanent feature (introduced as the BUG-004 probe,
+    // promoted after the 2026-11-17 handover audit). The verdict table must keep
+    // the two shapes that audit found missing: EPERM (platform refusal of an
+    // adhoc binary) and a directory target (a Cellar keg is not a binary).
     'app pandoc environment check (feature)': app.includes('ohsidianBuildPandocReport') && app.includes('ohsidianPandocPath'),
+    'app pandoc probe EPERM verdict': app.includes('execve 报 EPERM'),
+    'app pandoc probe directory target': app.includes('target-is-directory') && app.includes('isDirectory&&'),
     // BUG-005: the mobile toolbar must not be a window drag region - this
     // engine implements -webkit-app-region and turned every tap into a move.
     'app toolbar not a drag region': app.includes('ohsidian-toolbar-hit') && app.includes('applyToolbarHitFix'),

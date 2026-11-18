@@ -5049,3 +5049,33 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 触屏模式布局（移动工具栏/导航/抽屉/安全区）与 2.0.0 一致；
 5. 绘图工具激活时笔尖点界面 → 出现一次提示，手指操作正常；
 6. 反向风险：个别按 `Platform.isMobile` 分支的插件拿到 Node 后是否有异常行为。
+## 第 215 轮 (2026-11-18): 接收 2026-11-17 审计移交包——窗口/布局线与 pandoc 线的落地项与延后项
+
+**输入**：外部审计移交包（8 份报告，审计基线 HEAD `e528275`）：线 A 窗口/布局（Bug1 最大化→自动重启变移动端、G-1~G-7、DB-1~12、三层状态机规格），线 B pandoc/鸿蒙能力（三候选 errno 定性、能力面全景、弱沙箱路线、WS-1~8）。本轮先逐条对当前 HEAD（`c5705d4`，2.0.1）复核锚点，再按"低风险先落、行为变化单独隔离"的顺序落地。
+
+### 一、已落地（8 项）
+
+| 编号 | 内容 | 代码位置 | 为什么安全 |
+| --- | --- | --- | --- |
+| WM-3（=Bug1 R2 / D1） | 2in1 的模式发布值常量化：`windowStatusChange` 的 MAXIMIZE/FULL_SCREEN 分支不再按 `window_pcmode_switch_status` 发布 | `WebAbility.ets` `writeTouchModeFile()` | 2in1 上该键不保证存在（H15），旧代码在**第一次最大化**时把 `systemMode` 写成 `touch`，而启动路径根本不写——这正是报障用户（2in1 + 隐藏标题栏）"最大化→重载→移动布局"的确定性成因。改后发布值与启动默认一致（desktop）；渲染层 `override` 仍可强制任一布局，用户意图不丢失 |
+| WM-2（=G-1 入口 4 / DB-1） | `setFullScreen` / `setSimpleFullScreen` 补形态守卫 | `AppWindowAdapter.ets` | 与既有 maximize/minimize/setBounds 守卫同向：触摸形态下窗口本身就是整屏，`ENTER_IMMERSIVE` 只会再产生一次 MAXIMIZE/FULL_SCREEN 事件（Bug1 那条"事件→模式文件→重载"链路）。守卫用**实时窗口状态**判据（FULL_SCREEN/MAXIMIZE 才算"已经是整屏"），平板 PC 关下的真实自由窗（FLOATING）仍可进沉浸；状态读失败保持原行为 |
+| WM-5（=G-4） | 五枚举全覆盖：`SPLIT_SCREEN` 归入自由窗族发布 desktop（手机除外），`MINIMIZE`/未知值显式不发布 | `WebAbility.ets` 状态监听器 | 分屏在平板本就属于自由窗形态（`freeWindowForm()` 对 SPLIT 已返回 true），旧代码只是没把它放进白名单，导致分屏后沿用上一形态的发布值；最小化/未知值按"不改变"方向显式留空 |
+| WM-10（=DB-3） | 4 处"引擎不实现 `-webkit-app-region`"的过时注释更正 | `WebAbility.ets` ×2、`AppWindowAdapter.ets`、`docs/window-state-machine.md` | 第 182/183 轮真机已定案：引擎**会**把 web 侧 app-region 转成窗口移动，只是仅限无边框路径。旧注释会把后来人引向错误的兜底方案 |
+| HB-2 | pandoc 诊断探针补 `EPERM` 分支 | `scripts/patches/touch-mode.js`（patch rev 192） | 旧模板把 EPERM 落到"能启动但退出码非零"的兜底句，等于告诉用户"问题在这个程序内部"——实际程序从未启动。新文案写明这是内核裁决（强制代码签名 + 应用执行域），应用层无解 |
+| HB-3 | 探针补"目标是目录"特判 | 同上 | 已拿到 `stat` 却未查 `isDirectory()`：Cellar keg 目录被 execve 必然 EACCES，旧文案把锅甩给 SELinux。现在直接给"目标类型: 目录"+ 正确写法（`.../Cellar/pandoc/<版本>/bin/pandoc`），并跳过无意义的 execve 实测 |
+| HB-5 | 探针身份转正 | 探针头注释 + `verify-asar.cjs` | 它早已是用户可见的设置项/命令（不是一次性探针），注释里的 "TEMPORARY / REMOVE" 与门禁里 "remove in the version after next" 都是会误导维护者的死约定；本轮统一为永久特性，门禁改为断言 EPERM/目录两条分支 |
+| HB-4① | `http/https` 外呼改 `openLink`（保留隐式 Want 兜底） | `ExternalProtocolAdapter.ets` | 官方自 API 12 起推荐应用链接方式；失败/不支持时仍走原 `startAbility`，行为单调降级，不会比 2.0.1 更差；`mailto/tel/obsidian` 保持 Deep Linking 语义不动 |
+
+### 二、明确延后（以及为什么）
+
+1. **WM-1（=Bug1 R1，平板 PC 关 + 自由多窗下的最大化）**：状态机规格 D4 要求把 S4（最大化）发布为 desktop。但当前实现里 `writeTouchModeFile` 的"实时读形态"同时承担了一个**自愈**职责：平板关闭自由多窗回到整屏时，只能靠"此刻不是 FLOATING"把发布值翻回 touch。若只把 MAXIMIZE 改成 desktop 而不引入转移起点状态（规格第 2 层 + I2），会出现"关掉自由多窗后仍停在移动布局"的回退。**没有真机验证窗口的前提下不落这一项**；规格 §6.2（发布函数）/§6.3（转移表）已具备，待有设备可回归时按步 2 整体落地（同批含 WM-4 多窗仲裁、WM-6 中间态）。
+2. **WM-9/11/12/13/14（装饰子机、SetMovable 收编、辅助窗口线）**：属状态机步 3 的结构性收敛，改动面横跨按钮可见性四个写点与三条辅助窗口线，验收矩阵 B1-B12 全在真机。单独落风险大于收益。
+3. **HB-1（pandoc 产品路线）**：四条出路里 ① HNP / ④ 弱沙箱都涉及构建变体、签名身份与包体（pandoc ~273MB），是产品决策 + 工程立项，不是本轮代码改动。诊断面板按 HB-2/HB-3 修好文案后，正好可作为 ④ 快验的判定工具。
+4. **HB-6（插件 `spawn()` 无 error 监听）**：在渲染进程给 `child_process.spawn` 打全局猴补丁影响所有插件；以"诊断面板可感知"替代更稳。
+
+### 三、复核与门禁
+
+- 锚点复核：移交包基线 `e528275` 与当前 HEAD 差两个版本（2.0.0→2.0.1），`WebAbility.ets` / `AppWindowAdapter.ets` / `touch-mode.js` 行号已漂移，全部按唯一子串重定位后再改。
+- `verify-asar.cjs` 新增两条断言：`app pandoc probe EPERM verdict`、`app pandoc probe directory target`。
+- `node scripts/update-obsidian.mjs --repatch` → `verify-asar` 全绿；`verify-release` / `check-docs` 全绿；`assembleHap` BUILD SUCCESSFUL。
+- 真机仍需确认（本机不可替代）：① 2in1 隐藏标题栏 → 最大化不再重载、布局不变；② 平板 PC 关自由窗最大化行为与 2.0.1 一致（本轮**未**改这条）；③ F11/菜单全屏在触摸形态被忽略且日志可见；④ 平板分屏后发布 desktop、手机分屏仍移动布局；⑤ pandoc 诊断面板对 Cellar 目录与 EPERM 两条候选给出正确结论。

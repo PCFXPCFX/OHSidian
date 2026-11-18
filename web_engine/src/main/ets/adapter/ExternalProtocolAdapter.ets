@@ -29,6 +29,9 @@
 
 import { inject, injectable } from 'inversify';
 import { Want, wantConstant } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
+import common from '@ohos.app.ability.common';
+import OpenLinkOptions from '@ohos.app.ability.OpenLinkOptions';
 import uri from '@ohos.uri';
 
 import { BaseAdapter } from '../common/BaseAdapter';
@@ -64,6 +67,39 @@ export class ExternalProtocolAdapter extends BaseAdapter {
       LogUtil.error(ExternalProtocolAdapter.TAG, 'openExternal: scheme not allowed: ' + scheme);
       return;
     }
+    // Handover HB-4 (2026-11-17 audit, capability upgrade - not a defect): for
+    // http/https the official entry since API 12 is the application-link call
+    // `openLink`, not an implicit Want. It validates the target and lets the
+    // system fall back to the browser when no App Linking target is installed;
+    // `mailto`/`tel`/`obsidian` are Deep Linking cases and stay on the implicit
+    // Want. A failed/unsupported openLink falls back to the Want path, so a
+    // device that answered the old way keeps working.
+    if (scheme === 'http' || scheme === 'https') {
+      const uiContext = this.ctxAdapter.getActiveContext() as common.UIAbilityContext;
+      if (uiContext) {
+        try {
+          // appLinkingOnly=false = allow the ordinary browser/web handler.
+          const options: OpenLinkOptions = { appLinkingOnly: false };
+          uiContext.openLink(urlStr, options)
+            .then(() => {
+              LogUtil.info(ExternalProtocolAdapter.TAG, 'openExternal: openLink ok');
+            })
+            .catch((err: BusinessError) => {
+              LogUtil.warn(ExternalProtocolAdapter.TAG,
+                'openExternal: openLink failed (' + JSON.stringify(err) + '), falling back to implicit Want');
+              this.launchImplicit(urlStr);
+            });
+          return;
+        } catch (exception) {
+          LogUtil.warn(ExternalProtocolAdapter.TAG,
+            'openExternal: openLink threw (' + JSON.stringify(exception) + '), falling back to implicit Want');
+        }
+      }
+    }
+    this.launchImplicit(urlStr);
+  }
+
+  private launchImplicit(urlStr: string): void {
     const want: Want = {
       flags: wantConstant.Flags.FLAG_START_WITHOUT_TIPS,
       uri: urlStr

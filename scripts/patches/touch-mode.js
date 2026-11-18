@@ -3175,16 +3175,20 @@ function restoreSystemFonts(){
     try{new Notice("OHSidian: 已恢复系统字体 (HarmonyOS Sans)")}catch(e){}
   }catch(e){}
 }
-/* ===== BUG-004 PROBE — TEMPORARY (remove in the version after next) =====
-   The reporter's Pandoc export fails with
+/* ===== PANDOC ENVIRONMENT DIAGNOSTICS =====
+   The reported failure message is
      /bin/sh: /storage/.../.harmonybrew/bin/pandoc: inaccessible or not found
    and toybox merges ENOENT (gone / dangling symlink) with EACCES (exists but
-   not executable - which includes a SELinux denial) into that one sentence, so
-   the cause cannot be read off the message. This probe separates them in one
-   click: file layer (lstat / realpath / stat / access X_OK) plus one real
-   execve of `--version`, then shows the whole result in a dialog.
-   REMOVE this block together with its command, its settings button and its
-   verify-asar marker once the reporter has run it. */
+   not executable) into that one sentence, so the cause cannot be read off the
+   message. This check separates them in one click: file layer (lstat /
+   realpath / stat / access X_OK) plus one real execve of `--version`, then
+   shows the whole result in a dialog.
+   Status: permanent (was introduced as the BUG-004 probe). The verdict table
+   now also covers the two shapes the audit of the diagnostic itself found:
+   EPERM (kernel/signature refusal - the harmonybrew adhoc binary case) and
+   "target is a directory" (a Cellar keg directory is not a binary, and a
+   directory target always fails with EACCES). Keep the verdict table in sync
+   with docs/PLATFORM-ADAPTATION.md A6. */
 /* Pandoc environment check - a FEATURE, not a throwaway probe.
    Product shape: the path is a setting (OHSidian → 诊断), the check only runs
    when asked, results are shown in place, and nothing here fires at startup -
@@ -3212,7 +3216,7 @@ function ohsidianProbeExecutable(exePath,opt){
   opt=opt||{};
   var out={path:exePath,isLink:false,target:"",exists:false,size:0,mode:"",execBits:false,
     xOk:false,fsErr:"",verdict:"unknown",human:"",errno:"",status:null,signal:null,version:"",
-    dirOk:false};
+    dirOk:false,isDir:false};
   var fs2,np;
   try{fs2=require("fs");np=require("path")}catch(e){out.verdict="no-node";out.human="渲染进程里没有 Node 的 fs";return out}
   var probePath=exePath;
@@ -3226,6 +3230,7 @@ function ohsidianProbeExecutable(exePath,opt){
     var st=fs2.statSync(probePath);
     out.exists=true;
     out.size=st.size;
+    out.isDir=!!(st.isDirectory&&st.isDirectory());
     out.execBits=(st.mode&0o111)!==0;
     out.mode="0"+(st.mode&0o777).toString(8);
     try{fs2.accessSync(probePath,fs2.constants.X_OK);out.xOk=true}catch(eA){out.xOk=false}
@@ -3242,6 +3247,16 @@ function ohsidianProbeExecutable(exePath,opt){
       out.verdict="stat-error";
       out.human="文件预检失败（"+(out.fsErr||"?")+"）："+exePath;
     }
+    return out;
+  }
+  /* The stat is already in hand, so "the target is a directory" costs no extra
+     IO. Without this branch execve on a Cellar keg DIRECTORY answers EACCES and
+     the old template blamed SELinux/sandbox (audit HB-3: the plugin's
+     harmonybrew/Cellar/pandoc candidate is exactly this shape). */
+  if(out.isDir){
+    out.verdict="target-is-directory";
+    out.human="目标是一个目录，不是可执行文件：execve 目录必然失败（EACCES），与 SELinux/沙箱无关。改成目录里的 bin/pandoc：" +
+      exePath.replace(/\/+$/,"") + "/<版本>/bin/pandoc";
     return out;
   }
   if(opt.fsOnly){
@@ -3270,6 +3285,14 @@ function ohsidianProbeExecutable(exePath,opt){
   }else if(out.errno==="EACCES"){
     out.verdict="exec-eacces";
     out.human="execve 报 EACCES：文件存在但被拒绝执行 —— SELinux/沙箱限制，应用层绕不过去，只能换位置或换方案";
+  }else if(out.errno==="EPERM"){
+    /* Audit HB-2: the harmonybrew binary is an adhoc/unsigned ELF, and the
+       platform refuses execve of it from a strong-sandbox app domain. The old
+       template fell through to the "exit code" tail and told the user the
+       program had STARTED and failed internally - it never started at all. */
+    out.verdict="exec-eperm";
+    out.human="execve 报 EPERM：内核拒绝执行这个文件 —— 鸿蒙的强制代码签名 + 应用执行域裁决（与 SELinux 同级的系统策略），chmod/换路径/换调用方式都无效；" +
+      "应用层无解，只能随包分发（HNP）或在系统终端（HiShell）里使用";
   }else if(out.errno==="ENOEXEC"){
     out.verdict="exec-noexec";
     out.human="execve 报 ENOEXEC：不是本机可执行格式（架构不符或缺解释器）";
@@ -3295,11 +3318,12 @@ function ohsidianPathReportLines(d){
   L.push("是否软链接: "+(d.isLink?"是":"否")+(d.isLink?("  →  "+d.target):""));
   L.push("目标存在: "+(d.exists?"是":"否")+(d.exists?("  ("+d.size+" B)"):""));
   if(d.exists){
+    L.push("目标类型: "+(d.isDir?"目录（不是可执行文件）":"文件"));
     L.push("权限位: "+d.mode+"   执行位: "+(d.execBits?"有":"无")+"   访问(X_OK): "+(d.xOk?"通过":"不通过"));
   }
   L.push("上级目录可读: "+(d.dirOk?"是":"否"));
   L.push("文件层错误: "+(d.fsErr||"无"));
-  if(d.verdict!=="fs-ok"&&d.verdict!=="fs-suspect"){
+  if(d.verdict!=="fs-ok"&&d.verdict!=="fs-suspect"&&d.verdict!=="target-is-directory"){
     L.push("execve 结果: errno="+(d.errno||"无")+"  exit="+(d.status===null?"-":String(d.status))+
       "  signal="+(d.signal||"无"));
     L.push("程序输出首行: "+(d.version||"（无）"));
@@ -3307,6 +3331,13 @@ function ohsidianPathReportLines(d){
   L.push("");
   if(d.verdict==="exec-eacces"){
     L.push("说明: 文件层检查通过、execve 仍被拒 → 这是系统级执行限制（不是路径写错，也不是文件损坏）。");
+  }else if(d.verdict==="exec-eperm"){
+    L.push("说明: 程序根本没有启动 —— 平台在 execve 处拒绝了这个文件（强制代码签名 + 应用执行域裁决）。");
+    L.push("      这不是路径写错、不是权限位问题、也不是程序内部报错；应用侧改路径/chmod/换调用方式都不会改变结局。");
+    L.push("      可行方向：随包分发（HNP 携带并签名二进制）或在系统终端（HiShell）里使用；见 docs/PLATFORM-ADAPTATION.md A6。");
+  }else if(d.verdict==="target-is-directory"){
+    L.push("说明: 插件配置指向的是一个 keg 目录。execve 目录永远失败（EACCES），与 SELinux/沙箱无关。");
+    L.push("      正确写法是目录里的可执行文件全路径（Cellar/pandoc/<版本>/bin/pandoc）。");
   }else if(d.verdict==="missing"){
     L.push("说明: 路径或软链接目标不存在 → 重新安装/修正链接即可，应用层可以顺手做路径预检。");
   }else if(d.verdict==="ok"){
@@ -3437,6 +3468,12 @@ function ohsidianBuildPandocReport(){
     if(!d){lines.push("探针执行出错，跳过该候选");continue}
     var rl=ohsidianPathReportLines(d);
     for(var k=0;k<rl.length;k++)lines.push(rl[k]);
+    if(d.verdict==="target-is-directory"){
+      lines.push("");
+      lines.push("→ 跳过 execve 实测：目标不是可执行文件，execve 目录必然 EACCES。");
+      report.candidates.push({source:c.source,file:d,direct:null,shell:null});
+      continue;
+    }
     var modes=ohsidianProbeExecModes(c.path,2000);
     lines.push("");
     lines.push("→ 直接 execve（Pandoc Plugin 的调用方式）: "+
@@ -3453,7 +3490,8 @@ function ohsidianBuildPandocReport(){
   lines.push("怎么读这份结果：");
   lines.push("· Pandoc Plugin 用 spawn()，而且没有挂 error 监听 —— execve 失败时它既不报错也不结束，这就是\"没有报错原因\"的来源。");
   lines.push("· Pandoc GUI 用 exec()（/bin/sh -c），同一个失败会显示成 /bin/sh: … inaccessible or not found。");
-  lines.push("· 两种方式都失败、且 errno 都是 EACCES → 系统拒绝执行该文件（SELinux 一类），应用层绕不过去。");
+  lines.push("· 两种方式都失败、且 errno 都是 EPERM → 平台拒绝执行（强制代码签名 + 执行域裁决），不是路径写错，应用层无解。");
+  lines.push("· errno 是 EACCES → 先看「目标类型」是否为目录（Cellar keg 目录）；是文件则查执行位/沙箱策略。");
   lines.push("· 只有 /bin/sh 那条失败 → 问题在 shell/引号/PATH，文件本身没问题。");
   lines.push("· 文件层就报 ENOENT（软链接悬空）→ 重新安装或改链接即可。");
   return {lines:lines,report:report};
@@ -3478,7 +3516,7 @@ function ohsidianRunPandocProbe(){
   ohsidianShowReportModal("OHSidian 诊断: Pandoc 环境",r.lines);
   ohsidianWritePandocReport(r.report);
 }
-/* ===== end BUG-004 PROBE ===== */
+/* ===== end pandoc diagnostics ===== */
 
 /* BUG-002 user switch. "No frame => no system trio" is right by default, but
    some users WANT the native buttons while keeping Obsidian's 隐藏 frame style
@@ -4148,7 +4186,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="191";
+var OHSIDIAN_PATCH_REV="192";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the

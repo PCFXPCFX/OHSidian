@@ -134,6 +134,29 @@ export class AppWindowAdapter extends BaseAdapter {
     return this.isTouchFormFactorStrict();
   }
 
+  // Handover WM-2 (G-1 entry 4): `setFullScreen` / `setSimpleFullScreen` had no
+  // form-factor guard at all, while maximize/minimize/restore have one. On a
+  // touch form factor the window IS the display, so ENTER_IMMERSIVE has nothing
+  // to add - it only produces a MAXIMIZE/FULL_SCREEN status event that the
+  // publish path then has to interpret (the Bug1 "event -> mode file -> reload"
+  // class). The predicate deliberately needs the LIVE status and not just the
+  // form factor: on a tablet without PC mode a genuine FREE window (FLOATING) is
+  // still allowed to go immersive, and only a window that is already fullscreen
+  // or maximized is a no-op. A status read failure keeps the old behaviour
+  // ("failure must not change anything").
+  private touchWindowAlreadyDisplay(windowClass: window.Window | undefined): boolean {
+    if (!windowClass || !this.isTouchFormFactorStrict()) {
+      return false;
+    }
+    try {
+      const st: number = windowClass.getWindowStatus() as number;
+      return st === window.WindowStatusType.FULL_SCREEN || st === window.WindowStatusType.MAXIMIZE;
+    } catch (exception) {
+      LogUtil.warn(TAG, 'fullscreen guard status read failed: ' + JSON.stringify(exception));
+      return false;
+    }
+  }
+
   // Audit P2-2: for a DESTRUCTIVE decision (skip the engine's remembered-rect
   // restore) a settings read failure must NOT be translated into "touch".
   // Only a successful read of 'false' counts as touch on a tablet; unknown or
@@ -633,6 +656,13 @@ export class AppWindowAdapter extends BaseAdapter {
 
   @LogMethod
   setFullScreen(fullScreen: boolean, id: number) {
+    // Handover WM-2: see touchWindowAlreadyDisplay. Window form factors keep the
+    // engine's explicit intent (F11 / View menu / plugin) unchanged.
+    if (this.touchWindowAlreadyDisplay(this.getWindow(id))) {
+      LogUtil.info(TAG, 'setFullScreen(' + fullScreen + ') ignored: window ' + id +
+        ' is already the display on the touch form factor');
+      return;
+    }
     if (fullScreen) {
       let windowClass = this.getWindow(id);
       if (!windowClass) {
@@ -651,6 +681,13 @@ export class AppWindowAdapter extends BaseAdapter {
 
   @LogMethod
   setSimpleFullScreen(fullScreen: boolean, id: number) {
+    // Handover WM-2: same guard as setFullScreen (the F11/double-click simple
+    // fullscreen path is the second entry into ENTER_IMMERSIVE).
+    if (this.touchWindowAlreadyDisplay(this.getWindow(id))) {
+      LogUtil.info(TAG, 'setSimpleFullScreen(' + fullScreen + ') ignored: window ' + id +
+        ' is already the display on the touch form factor');
+      return;
+    }
     if (fullScreen) {
       let windowClass = this.getWindow(id);
       if (!windowClass) {
@@ -1023,12 +1060,12 @@ export class AppWindowAdapter extends BaseAdapter {
         return;
       }
       windowClass?.setWindowDecorVisible(useNativeFrame);
-      // Keep title-bar dragging enabled regardless of the frame style: on
-      // this engine the web content has no -webkit-app-region support, so
-      // the system caption is the only drag surface. When the native frame
-      // is hidden (Obsidian-drawn style), the WMS caption strip is not
-      // drawn anyway, so enabling move costs nothing and keeps free
-      // windows draggable whenever the caption is re-shown.
+      // Keep title-bar dragging enabled regardless of the frame style: the WMS
+      // caption is the drag surface whenever it is shown, and setUseNativeFrame
+      // can hide it without touching the capability (round-56 "title bar cannot
+      // move" root cause). Web-side -webkit-app-region is a SECOND surface that
+      // this engine honours only on the borderless path (rounds 182/183), so it
+      // is not a substitute while the caption is drawn.
       windowClass?.setWindowTitleMoveEnabled(true);
       let preferences: WindowPreferences | undefined = proxy?.getWindowPreferences();
       if (preferences) {

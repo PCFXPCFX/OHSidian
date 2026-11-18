@@ -12,7 +12,8 @@
 | A2 | `isPhone` 由**视口** `matchMedia` 判定 | `rd.isTablet=i.matches,rd.isPhone=!i.matches`，`i=window.matchMedia("(min-width:600px) and (min-height:600px)")`；该段**只在触摸模式的 EmulateMobile 分支里执行** | 桌面模式 `isPhone` 恒 false；触摸模式下按视口宽高判 tablet/phone，小窗触摸会被判成 phone 布局 | 目前无实际症状，观察为主 |
 | A3 | 更新链接硬拼平台 | `app.js@1170582`：`"win32"===t?"win":"darwin"===t?"mac":"linux"` | "检查更新"给出 linux/x64 安装包链接，鸿蒙上无法安装（当前更新器已禁，影响小） | 返回 HAP 下载页或官网 |
 | A4 | ctime 假设 | `app.js@3710117`：`"win32"!==pne&&"darwin"!==pne` | 文件时间戳分支按 Linux 走，优先级低 | 暂不处理 |
-| A5 | 插件 `require` 被移动模拟门控（**已修，2.0.0**） | `loadPlugin` 的 shim：`a=document.body.hasClass("emulate-mobile")`，命中时白名单（仅 `obsidian` + CodeMirror 6 + Lezer）之外的模块一律 `null` | 触屏模式下凡顶层 `require` Node 模块的插件直接抛错 →「插件加载失败」；懒加载的则设置页空白。**本移植的渲染层有完整 Node**（内核自己就用 `window.require` 取 `fs`/`electron`），`null` 是纯策略误判 | 已把判据常量化为 `a=!1`（保留白名单优先），触屏模式与桌面模式插件语义一致；`verify-asar` 有正/负断言。布局侧的 `isMobile/isTablet/isPhone` 分支不受影响 |
+| A5 | 插件 `require` 被移动模拟门控（**已修，2.0.1**） | `loadPlugin` 的 shim：`a=document.body.hasClass("emulate-mobile")`，命中时白名单（仅 `obsidian` + CodeMirror 6 + Lezer）之外的模块一律 `null` | 触屏模式下凡顶层 `require` Node 模块的插件直接抛错 →「插件加载失败」；懒加载的则设置页空白。**本移植的渲染层有完整 Node**（内核自己就用 `window.require` 取 `fs`/`electron`），`null` 是纯策略误判 | 已把判据常量化为 `a=!1`（保留白名单优先），触屏模式与桌面模式插件语义一致；`verify-asar` 有正/负断言。布局侧的 `isMobile/isTablet/isPhone` 分支不受影响 |
+| A6 | 应用内 execve 外部二进制被内核拒绝（**诊断已修正，第 215 轮**） | 诊断面板三候选：`.../Cellar/pandoc/3.12.1/bin/pandoc` 文件层全绿却 `EPERM`；`.local/share/pandoc` `ENOENT`；`harmonybrew/Cellar/pandoc` `EACCES`（目标是目录） | 旧探针模板只有 ENOENT/EACCES/ENOEXEC/ETXTBSY/超时，`EPERM` 落到"能启动但退出码非零"的兜底句 → 误报"问题在这个程序内部"；目录目标被误报成 SELinux/沙箱拒绝 | 已补 `EPERM` 分支（强制代码签名 + 应用执行域裁决，路径/chmod/调用方式均无效，应用层无解：HNP 随包或 HiShell）与 `isDirectory()` 特判（给出正确写法 `<keg>/<版本>/bin/pandoc`，并跳过无意义的 execve 实测）。能力出路本身是产品决策（HB-1） |
 
 ## 二、引擎能力
 
@@ -23,6 +24,7 @@
 | B3 | ~~`app.relaunch()` 无实现~~ **不成立** | 引擎已实现：`ElectronAppAdapter.relaunch()` → `applicationContext.restartApp(want)`，并把 `electronRelaunchArgs` 透传 | 剩下的风险只是上游 `app.relaunch(); app.quit()` 的顺序——quit 可能把刚发起的重启关掉 | 若要修，只调整调用顺序/屏蔽随后的 quit |
 | B4 | 麦克风权限只预检 macOS | `app.js@3146503` | 鸿蒙拒权不弹提示，录出空文件 | 接 `abilityAccessCtrl` |
 | B5 | 回收站语义 | 包装层 `main.js:150-192` 用 vault `.trash` 重命名替代 `shell.trashItem` | 与"系统回收站"设置不一致 | 已在文档说明，暂不动 |
+| B6 | 外部链接外呼走隐式 Want（**已升级，第 215 轮**） | `ExternalProtocolAdapter.openExternal`：`startAbility(want, FLAG_START_WITHOUT_TIPS)` | http/https 缺少"没有匹配应用时的浏览器兜底"与域名校验（官方自 API 12 推荐的入口不是它） | 已改 `context.openLink(url, {appLinkingOnly:false})`，失败/不支持时回落到原隐式 Want；`mailto`/`tel`/`obsidian` 属 Deep Linking，保持 `startAbility` |
 
 > 未找到：`trafficLightPosition` / `titleBarOverlay` / `windowControlsOverlay` / `setWindowOpenHandler` 在 `app.js` 中都不存在；`setVibrancy` 只在 darwin 分支。
 

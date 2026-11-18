@@ -70,8 +70,9 @@
 - **根因（第 56 轮定案）**：`setWindowTitleMoveEnabled(!hideTitleBar)` 在
   主窗口 hideTitleBar=true（无框 BrowserWindow）时**关闭了 WMS 标题拖动
   能力**；第 40 轮 decor='system' 把标题条重新显示但没重新启用拖动，
-  于是"看得见拖不动"。引擎没有 -webkit-app-region 支持（libelectron.so
-  无 DraggableRegions 接口），系统标题条是唯一拖动面。
+  于是"看得见拖不动"。系统标题条在场时它就是拖动面；引擎同样会消费 web 侧
+  `-webkit-app-region`，但只在**无边框**路径（第 182/183 轮真机定案，
+  BUG-005），所以两者不是替代关系。
 - **修复**：`setWindowTitleMoveEnabled(true)` 无条件启用（三处：启动、
   decor='system' 分支、setUseNativeFrame）；"可移动"与"可见标题条"
   绑定同步。ArkTS PanGesture 只转发鼠标滚轮/捏合（Finger 源被
@@ -608,3 +609,74 @@ maximize（`reason:1`），不是代码保证的；WMS 不做时窗口就停在�
 3. caption 调用失败时 `decor` 必须回退 `none`（宁可用引擎自绘标题条，也不能
    出现"系统标题条没有、自绘标题条被隐藏"的无标题条窗口）。
 4. `setWindowLayoutFullScreen` 同值不重复下发，且只有成功后才闩锁。
+
+## 7. 2026-11-17 移交包（线 A：窗口/布局）落地记录（第 215 轮）
+
+> 输入：外部审计移交包 8 份报告（审计基线 `e528275`），本轮对当前 HEAD 复核锚点后
+> 落地低风险项、显式延后需要真机回归的结构性项。线 B（pandoc/鸿蒙能力）
+> 的落地见 `docs/CHANGES-2026-10.md` 第 215 轮与 `docs/PLATFORM-ADAPTATION.md` A6。
+
+### 7.1 已落地
+
+| 编号 | 内容 | 位置 |
+| --- | --- | --- |
+| WM-3（=Bug1 R2 / 规格 D1） | 2in1 发布值常量化 | `WebAbility.writeTouchModeFile()`（见 7.2） |
+| WM-2（=G-1 入口 4 / DB-1） | `setFullScreen` / `setSimpleFullScreen` 形态守卫 | `AppWindowAdapter`（见 7.3） |
+| WM-5（=G-4） | 官方五枚举全覆盖 | `WebAbility` 状态监听器（见 7.4） |
+| WM-10（=DB-3） | 4 处"引擎不实现 `-webkit-app-region`"的过时注释更正 | 本节正文 + 两处 .ets |
+
+### 7.2 已落地：2in1 发布值常量化（WM-3 = Bug1 R2 = 规格 D1）
+
+`windowStatusChange` 的 `MAXIMIZE`/`FULL_SCREEN` 分支原来调用
+`writeTouchModeFile(this.pcModeEnabled)`，而 `writeTouchModeFile` 对
+`phone/tablet/2in1` 一视同仁：`2in1` 上 `window_pcmode_switch_status` 不保证存在
+（H15 因此跳过启动读取，读出来恒 `'false'`），于是**第一次最大化**就把
+`systemMode` 发布成 `touch` —— 启动路径又根本不写（缺键 = desktop），
+这条不对称正是"最大化 → 整页重载 → 移动布局"的确定性成因（Bug1 的 2in1 变体）。
+
+**改动**：`2in1` 从该共享分支里拆出，发布值为**档案常量 `desktop`**（规格 §6.2
+的 `profile == P-2IN1 → desktop`）。启动路径（`deviceType === 'tablet'` 才读键）
+不动，H15 的警告继续成立；渲染层 `override`（desktop/touch）仍然生效，所以
+"2in1 上强制用移动布局"这个用户意图没有被拿走。
+
+### 7.3 已落地：`setFullScreen` 形态守卫（WM-2 / G-1 入口 4）
+
+`setFullScreen` / `setSimpleFullScreen`（F11、View 菜单、插件）原先**完全没有**
+形态守卫，与 maximize/minimize/setBounds 的守卫不对称：触摸形态下窗口已经是
+整屏，`maximize(ENTER_IMMERSIVE)` 只会再造一次 `MAXIMIZE/FULL_SCREEN` 事件，
+让发布链路去猜（Bug1 那类"事件→模式文件→重载"）。
+
+**判据**（`touchWindowAlreadyDisplay()`）：仅当 **形态是触摸** 且**实时状态是
+`FULL_SCREEN`/`MAXIMIZE`** 时才忽略。两点刻意的选择：
+
+1. 不只看形态——平板 PC 关下的真实自由窗（`FLOATING`）仍允许进沉浸，
+   否则等于把规格 §6.4 的"其余 → S5"也一起砍掉；
+2. 状态读失败时**保持原行为**（继承审计 P2-2：失败方向不得改变现状）。
+
+### 7.4 已落地：五枚举覆盖（WM-5 / G-4）
+
+监听器原来只认 `FLOATING` / `MAXIMIZE` / `FULL_SCREEN` 三值：
+
+- `SPLIT_SCREEN` 现在按自由窗族发布（`writeTouchModeFile(this.pcModeEnabled)`，
+  而 `freeWindowForm()` 对 SPLIT 本就返回 true → desktop）。**手机除外**：
+  手机上分屏仍是移动布局，不能跟随平板语义。
+- `MINIMIZE` 与 enum 之外的值：显式不发布。最小化是可见性变化不是形态变化
+  （恢复事件会按返回形状发布）；未知值继承"不改变"方向。
+
+### 7.5 延后：WM-1（S4 最大化）——"实时读形态"其实是自愈职责
+
+规格 D4 要求平板 PC 关 + 自由多窗下把 S4（最大化）发布成 desktop。**本轮不落**，
+原因是实现细节：`writeTouchModeFile` 里 `pcModeEnabled || freeWindowForm()` 的
+"实时读形态"同时承担了一次**自愈**——平板关闭自由多窗回到整屏时，只有靠
+"此刻状态不是 FLOATING"才能把发布值翻回 `touch`；若仅把 MAXIMIZE 改成 desktop
+而不引入**转移起点**状态（规格第 2 层状态机 + 不变量 I2），就会出现
+"关掉自由多窗后仍停在移动布局"的回退，且比现状更难排查。
+
+落地条件：按规格 §十二 步 2 整体落（发布函数 + 转移表 + 守卫表），验收锚点 =
+Bug1 四入口全部不再产生 `systemMode=touch` 日志 + V1-V15 核心行，**需真机**。
+
+### 7.6 延后：装饰子机与辅助窗口线（WM-9/11/12/13/14）
+
+按钮可见性四个决策写点、`SetMovable` 收编（I-D8）、浮窗/弹窗/子窗三条辅助线
+（I-D7/I-D9）属规格 §十二 步 3 的结构性收敛，验收矩阵 B1-B12 全在真机；
+单独落风险大于收益，等按钮报告 §5.6 的 3a→3d 顺序一次做完。
