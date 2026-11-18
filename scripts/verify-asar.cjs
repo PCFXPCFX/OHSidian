@@ -152,6 +152,16 @@ try {
     'app sandbox mode read from mode file': app.includes('function ohsidianSandboxMode') && app.includes('cfg.sandbox'),
     'app pandoc probe weak-sandbox EPERM text': app.includes('当前是弱沙箱（CUSTOM_SANDBOX 已授予）'),
     'app pandoc report sandbox line': app.includes('"沙箱形态: "+ohsidianSandboxLabel(sandbox)'),
+    // Round 195 (patch rev 195), both markers are unique to this patch (the
+    // ohsidian prefix keeps them out of upstream's minified names):
+    // ① the inline Pandoc check row got its own copy button (the command-
+    //   palette report already had one), sharing one clipboard helper whose
+    //   fallback covers the embedded renderer refusing navigator.clipboard;
+    // ② the 跟随系统 layout flip is merged over a 2000ms window so ONE window
+    //   action causes at most ONE reload (state machine §九 / invariant I9).
+    'app diag copy button': app.includes('ohsidianCopyText') && app.includes('复制结果'),
+    'app layout flip debounce': app.includes('ohsidianFlipSettleMs=2000') &&
+      app.includes('ohsidianFlipSettleRun'),
     // BUG-005: the mobile toolbar must not be a window drag region - this
     // engine implements -webkit-app-region and turned every tap into a move.
     'app toolbar not a drag region': app.includes('ohsidian-toolbar-hit') && app.includes('applyToolbarHitFix'),

@@ -49,6 +49,10 @@ import LaunchHelper from '../utils/LaunchHelper';
 import LogMethod from '../common/LogDecorator';
 import LogUtil from '../utils/LogUtil';
 import { NewWindowParam, PointCoordinate, WindowType, WindowBound, WindowPreferences, ILoginInfo, ILogin } from "../interface/CommonInterface"
+// Handover 2026-11-17 window state machine: the E9 guard table lives there, so
+// every window-command bridge asks the same state instead of re-deriving the
+// form factor from settings + live status.
+import { WindowShapeMachine } from '../common/WindowShapeMachine';
 
 const TAG: string = 'AppWindow';
 
@@ -150,6 +154,10 @@ export class AppWindowAdapter extends BaseAdapter {
   // still allowed to go immersive, and only a window that is already fullscreen
   // or maximized is a no-op. A status read failure keeps the old behaviour
   // ("failure must not change anything").
+  // Handover WM-2 / E9 guard table: prefer the state machine (bound by the
+  // ability for the window it owns). The live-status predicate below stays as
+  // the pre-bind fallback so a bridge call that arrives before the first
+  // onWindowStageCreate still behaves exactly like the pre-state-machine code.
   private touchWindowAlreadyDisplay(windowClass: window.Window | undefined): boolean {
     if (!windowClass || !this.isTouchFormFactorStrict()) {
       return false;
@@ -685,9 +693,14 @@ export class AppWindowAdapter extends BaseAdapter {
       // Exit direction: an immersive opened through this bridge must stay
       // exitable, otherwise F11 traps a free window in S5 (the "can enter, can
       // never leave" regression the guard introduced before bridgeImmersiveId).
-      if (this.touchWindowAlreadyDisplay(windowClass) && this.bridgeImmersiveId !== id) {
+      const machine = WindowShapeMachine.sharedMachine();
+      const exitAllowed: boolean = machine !== null
+        ? machine.allowExitImmersive(this.bridgeImmersiveId === id)
+        : !(this.touchWindowAlreadyDisplay(windowClass) && this.bridgeImmersiveId !== id);
+      if (!exitAllowed) {
         LogUtil.info(TAG, 'setFullScreen(false) ignored: window ' + id +
-          ' is the display on the touch form factor');
+          ' is the display in the touch regime' +
+          (machine !== null ? ' (' + machine.snapshot() + ')' : ''));
         return;
       }
       if (this.bridgeImmersiveId === id) {
@@ -696,9 +709,14 @@ export class AppWindowAdapter extends BaseAdapter {
       this.unMaximize(id);
       return;
     }
-    if (this.touchWindowAlreadyDisplay(windowClass)) {
+    const machine = WindowShapeMachine.sharedMachine();
+    const enterAllowed: boolean = machine !== null
+      ? machine.allowEnterImmersive()
+      : !this.touchWindowAlreadyDisplay(windowClass);
+    if (!enterAllowed) {
       LogUtil.info(TAG, 'setFullScreen(true) ignored: window ' + id +
-        ' is already the display on the touch form factor');
+        ' is already the display in the touch regime' +
+        (machine !== null ? ' (' + machine.snapshot() + ')' : ''));
       return;
     }
     if (!windowClass) {
@@ -720,9 +738,14 @@ export class AppWindowAdapter extends BaseAdapter {
     // second entry into ENTER_IMMERSIVE).
     const windowClass = this.getWindow(id);
     if (!fullScreen) {
-      if (this.touchWindowAlreadyDisplay(windowClass) && this.bridgeImmersiveId !== id) {
+      const machine = WindowShapeMachine.sharedMachine();
+      const exitAllowed: boolean = machine !== null
+        ? machine.allowExitImmersive(this.bridgeImmersiveId === id)
+        : !(this.touchWindowAlreadyDisplay(windowClass) && this.bridgeImmersiveId !== id);
+      if (!exitAllowed) {
         LogUtil.info(TAG, 'setSimpleFullScreen(false) ignored: window ' + id +
-          ' is the display on the touch form factor');
+          ' is the display in the touch regime' +
+          (machine !== null ? ' (' + machine.snapshot() + ')' : ''));
         return;
       }
       if (this.bridgeImmersiveId === id) {
@@ -731,9 +754,14 @@ export class AppWindowAdapter extends BaseAdapter {
       this.unMaximize(id);
       return;
     }
-    if (this.touchWindowAlreadyDisplay(windowClass)) {
+    const machine = WindowShapeMachine.sharedMachine();
+    const enterAllowed: boolean = machine !== null
+      ? machine.allowEnterImmersive()
+      : !this.touchWindowAlreadyDisplay(windowClass);
+    if (!enterAllowed) {
       LogUtil.info(TAG, 'setSimpleFullScreen(true) ignored: window ' + id +
-        ' is already the display on the touch form factor');
+        ' is already the display in the touch regime' +
+        (machine !== null ? ' (' + machine.snapshot() + ')' : ''));
       return;
     }
     if (!windowClass) {
@@ -763,8 +791,13 @@ export class AppWindowAdapter extends BaseAdapter {
     // display, so that combination is ignored; the MINIMIZE whitelist keeps
     // every legitimate recovery (bringWindowToFront calls windowClass.restore()
     // directly and is unaffected).
-    if (this.isTouchFormFactorStrict() && !this.windowIsMinimized(windowClass)) {
-      LogUtil.info(TAG, 'restore ignored: window ' + id + ' is not minimized on the touch form factor');
+    const machine = WindowShapeMachine.sharedMachine();
+    const restoreAllowed: boolean = machine !== null
+      ? machine.allowRestore(this.windowIsMinimized(windowClass))
+      : !(this.isTouchFormFactorStrict() && !this.windowIsMinimized(windowClass));
+    if (!restoreAllowed) {
+      LogUtil.info(TAG, 'restore ignored: window ' + id + ' is not minimized in the touch regime' +
+        (machine !== null ? ' (' + machine.snapshot() + ')' : ''));
       return;
     }
 
@@ -961,7 +994,13 @@ export class AppWindowAdapter extends BaseAdapter {
     // resolves, so the old "Succeeded in maximizing the window." log made
     // Obsidian persist isMaximized=true for a window that was never maximized
     // (device log 18:08:42.293).
-    if (this.isTouchFormFactorStrict()) {
+    const machine = WindowShapeMachine.sharedMachine();
+    if (machine !== null) {
+      if (!machine.allowMaximize()) {
+        LogUtil.info(TAG, 'maximize ignored (' + machine.snapshot() + ')');
+        return;
+      }
+    } else if (this.isTouchFormFactorStrict()) {
       LogUtil.info(TAG, 'maximize ignored: touch form factor window is already the display');
       return;
     }
@@ -1024,7 +1063,13 @@ export class AppWindowAdapter extends BaseAdapter {
     // the background because the follow-up showAbility is rejected with
     // 16000067. Cancelling here is the non-destructive direction; the settings
     // read is strict so a read failure keeps the old behaviour (R106 P2-2).
-    if (this.isTouchFormFactorStrict()) {
+    const machine = WindowShapeMachine.sharedMachine();
+    if (machine !== null) {
+      if (!machine.allowMinimize()) {
+        LogUtil.warn(TAG, 'minimize ignored (' + machine.snapshot() + ')');
+        return;
+      }
+    } else if (this.isTouchFormFactorStrict()) {
       LogUtil.warn(TAG, 'minimize ignored: touch form factor has no minimized state');
       return;
     }

@@ -5165,3 +5165,61 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 1. **profile ACL 由用户侧配置**：DevEco 26.0.0+ 在 IDE 里申请；老工具链改 `UnsgnedDebugProfileTemplate.json` 的 `acls` 后重签——步骤写进 `docs/PLATFORM-ADAPTATION.md` §五 5.2；
 2. **WS-2 环境仿真段 / WS-6 探针异步化与超时分层 / WS-4 执行面收口**：都要弱沙箱包在手才能取数（V-WS-2/4/7），V-WS 矩阵已补进 §五 5.5；
 3. **WS-3 自有导出 `spawn` 纪律**：现在没有自有导出实现，先作规范保留。
+## 第 218 轮 (2026-11-18): 窗口状态机落地（三层 + E9 守卫表，手机不做）+ 诊断复制按钮 + 布局翻转合并窗
+
+**范围**：交付移交包《跨设备窗口与布局状态机规格》的**第 1/2/3 层与 E9 守卫表**，并按用户指令**把手机整列剔除**（`module.json5` 的 `deviceTypes` 只有 `2in1`/`tablet`，手机装不上）。渲染层侧同时补"诊断结果一键复制"与 §九 的翻转合并窗（I9）。
+
+### 一、新模块（纯逻辑，零 WMS 调用）
+
+`web_engine/src/main/ets/common/WindowShapeMachine.ets`：
+
+- **第 1 层 `LayoutProfile`**：`TABLET / PC2IN1 / OTHER`，构造时按 `deviceInfo.deviceType` 锁定一次；**无 PHONE**（规格 P-PHONE 作废，手机映射为 OTHER → 恒 desktop）。
+- **第 2 层 `WindowShape`（8 态）** + `onStatus()`：**只消费事件值 + 当前形状**（转移起点语义 I2），**不读** `getWindowStatus()`——Bug1 的"事件里现读状态"结构上不可能再发生。
+- **第 3 层 `PublishMode { KEEP, DESKTOP, TOUCH }`**：发布值只由形状派生（I1），`KEEP` = 不写盘（I3/I7）。
+- **E9 守卫表**：`allowMaximize / allowEnterImmersive / allowExitImmersive / allowMinimize / allowRestore / allowSetBounds`。
+- 每个窗口一个机器实例；**主窗**把实例 bind 到进程级句柄供 Adapter 查询（I5 结构部分）。
+
+### 二、接线点（行为变化都在这几处）
+
+| 位置 | 变化 |
+| --- | --- |
+| `WebAbility.onWindowStageCreate` | 主窗 `bind` + `seedStatus(实时状态)`（S0→S1/S2，不发布）+ 启动日志 |
+| `windowStatusChange` | `onStatus(event)` → 形状迁移日志 → `applyShapePublish(result.publish)`；Round 153 自愈边改为 `result.correctTouchFullscreen`（形状条件，不再现读） |
+| 启动读 / PC 开关观察者 | `setPcMode(on)` → 机器给发布值；2in1 常量、H15 豁免、BUG-003 自由窗语义全部收在机器里 |
+| 多窗（I5） | `shouldPublishLayout()`：**只有主窗发布**，无主窗存活时才轮到子窗（G-3 的文件层竞争从结构上消失） |
+| `AppWindowAdapter` 六桥 | `maximize / minimize / restore / setFullScreen / setSimpleFullScreen` 全部问机器；**未绑定时回落原判据**（启动早期调用行为不变） |
+
+**由此关闭的缺陷**：
+
+- **WM-1（Bug1 的平板变体）**：平板 PC 关 + 自由多窗下最大化 → 形状是 `FREE_FLOAT → MAXIMIZED` → 发布 **desktop**，不再整页重载进移动布局；触摸态（S1）收到 MAXIMIZE/FLOATING 仍是 `TOUCH_FULL` + 只做整屏自愈（I6）。
+- **G-1 入口 3/4 / Round 153**：自愈边由形状条件驱动，不再依赖"此刻不是自由窗"的现读。
+- **G-3**：主窗单写者。
+- **G-4 最小化**：`MINIMIZE → KEEP`（可见性变化，恢复事件按返回形状发布）；未知值 KEEP（I7）。
+
+### 三、渲染层（§九 / I9）
+
+- **诊断结果一键复制**：设置 → 诊断 → Pandoc 环境检查，内联结果旁新增「复制结果」按钮（无结果时隐藏；`navigator.clipboard` 优先，`textarea+execCommand("copy")` 兜底；成功「已复制」/失败「复制失败」，1.5s 复原）。命令面板弹窗原有的「复制详细信息」保持不变。
+- **布局翻转合并窗（I9）**：`ohsidianFlipSettleMs=2000`，只作用于 auto（跟随系统）路径——200ms 轮询读到翻转后先挂起，窗口内再翻转只保留最新值；到期若已兜回渲染值则**什么都不做**（不 reload、不弹 Notice）；启动首读立即应用；手动切换命令立即生效并取消待定窗。**一次窗口动作最多一次 reload。**
+
+### 四、与规格的差异（如实记录）
+
+1. **手机不实现**（见上），旧 `deviceType === 'phone'` 分支保留原样、不再维护；
+2. **override（I8）仍在渲染层**：ArkTS 照写 `systemMode`，渲染层以 override 优先，语义与改造前一致；
+3. **横切 A（装饰）/ 横切 B（insets）未迁移**：`pushSafeAreaInsets`、`ensureSystemCaption`、`applyLayoutFullscreenForMode`、`forceFullscreenWindow` 仍用 `inWindowForm()/freeWindowForm()`（后者仍读实时状态），但它们**不参与发布判定**，I1 成立；迁移留到步 3；
+4. **SPLIT 只发布**，rect/inset 交给 `windowRectChange/windowSizeChange`；
+5. **焦点仲裁只做到"主窗发布"**，规格 §5.3 的"焦点窗形状优先"需要焦点事件面，下一批再做。
+
+### 五、验证
+
+- `WindowShapeMachine.ets` 编译通过；HAP 的 `ets/modules.abc` 内确认 `WindowShapeMachine / publishSystemMode / allowEnterImmersive / shouldPublishLayout` 已编入。
+- `--repatch` 后 `verify-asar` 全绿（新增 `app diag copy button`、`app layout flip debounce` 两条断言）；HAP 内 `obsidian.asar` 确认 `OHSIDIAN_PATCH_REV=195`、复制 helper、合并窗常量均在。
+- `assembleHap` BUILD SUCCESSFUL；`verify-release` / `check-docs` 全绿。
+- 真机取证锚点：`window shape <旧> -> <新> (<原因>)`、`touch mode file updated: systemMode=…, profile=…, pcMode=…, shape=…`、`maximize/minimize/restore/… ignored (…)`。
+
+### 六、真机验收（重点）
+
+1. 平板 PC 关 + 自由多窗最大化/恢复 → **无 reload**、布局保持桌面（V4）；
+2. 触摸态被 WMS 铺满（reason:1）→ 只有整屏自愈与一条日志，无发布写盘（V5）；
+3. 2in1 最大化/恢复/沉浸 → 发布恒 desktop、无 reload（V1/V2）；
+4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
+5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。

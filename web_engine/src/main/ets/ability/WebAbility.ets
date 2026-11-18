@@ -55,6 +55,13 @@ import { ConfigurationConstant, common } from '@kit.AbilityKit';
 // INSTALLED package (the signing profile's ACL list), so it is measured at
 // runtime through the access-token manager, never inferred from a build flag.
 import { abilityAccessCtrl, bundleManager } from '@kit.AbilityKit';
+// Window state machine (handover 2026-11-17): layer 1 profile / layer 2 shape /
+// layer 3 publication. Pure logic, no WMS calls - the side effects stay here.
+import {
+  PublishMode,
+  ShapeEventResult,
+  WindowShapeMachine
+} from '../common/WindowShapeMachine';
 // NOTE: the wantConstant re-exported by @kit.AbilityKit (@ohos.app.ability.
 // wantConstant) only knows ACTION_SEND_TO_DATA; the share actions live in
 // the legacy @ohos.ability.wantConstant namespace.
@@ -129,6 +136,11 @@ export class WebAbility extends WebBaseAbility {
   // onWindowStageCreate. Drives the forced-maximize policy and the touch-mode
   // file.
   private pcModeEnabled: boolean = false;
+  // Handover 2026-11-17 window state machine: layer 1 (profile) + layer 2
+  // (shape). This instance owns the window it was created for; the published
+  // value is derived from it, so the mode file can no longer be written by an
+  // event callback that "just read" the live status (the Bug1 root cause).
+  private shapeMachine: WindowShapeMachine = new WindowShapeMachine(deviceInfo.deviceType);
   // IME height in CSS px, from keyboardHeightChange; published through the
   // mode file: Obsidian's mobile formatting toolbar positions itself with
   // top: calc(100vh - var(--keyboard-height) - toolbar-height) and nothing
@@ -2750,6 +2762,19 @@ export class WebAbility extends WebBaseAbility {
     // Diagnostic: dump the device shape - the mode branches below gate on it.
     LogUtil.info(TAG, 'diagnostic: deviceType=' + deviceInfo.deviceType +
       ', sdkApiVersion=' + deviceInfo.sdkApiVersion);
+    // Handover 2026-11-17 window state machine, step 1 (pure addition): bind the
+    // process-wide handle the adapters consult, then seed layer 2 from the LIVE
+    // status ONCE (S0 -> S1/S2). Seeding is not a transition and publishes
+    // nothing: the disk value stays authoritative until the first real mode
+    // event, exactly like the old code path.
+    if (this.isMainAppWindow) {
+      // I5 (focus arbitration, structural part): the main window owns the
+      // process-wide handle. Sub windows (browser/popup) keep their own layer-2
+      // state for their own geometry but cannot decide the layout for the app.
+      WindowShapeMachine.bind(this.shapeMachine);
+    }
+    this.shapeMachine.seedStatus(this.windowStatusType());
+    LogUtil.info(TAG, 'window shape machine: ' + this.shapeMachine.snapshot());
     // Round 102 (docs/window-state-machine.md §2): APPLY the form factor
     // before the content is loaded. Everything form-dependent now happens
     // here, exactly once:
@@ -2823,12 +2848,24 @@ export class WebAbility extends WebBaseAbility {
       try {
         data.on('windowStatusChange', (status) => {
           this.nativeContext.OnWindowStatusChange(this.xcomponentId, status);
+          // LAYER 2 (handover state machine): the event value + the tracked
+          // shape decide the transition; nothing here re-reads
+          // getWindowStatus() (invariant I2 - that live read is what made
+          // "maximize" look like "the device became a phone").
+          const shapeResult: ShapeEventResult =
+            this.shapeMachine.onStatus(WindowShapeMachine.fromWindowStatus(status));
+          if (shapeResult.shapeChanged || shapeResult.correctTouchFullscreen) {
+            LogUtil.info(TAG, 'window shape ' + shapeResult.previous + ' -> ' +
+              shapeResult.current + ' (' + shapeResult.note + '), ' +
+              this.shapeMachine.snapshot());
+          }
           // MAXIMIZE/RECOVER transitions change the window rect but on free
           // windows the maximize animation can complete WITHOUT firing a
           // trailing windowSizeChange (observed on API 24 tablets: after
           // maximizing a PC-mode window the bottom strip stayed stale -
           // engine viewport kept the pre-maximize height). Re-push the
           // viewport and the insets so the content follows the new rect.
+          // Geometry refresh only: it never feeds the publication (I1).
           if (status === window.WindowStatusType.MAXIMIZE ||
             status === window.WindowStatusType.FULL_SCREEN ||
             status === window.WindowStatusType.FLOATING) {
@@ -2840,48 +2877,21 @@ export class WebAbility extends WebBaseAbility {
             // The status event can equally arrive BEFORE the animation
             // settles - reconcile once it has (round 87, A2).
             this.scheduleViewportReconcile();
-            // BUG-003: the free-window form must publish the desktop layout
-            // even when the PC switch is off; and returning from a maximized
-            // free window must publish the touch layout again.
-            if (status === window.WindowStatusType.FLOATING) {
-              this.writeTouchModeFile(true);
-            } else {
-              // FULL_SCREEN / MAXIMIZE
-              this.writeTouchModeFile(this.pcModeEnabled);
-            }
-          } else if (status === window.WindowStatusType.SPLIT_SCREEN &&
-            deviceInfo.deviceType !== 'phone') {
-            // Handover WM-5 (G-4): SPLIT_SCREEN is one of the five official
-            // window status values and belongs to the free-window family on a
-            // tablet - the desktop layout FLOATING already publishes. It used to
-            // fall outside this whitelist and publish nothing, so a split window
-            // kept whatever the previous shape had published. Phones are
-            // excluded on purpose: there SPLIT is still the mobile layout.
-            // Only the PUBLISH happens here: the rect/inset refresh for a split
-            // transition arrives through windowRectChange/windowSizeChange, and
-            // this handler deliberately does not re-run the free-window geometry
-            // ladder for a shape it does not drive (round 87/92/153 stay as-is).
-            // The publish value is the FLOATING branch's constant `true` (this IS
-            // the free-window family) and not `this.pcModeEnabled`: passing the
-            // switch would make the value depend on a SECOND live status read
-            // inside freeWindowForm(), and a throw there would publish `touch`
-            // (mobile layout) for a split window.
-            this.writeTouchModeFile(true);
           }
-          // MINIMIZE and any value outside the official enum publish NOTHING:
-          // minimizing is a visibility change, not a form change (the restore
-          // event publishes the returning shape), and a failed/unknown read must
-          // not move the layout (same "failure must not change anything"
-          // direction as audit P2-2).
-          // Round 153: in the touch form factor the window must BE the
-          // display. A status event that reports a floating/maximized window
-          // means the rect correction did not land (or a PC-mode layout was
-          // restored): re-assert it. forceFullscreenWindow is idempotent and
-          // returns immediately when the window is already display-sized, so
-          // the FULL_SCREEN event of our own resize does not loop.
-          if (!this.inWindowForm() &&
-            (status === window.WindowStatusType.FLOATING ||
-              status === window.WindowStatusType.MAXIMIZE)) {
+          // LAYER 3 (single writer): the only place the mode file is written
+          // from a window event. KEEP means "publication unchanged" - minimize
+          // is a visibility change and an unknown status must not move the
+          // layout (I7).
+          if (this.shouldPublishLayout()) {
+            this.applyShapePublish(shapeResult.publish);
+          }
+          // Round 153 self-heal edge, now expressed as a state condition: a
+          // touch-regime window that reports FLOATING/MAXIMIZE lost its display
+          // rect (or WMS auto-filled it, reason:1) - re-assert it.
+          // forceFullscreenWindow is idempotent (already display-sized returns
+          // immediately), so the FULL_SCREEN event of our own resize does not
+          // loop.
+          if (shapeResult.correctTouchFullscreen) {
             this.forceFullscreenWindow();
           }
         })
@@ -3178,6 +3188,7 @@ export class WebAbility extends WebBaseAbility {
     // twice is a no-op; leaving a dead instance in the broadcast registry is
     // not.
     WebAbility.removeLiveInstance(this);
+    WindowShapeMachine.unbind(this.shapeMachine);
     // Keep the super chain intact (subclasses call super.onDestroy()).
     super.onDestroy();
   }
@@ -3660,28 +3671,46 @@ export class WebAbility extends WebBaseAbility {
   // userData is the application files dir, same value the engine passes as
   // --user-data-dir, so this.context.getApplicationContext().filesDir matches.
   private writeTouchModeFile(pcModeEnabled: boolean) {
-    // systemMode follows the PC-mode switch on every touch-capable form
-    // factor. H9: the phone previously hard-coded 'touch' even with PC mode
-    // on (external keyboard/mouse). Non-touch types keep 'desktop'.
-    let systemMode: string = 'desktop';
-    // Handover WM-3 / Bug1-R2 (D1 in docs/window-state-machine.md §7.2): 2in1 is
-    // a DESKTOP-only profile, so its publish value is a PROFILE CONSTANT and not
-    // a function of the PC switch. That switch is not guaranteed to exist on
-    // 2in1 (H15 skips the boot read, so it answers 'false'), which is why the
-    // old shared branch published systemMode='touch' on the FIRST maximize
-    // event: the boot path wrote nothing (desktop, missing key) while the event
-    // path wrote touch - the asymmetry the reporter saw as "maximize restarts
-    // into the mobile layout". The renderer's `override` still lets a 2in1 user
-    // force either layout, so no user intent is lost.
-    if (deviceInfo.deviceType === '2in1') {
-      systemMode = 'desktop';
-    } else if (deviceInfo.deviceType === 'phone' || deviceInfo.deviceType === 'tablet') {
-      // BUG-003: a tablet free window is the desktop form even when the PC
-      // switch reads false; otherwise the renderer applies the mobile layout
-      // inside a 1960x1593 resizable window.
-      const windowForm: boolean = pcModeEnabled || this.freeWindowForm();
-      systemMode = windowForm ? 'desktop' : 'touch';
+    // Boot / PC-switch path. Both are profile-parameter changes (D2), not shape
+    // events: the PC switch is fed into layer 2, which then answers what to
+    // publish. The 2in1 constant (I11/D1), the tablet free-window form
+    // (BUG-003) and the H15 boot exemption all live in the machine now, so the
+    // boot path and the event path can no longer disagree.
+    const publish: PublishMode = this.shapeMachine.setPcMode(pcModeEnabled);
+    if (publish !== PublishMode.KEEP) {
+      const systemMode: string = publish === PublishMode.TOUCH ? 'touch' : 'desktop';
+      this.publishSystemMode(systemMode);
     }
+  }
+
+  // I5: only the window that owns the layout publishes. The main window always
+  // does; a sub window only when no main window is alive (single-window
+  // teardown ordering), so a browser/popup window can never flip the app layout
+  // - the G-3 "two windows take turns reloading" file-level race.
+  private shouldPublishLayout(): boolean {
+    if (this.isMainAppWindow) {
+      return true;
+    }
+    let mains: number = 0;
+    for (let i = 0; i < WebAbility.liveInstances.length; i++) {
+      if (WebAbility.liveInstances[i].isMainAppWindow) {
+        mains++;
+      }
+    }
+    return mains === 0;
+  }
+
+  // LAYER 3: the single writer of the mode file's systemMode field (I4). The
+  // renderer's explicit `override` stays the top priority on its own side (I8),
+  // so writing a value the user overrode is harmless and keeps the file honest.
+  private applyShapePublish(publish: PublishMode): void {
+    if (publish === PublishMode.KEEP) {
+      return;
+    }
+    this.publishSystemMode(publish === PublishMode.TOUCH ? 'touch' : 'desktop');
+  }
+
+  private publishSystemMode(systemMode: string): void {
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
       const filePath: string = filesDir + '/ohsidian-mode.json';
@@ -3700,15 +3729,14 @@ export class WebAbility extends WebBaseAbility {
         cfg['override'] = 'auto';
       }
       // Repeat fires (observer misfire, sibling window) skip the write when
-      // nothing moved - one small read, no IO storm on the shared file.
+      // nothing moved - one small read, no IO storm on the shared file (I3).
       if (cfg['systemMode'] === systemMode) {
         return;
       }
       cfg['systemMode'] = systemMode;
       this.publishModeFileAtomic(filePath, cfg);
       LogUtil.info(TAG, 'touch mode file updated: systemMode=' + systemMode +
-        ', override=' + (cfg['override'] as string) +
-        ', deviceType=' + deviceInfo.deviceType + ', pcMode=' + pcModeEnabled);
+        ', override=' + (cfg['override'] as string) + ', ' + this.shapeMachine.snapshot());
     } catch (err) {
       LogUtil.error(TAG, 'failed to write touch mode file: ' + JSON.stringify(err));
     }

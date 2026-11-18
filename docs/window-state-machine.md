@@ -717,3 +717,68 @@ Bug1 四入口全部不再产生 `systemMode=touch` 日志 + V1-V15 核心行，
 **仍未闭环**：`AppWindow.Restore` / `AppWindow.UnMaximize` 的直接 binding 仍可能
 把触摸窗变成浮窗（第 215/216 轮只守了 `setFullScreen*` 与 `restore()`）；
 `phone` 的 `FLOATING` 仍会发布 desktop（手机小窗是否真以上报 FLOATING 待取证）。
+## 8. 状态机实现（第 218 轮，已落地）
+
+> 规格出处：移交包《OHSidian-跨设备窗口与布局状态机规格》。本节记录**实现事实**与
+> 与规格的差异，改动状态机前先读 §8.3 的差异清单。
+> **手机不在实现范围内**：`module.json5` 的 `deviceTypes` 只有 `2in1`、`tablet`，
+> 手机装不上，规格里的 P-PHONE 整列作废（代码里映射为 P-OTHER → 恒 desktop）。
+
+### 8.1 模块与分层
+
+`web_engine/src/main/ets/common/WindowShapeMachine.ets`（纯逻辑，零 WMS 调用）：
+
+| 层 | 实现 | 说明 |
+| --- | --- | --- |
+| 第 1 层 DeviceProfile | `LayoutProfile { TABLET, PC2IN1, OTHER }` | 构造时按 `deviceInfo.deviceType` 锁定一次，`2in1` → PC2IN1、`tablet` → TABLET，其余 OTHER |
+| 第 2 层 WindowShape | `WindowShape` 8 态 + `onStatus()` | 只消费事件值 + 当前形状（转移起点语义，I2），**不读** `getWindowStatus()` |
+| 第 3 层 发布 | `PublishMode { KEEP, DESKTOP, TOUCH }` | `WebAbility.publishSystemMode()` 是 `systemMode` 的唯一写者（I4） |
+| E9 守卫表 | `allowMaximize/allowEnterImmersive/allowExitImmersive/allowMinimize/allowRestore/allowSetBounds` | `AppWindowAdapter` 的 6 个窗口命令桥改为问它 |
+
+### 8.2 已接线的调用点
+
+| 位置 | 之前 | 现在 |
+| --- | --- | --- |
+| `onWindowStageCreate` | 只做设备诊断 | `bind(主窗 machine)` + `seedStatus(实时状态)`（S0→S1/S2，不发布）+ 日志 `window shape machine: …` |
+| `windowStatusChange` | 事件里直接 `writeTouchModeFile(实时判据)`（Bug1 根因） | `onStatus(event)` → 形状迁移日志 → `applyShapePublish(result.publish)`（KEEP 不写盘，I3/I7） |
+| Round 153 自愈边 | `!inWindowForm() && (FLOATING\|\|MAXIMIZE)` 现读判据 | `result.correctTouchFullscreen`（形状条件，不现读） |
+| PC 开关观察者 / 启动读 | `writeTouchModeFile(pcMode)` 内含设备分支 | `setPcMode(on)` → 机器给发布值；2in1 常量、H15、BUG-003 全在机器里 |
+| 多窗仲裁（I5） | 每个窗口都写 mode 文件（G-3 竞争） | 只有**主窗**发布；无主窗存活时才轮到子窗（`shouldPublishLayout()`） |
+| `maximize/minimize/restore/setFullScreen*` | 各自 `isTouchFormFactorStrict()` + 实时状态 | 问机器；**未绑定时回落到原判据**（启动早期调用行为不变） |
+
+### 8.3 与规格的差异（如实记录）
+
+1. **phone 整列不实现**（见上）；代码里 `deviceType === 'phone'` 的旧分支保留原样不再维护。
+2. **override（I8）仍在渲染层**：`writeSystemMode` 照写，渲染层 `resolveWant` 以 override 优先，语义与改造前一致。
+3. **几何 / insets（横切 B）/ 装饰（横切 A）未迁移**：`pushSafeAreaInsets`、`ensureSystemCaption`、`applyLayoutFullscreenForMode`、`forceFullscreenWindow` 仍用 `inWindowForm()/freeWindowForm()`（其中 `freeWindowForm()` 仍读实时状态）。它们**不参与发布判定**（I1 成立），迁移留到步 3。
+4. **SPLIT 只发布**：分屏的 rect/inset 刷新交给 `windowRectChange/windowSizeChange`，不重跑自由窗几何阶梯（避免与 Round 87/92/153 打架）。
+5. **焦点仲裁只做到"主窗发布"**：规格 §5.3 的"焦点窗形状优先"需要焦点事件面（`nativeContext` 侧），下一批再做。
+
+### 8.4 as-built 转移表（tablet；2in1 除发布恒 desktop 外同表）
+
+| 当前 | 事件 | 新形状 | 发布 | 备注 |
+| --- | --- | --- | --- | --- |
+| STARTING | FULL_SCREEN | TOUCH_FULL | touch | 启动 seed |
+| STARTING | FLOATING | FREE_FLOAT | desktop | tablet 电脑模式 / 2in1 启动 |
+| TOUCH_FULL | MAXIMIZE | **TOUCH_FULL**（不变） | touch（去重不写） | 触摸态失守 → `correctTouchFullscreen` 自愈 |
+| TOUCH_FULL | FLOATING | **TOUCH_FULL**（不变） | touch | 同上（Round 153 语义扩展到 FLOATING） |
+| FREE_FLOAT/SPLIT | MAXIMIZE | MAXIMIZED | **desktop** | **Bug1 的根修复**（WM-1，平板自由窗最大化不再切移动布局） |
+| FREE_FLOAT/SPLIT/MAXIMIZED | FULL_SCREEN | FULLSCREEN | desktop | 沉浸属自由窗族（D5） |
+| FULLSCREEN | FULL_SCREEN | FULLSCREEN | desktop | 幂等 |
+| 任意 | MINIMIZE | MINIMIZED | **KEEP** | 可见性变化，恢复事件按返回形状发布 |
+| 任意 | 未知值 | 不变 | KEEP | I7 |
+| − | PC 开 | 形状不变 | **desktop 常量** | 平板电脑模式 |
+| − | 2in1 任意 | 形状照常 | **desktop 常量** | I11/D1，与启动自愈对称 |
+
+### 8.5 取证锚点（真机验收用）
+
+- 形状迁移：`window shape <旧> -> <新> (<原因>), profile=…, pcMode=…, shape=…`
+- 发布：`touch mode file updated: systemMode=…, override=…, profile=…, pcMode=…, shape=…`
+- 守卫拒绝：`maximize ignored (…)` / `minimize ignored (…)` / `restore ignored: …` /
+  `setFullScreen(true|false) ignored: …`
+- 启动：`window shape machine: profile=…, pcMode=false, shape=…`
+
+验收矩阵仍以规格 §十三 V1-V15 + 按钮报告 B1-B12 为准；本轮新增的重点三条：
+① 平板 PC 关 + 自由多窗最大化 → **无 reload**、仍桌面布局（V4）；
+② 触摸态被 WMS 铺满（reason:1）→ 只有 `correctTouchFullscreen` 自愈加一次日志、无发布（V5）；
+③ 2in1 上最大化/恢复/沉浸三种操作 → 发布值恒 desktop、无 reload（V1/V2）。

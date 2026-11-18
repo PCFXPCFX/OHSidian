@@ -2725,12 +2725,62 @@ function applyMobile(on,reason){
     return true;
   }catch(e){return false}
 }
-function syncFromSystem(lastWant){
+/* Layout-flip merge window (state machine §九 / invariant I9): one window
+   action (resize / rotation / fold) can make ArkTS publish systemMode several
+   times in a row, and every applyMobile() ends in location.reload() - flipping
+   on the first tick turned ONE window move into several reloads. Only the
+   auto (跟随系统) path is merged: the poll arms/resets a 2000ms timer and
+   keeps the LATEST want; at expiry it applies at most once and no-ops if the
+   value flipped back meanwhile. The manual command path stays immediate and
+   cancels the pending window. `lastWant` is the last value we actually
+   RENDERED - it is only advanced when applyMobile() reports a real flip,
+   never on the tick that merely read a new value, otherwise the merge could
+   never converge. */
+var ohsidianFlipSettleMs=2000;
+var ohsidianFlipSettleTimer=null;
+var ohsidianFlipPendingWant=null;
+function ohsidianFlipSettleCancel(){
+  if(ohsidianFlipSettleTimer){
+    try{clearTimeout(ohsidianFlipSettleTimer)}catch(e){}
+    ohsidianFlipSettleTimer=null;
+  }
+  ohsidianFlipPendingWant=null;
+}
+function ohsidianFlipSettleRun(){
+  ohsidianFlipSettleTimer=null;
+  var target=ohsidianFlipPendingWant;
+  ohsidianFlipPendingWant=null;
+  /* merged back to the rendered value: no reload, no Notice */
+  if(target===null||target===lastWant)return;
+  if(applyMobile(target,"跟随系统"))lastWant=target;
+}
+function ohsidianFlipSettleArm(want){
+  ohsidianFlipPendingWant=want;
+  if(ohsidianFlipSettleTimer){try{clearTimeout(ohsidianFlipSettleTimer)}catch(e){}}
+  ohsidianFlipSettleTimer=setTimeout(ohsidianFlipSettleRun,ohsidianFlipSettleMs);
+}
+function syncFromSystem(curWant){
   var cfg=readMode();
   var want=resolveWant(cfg);
-  if(want===null)return lastWant;
-  if(lastWant===null||want!==lastWant){applyMobile(want,"跟随系统")}
-  return want;
+  if(want===null)return curWant;
+  /* First read (startup): the initial layout is not a "flip" - apply now. */
+  if(curWant===null){
+    applyMobile(want,"跟随系统");
+    return want;
+  }
+  if(want===curWant){
+    /* An armed window whose value came back: keep the latest value so the
+       expiry takes the no-op branch instead of applying a stale target.
+       Steady state (nothing armed) stays timer-free. */
+    if(ohsidianFlipPendingWant!==null&&ohsidianFlipPendingWant!==want){
+      ohsidianFlipSettleArm(want);
+    }
+    return curWant;
+  }
+  /* A value CHANGE resets the window; re-reading the same pending target does
+     not (an unrelated mode-file write must not extend it). */
+  if(ohsidianFlipPendingWant!==want)ohsidianFlipSettleArm(want);
+  return curWant;
 }
 var lastWant=null;
 try{lastWant=syncFromSystem(lastWant)}catch(e){}
@@ -3384,6 +3434,54 @@ function ohsidianPathReportLines(d){
   }
   return L;
 }
+/* Clipboard helper shared by the diagnostics surfaces. The embedded Electron
+   renderer may refuse navigator.clipboard (permission policy / no user
+   activation), so the deprecated textarea + execCommand("copy") path - still
+   the only one that works there - is the fallback. cb(ok) fires exactly once,
+   synchronously or from the promise, never twice. */
+function ohsidianCopyText(text,cb){
+  cb=cb||function(){};
+  var settled=false;
+  var settle=function(ok){
+    if(settled)return;
+    settled=true;
+    try{cb(ok)}catch(e){}
+  };
+  var legacyCopy=function(){
+    try{
+      var ta=document.createElement("textarea");
+      ta.value=(text===undefined||text===null)?"":String(text);
+      ta.setAttribute("readonly","");
+      ta.style.cssText="position:fixed;top:0;left:0;width:1px;height:1px;"+
+        "padding:0;border:0;opacity:0;";
+      document.body.appendChild(ta);
+      var ok=false;
+      try{
+        ta.select();
+        try{ta.setSelectionRange(0,ta.value.length)}catch(eSel){}
+        ok=!!document.execCommand("copy");
+      }catch(eExec){ok=false}
+      try{document.body.removeChild(ta)}catch(eDel){}
+      settle(ok);
+    }catch(e){settle(false)}
+  };
+  try{
+    var nc=navigator.clipboard;
+    if(nc&&typeof nc.writeText==="function"){
+      var pr=nc.writeText(text);
+      /* Electron 22 returns undefined from writeText(); Electron >= 28
+         returns a Promise. Treat a non-Promise return as success, a rejected
+         Promise as "fall back", so a refused clipboard still copies. */
+      if(pr&&typeof pr.then==="function"){
+        pr.then(function(){settle(true)},function(){legacyCopy()});
+        return;
+      }
+      settle(true);
+      return;
+    }
+  }catch(e){}
+  legacyCopy();
+}
 function ohsidianShowReportModal(title,lines){
   try{
     var d=document,body=d.body;
@@ -3800,6 +3898,18 @@ function ohsidianSettingsRows(root){
     if(checkCtl){
       var btn=document.createElement("button");
       btn.textContent="检查";
+      /* "复制结果" mirrors the command-palette report's copy button but copies
+         the inline <pre> text verbatim. Hidden until the first report exists
+         (there is nothing to copy before that); the click handler also guards
+         the empty case, so a stale button can never copy "". */
+      var copyBtn=document.createElement("button");
+      copyBtn.textContent="复制结果";
+      copyBtn.style.cssText="display:none;margin-left:8px";
+      var copyResetTimer=null;
+      var resetCopyLabel=function(){
+        if(copyResetTimer){try{clearTimeout(copyResetTimer)}catch(eT){}}
+        copyResetTimer=setTimeout(function(){copyBtn.textContent="复制结果"},1500);
+      };
       btn.addEventListener("click",function(){
         try{
           btn.textContent="检查中…";
@@ -3815,11 +3925,24 @@ function ohsidianSettingsRows(root){
               if(outEl){outEl.textContent="检查失败: "+String(eR&&eR.message||eR);outEl.style.display="block"}
             }finally{
               btn.textContent="检查";
+              copyBtn.style.display="";
             }
           },50);
         }catch(e){btn.textContent="检查"}
       });
+      copyBtn.addEventListener("click",function(){
+        if(!outEl||!outEl.textContent)return;
+        var txt=outEl.textContent;
+        var feedback=function(ok){
+          try{
+            copyBtn.textContent=ok?"已复制":"复制失败";
+            resetCopyLabel();
+          }catch(eF){}
+        };
+        try{ohsidianCopyText(txt,feedback)}catch(e){feedback(false)}
+      });
       checkCtl.appendChild(btn);
+      checkCtl.appendChild(copyBtn);
       outEl=mk("pre","ohsidian-diag-out");
       outEl.style.cssText="display:none;white-space:pre-wrap;word-break:break-all;"+
         "max-height:360px;overflow:auto;font-size:12px;padding:10px;border-radius:8px;"+
@@ -4267,7 +4390,7 @@ function ohsidianScheduleSettingsTab(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="194";
+var OHSIDIAN_PATCH_REV="195";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -4396,7 +4519,10 @@ var install=function(app){
         var label=next==="auto"?(("系统当前: "+(want?"触摸":"桌面"))):(next==="touch"?"始终触摸":"始终桌面");
         var saved=patchModeFile({override:next});
         try{new Notice("OHSidian 触屏模式 → "+label+(saved?"":"(写入失败,重启后失效)"))}catch(e){}
-        if(want!==null){lastWant=want;applyMobile(want,"手动切换")}
+        /* Manual switch is immediate, never merged: drop any auto flip that
+           the 2000ms window still holds, or it could fire after the user has
+           already chosen a layout and reload them into the wrong one. */
+        if(want!==null){ohsidianFlipSettleCancel();lastWant=want;applyMobile(want,"手动切换")}
       }});
     app.commands.addCommand({id:"ohsidian-vault-visible",name:"OHSidian: 迁移仓库到文件管理可见的位置",
       callback:function(){migrateVaultToVisibleFolder()}});
