@@ -149,6 +149,20 @@ check('secretStorage desktop adapter falls back to plaintext',
 check('on-device plugin integrity diagnostic present',
   app.includes('ohsidianRunPluginIntegrityProbe') && app.includes('ohsidian-diag-plugin'));
 
+/* rev198 (BRAT settings tab still missing on device): the diagnostic must be
+   able to surface the real error - Error.stack through the console bridge,
+   plugin load state, registered plugin setting tabs, and the console.log tail. */
+check('console bridge keeps Error.stack (JSON.stringify would lose it)',
+  app.includes('typeof a.stack==="string"'));
+check('diagnostic reports plugin load state + plugin setting tabs',
+  app.includes('已注册插件设置页') && app.includes('loadingPluginId='));
+check('diagnostic appends the console.log tail',
+  app.includes('渲染层日志（console.log 末尾') && app.includes('appendLogTail'));
+check('plugin setting-tab repair shim present (BRAT onLayoutReady throw)',
+  app.includes('function ohsidianRepairPluginSettingTabs(') &&
+  app.includes('plugin setting tab registered late') &&
+  app.includes('设置页自愈: '));
+
 /* ---- Behaviour: synthetic downloads ------------------------------------- */
 if (helperSrc) {
   /* Use the KERNEL's real f4/v4 values, extracted from the shipped app.js.

@@ -203,7 +203,7 @@ profile 再重签即可。离线改 profile 再自签**不可行**：profile 由
 
 > 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象
 > `main @ e528275`）。报告结论一句话：**两个插件不是同一种死法，也都不是 2.0 的代码改动
-> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **197**）；
+> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **198**）；
 > 报告里"2.0 无关"的增量考古（补丁层/引擎层 diff 与 eval/require/loadPlugin 零交集）不再
 > 赘述，见原报告第三部分。
 
@@ -346,6 +346,11 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 2. **无弹窗、只是设置页不出现** → 吞错型（BRAT 类）。同一诊断看 `secretStorage` 行：
    `OK … true` 正常；`WARN … false（明文模式）` 可用（预期）；`BAD`/`THROWN` 才是引擎断链
    （本版已兜底，正常应显示 WARN）。
+   若同时看到「插件 “obsidian42-brat” 在加载时遇到错误」：那是 Obsidian 对**插件
+   onLayoutReady 回调抛错**的提示（BRAT 2.2.0 在回调里才调 `addSettingTab`，抛错后设置页
+   永远注册不上）。rev198 起：诊断的「插件加载状态」段会显示是否已补注册（`设置页自愈`），
+   「渲染层日志」段直接给出该回调的错误栈；补丁本身也会在 layout-ready 后与每次打开设置页时
+   自动补注册未注册的插件设置页（失败明细带栈写进日志）。
 3. **要完整栈**：默认已捕获 error 级；全量用命令面板切「全量」并重启，取
    `<Documents|userData>/OHSidian/console.log`（512 KB 轮转，旧文件 `.old.log`）。
 4. 诊断输出都有复制按钮：报告弹窗「复制详细信息」、设置内联「复制结果」。
@@ -354,7 +359,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 
 ### 6.7 真机定谳步骤（替代报告 §五的控制台探针）
 
-1. 装本版（rev 197）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
+1. 装本版（rev 198）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
 2. `secretStorage` 行：期望 `WARN adapter=有 · isEncryptionAvailable=false（明文模式）`，
    `引擎 safeStorage: undefined（引擎缺口；补丁已兜底为明文透传）`——若 remote 对象整体缺失则
    该行显示 `window.electron.remote 不可用`，同属引擎缺口，补丁同样兜底；
@@ -373,7 +378,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 - `node scripts/update-obsidian.mjs --repatch` → 内嵌 `verify-asar`（含
   `verify-plugin-install` 行为用例）全绿；
 - `assembleHap` **BUILD SUCCESSFUL**；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability`
-  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="197"`、
+  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="198"`、
   四条 NF 标记、console bridge 错误默认档；
 - `verify-release` / `check-docs` 全绿；
 - 独立只读审查（2026-11-22，对照冻结态代码 + 出货 asar 逐字）：NF-015/017/018 无 P1/P2；

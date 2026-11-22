@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→197）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→198）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 197、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 198、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5381,3 +5381,29 @@ v195/196 之前的补丁没有往类方法链里插过成员，这是第一次�
 
 **教训**：对压缩内核做文本补丁时，"插进去的代码语法合法"不等于"宿主类仍然完整"；凡插入到
 `return a,b,c` 这类逗号表达式内部的补丁，都要有运行时/结构双门禁。
+
+### 十一、BRAT 设置页仍缺失（2026-11-22 真机续）：诊断补齐 + 设置页自愈（rev 198）
+
+**真机现象（rev197）**：BRAT 迁移已成功（诊断显示迁移标记存在、`main.js` 可解析、
+`secretStorage` 为明文模式），但设置页仍不出现，并且启动时提示
+「插件 “obsidian42-brat” 在加载时遇到错误」。
+
+**判定**：这条提示来自 Obsidian 的 layout-ready 循环——插件用
+`workspace.onLayoutReady(cb)` 注册的回调抛错时会 `console.error(e)` 并按 `pluginId` 弹提示。
+BRAT 2.2.0 的 `addSettingTab(this.settingsTab)` 正好在这个回调里：回调一抛，设置页就永远
+注册不上；而该错误此前在 console.log 里被记成 `{}`（`JSON.stringify(Error)`），拿不到栈。
+
+**rev 198 落地**：
+- 渲染层 console bridge 保留 `Error.stack`（不再退化成 `{}`），layout-ready 回调的错误栈
+  可以落进 `<Documents|userData>/OHSidian/console.log`；
+- 机上诊断新增「插件加载状态」段：BRAT manifest 版本、插件实例是否加载、`loadingPluginId`、
+  **已注册插件设置页列表**、**设置页自愈结果**；末尾追加 **console.log 尾部**（最多 40 行）——
+  一次诊断即可拿到错误栈，不必连电脑；
+- 兼容补丁 `ohsidianRepairPluginSettingTabs()`：在 layout-ready 后 1.5s、以及每次打开设置页
+  （含 80/300/800/1600/3000ms 重试链）时，把"已加载插件已构造但未注册"的 settingsTab 补注册；
+  失败时把每个插件的栈写进日志并在诊断里显示。对 BRAT 这类"回调抛错导致 tab 丢失"的插件，
+  补注册成功后设置页立即出现（临时兜底，不等于根因修复）。
+
+**仍未完成**：根因要等真机的回调错误栈（rev198 诊断的「渲染层日志」段）。可能方向：
+BRAT settingsTab 的 `update()/display()` 在本端口抛错、或 `registerObsidianProtocolHandler` 抛错；
+拿到栈后再决定是补平台 API 还是继续用补注册兜底。

@@ -55,7 +55,15 @@ if(consoleCaptureMode!=="off"){
           var parts=[];
           for(var i=0;i<args.length&&i<8;i++){
             var a=args[i],s;
-            try{s=(typeof a==="string")?a:JSON.stringify(a)}catch(e1){s=String(a)}
+            /* Error-like objects must keep their stack: JSON.stringify(Error)
+               is "{}", which is exactly how a thrown plugin onLayoutReady
+               callback (BRAT settings tab) used to vanish from console.log. */
+            try{
+              if(typeof a==="string")s=a;
+              else if(a&&typeof a.stack==="string"&&a.stack)s=a.stack;
+              else if(a&&typeof a.message==="string"&&!a.name)s=String(a.message);
+              else s=JSON.stringify(a);
+            }catch(e1){s=String(a)}
             if(typeof s!=="string")s=String(s);
             parts.push(s.length>2000?s.substring(0,2000)+"…":s);
           }
@@ -4309,6 +4317,40 @@ function ohsidianEnsureAllSettingsTabs(){
   try{ohsidianEnsureSettingsTab()}catch(e1){}
   try{ohsidianEnsureStylusTab()}catch(e2){}
 }
+/* rev198 compatibility shim: a plugin whose workspace.onLayoutReady callback
+   throws in this port (BRAT: its addSettingTab call) keeps a constructed
+   settingsTab object but never gets it registered - Obsidian shows
+   "插件在加载时遇到错误" and the settings page stays missing forever. Register
+   any such tab ourselves once the settings modal exists. Per-plugin failures
+   are returned with stacks so the on-device diagnostic can show them. */
+function ohsidianRepairPluginSettingTabs(){
+  var out=[];
+  try{
+    var app=window.app;
+    var pl=app&&app.plugins;
+    var setting=app&&app.setting;
+    if(!pl||!setting||typeof setting.addSettingTab!=="function")return out;
+    var loaded=pl.plugins||{};
+    var tabs=setting.pluginTabs||[];
+    for(var id in loaded){
+      try{
+        var pinst=loaded[id];
+        if(!pinst)continue;
+        var stab=pinst.settingsTab;
+        if(!stab)continue;
+        if(tabs.indexOf(stab)>=0)continue;
+        setting.addSettingTab(stab);
+        tabs=setting.pluginTabs||tabs;
+        out.push(id+": 已补注册");
+        try{console.log("[OHSidian] plugin setting tab registered late: "+id)}catch(eL){}
+      }catch(eR){
+        out.push(id+": 补注册失败 "+String((eR&&(eR.stack||eR.message))||eR));
+        try{console.error("[OHSidian] plugin setting tab registration failed: "+id,eR)}catch(eL2){}
+      }
+    }
+  }catch(eOuter){}
+  return out;
+}
 
 /* Registration has to happen while the settings modal is open: its container and
    search component are created there. Wrapping open() gives us that moment, and
@@ -4319,11 +4361,15 @@ function ohsidianHookSettingsOpen(){
     if(!s||typeof s.open!=="function"||s.__ohsidianOpenHooked)return false;
     var orig=s.open;
     s.open=function(){
+      try{ohsidianRepairPluginSettingTabs()}catch(eRepairOpen){}
       var r=orig.apply(s,arguments);
       try{
         var delays=[80,300,800,1600,3000];
         for(var i=0;i<delays.length;i++){
-          (function(d){setTimeout(function(){try{ohsidianEnsureAllSettingsTabs()}catch(e){}},d)})(delays[i]);
+          (function(d){setTimeout(function(){try{
+            ohsidianRepairPluginSettingTabs();
+            ohsidianEnsureAllSettingsTabs();
+          }catch(e){}},d)})(delays[i]);
         }
       }catch(e){}
       return r;
@@ -4466,12 +4512,18 @@ function ohsidianInstallTouchProbe(){
   }catch(e){return false}
 }
 function ohsidianScheduleSettingsTab(){
-  try{window.app.workspace.onLayoutReady(function(){ohsidianEnsureAllSettingsTabs()})}catch(e){}
+  try{window.app.workspace.onLayoutReady(function(){
+    try{ohsidianRepairPluginSettingTabs()}catch(eR){}
+    ohsidianEnsureAllSettingsTabs();
+  })}catch(e){}
   try{ohsidianHookSettingsOpen()}catch(eH){}
   /* Try once now (harmless: it just records "waiting for the settings panel"),
      then let the open() hook do the real work. No polling ladder - the modal is
      the only moment registration can succeed. */
   setTimeout(function(){try{ohsidianEnsureAllSettingsTabs()}catch(e){}},2000);
+  /* the throwing callback runs inside the layout-ready loop, so repair shortly
+     after it; the settings-open hook retries again on every open */
+  setTimeout(function(){try{ohsidianRepairPluginSettingTabs()}catch(e){}},1500);
 }
 /* NF-015 / NF-018 on-device adjudication (report 2026-11-22 §五). The console
    probes in that report are impossible to type on a tablet, so the two decisive
@@ -4492,6 +4544,34 @@ function ohsidianRunPluginIntegrityProbe(){
   var add=function(s){L.push(s)};
   var show=function(){
     try{ohsidianShowReportModal("OHSidian 诊断: 插件完整性与安全存储",L)}catch(eShow){}
+  };
+  /* rev198: the renderer error itself lives in <Documents|userData>/OHSidian/
+     console.log (NF-016 writes error lines by default). Reading its tail here
+     is what turns "插件在加载时遇到错误" into an actual stack without a PC. */
+  var appendLogTail=function(){
+    add("");
+    add("▍渲染层日志（console.log 末尾，最多 40 行）");
+    try{
+      var npL=require("path"),fsL=require("fs");
+      var cfgL=readMode()||{};
+      var baseL=null;
+      if(typeof cfgL.documentsDir==="string"&&cfgL.documentsDir&&cfgL.documentsDirGranted!==false){
+        baseL=npL.join(cfgL.documentsDir,"OHSidian");
+      }
+      if(!baseL){var udL=dataDir();baseL=udL||null}
+      var logPath=baseL?npL.join(baseL,"console.log"):null;
+      if(!logPath||!fsL.existsSync(logPath)){
+        add("  (没有 console.log：本次会话没有 error 级输出，或路径不可达)");
+        add("  期望路径: "+(logPath||"(未知)"));
+        return;
+      }
+      var linesL=fsL.readFileSync(logPath,"utf8").split(/\r?\n/);
+      var tailL=linesL.slice(-41).filter(function(l){return l.trim()!==""});
+      if(!tailL.length)add("  (文件为空)");
+      for(var li=0;li<tailL.length;li++)add("  "+tailL[li]);
+    }catch(eLogTail){
+      add("  读取失败: "+String((eLogTail&&eLogTail.message)||eLogTail));
+    }
   };
   try{
     add("OHSidian 补丁 "+OHSIDIAN_PATCH_REV+" · "+new Date().toISOString());
@@ -4527,6 +4607,32 @@ function ohsidianRunPluginIntegrityProbe(){
     var a=window.app&&window.app.vault&&window.app.vault.adapter;
     var man=(window.app&&window.app.plugins&&window.app.plugins.manifests)||{};
     var ids=Object.keys(man);
+    add("");
+    add("▍插件加载状态");
+    var pl=window.app&&window.app.plugins;
+    var bratMan=man["obsidian42-brat"];
+    add("  BRAT  manifest 版本: "+(bratMan&&bratMan.version?bratMan.version:"(未安装)"));
+    var bratObj=null;
+    try{bratObj=pl&&pl.plugins&&pl.plugins["obsidian42-brat"]||null}catch(eBrat){}
+    add("  插件实例: "+(bratObj?"已加载":"未加载")+
+      " · loadingPluginId="+(pl&&pl.loadingPluginId?pl.loadingPluginId:"(none)"));
+    var repairLog=[];
+    try{repairLog=ohsidianRepairPluginSettingTabs()||[]}
+    catch(eRepair){repairLog=["补注册异常: "+String((eRepair&&eRepair.message)||eRepair)]}
+    var pTabIds=[];
+    try{
+      var pTabs=(window.app.setting&&window.app.setting.pluginTabs)||[];
+      for(var pti=0;pti<pTabs.length;pti++){
+        var pt=pTabs[pti];
+        pTabIds.push((pt&&(pt.id||(pt.plugin&&pt.plugin.manifest&&pt.plugin.manifest.id)))||"?");
+      }
+    }catch(ePTabs){}
+    add("  已注册插件设置页("+pTabIds.length+"): "+((pTabIds.join(", "))||"(none)"));
+    if(repairLog.length){
+      for(var rli=0;rli<repairLog.length;rli++)add("  设置页自愈: "+repairLog[rli]);
+    }else{
+      add("  设置页自愈: 没有需要补注册的插件设置页");
+    }
     add("");
     add("▍插件文件完整性（.obsidian/plugins/<id>/main.js）");
     if(!a||typeof a.read!=="function"){add("  仓库适配器不可用");show();return}
@@ -4578,7 +4684,8 @@ function ohsidianRunPluginIntegrityProbe(){
         if(!r.ok)bad++;
         if(r.unchecked)unchecked++;
         var sizeTxt=r.size<0?"?":(r.size>=1048576?(Math.round(r.size/1048576*10)/10+" MB"):(Math.round(r.size/1024)+" KB"));
-        add("  "+(r.unchecked?"SKIP":(r.ok?"OK  ":"BAD "))+r.id+" · "+sizeTxt+
+        var manVer=(man[r.id]&&man[r.id].version)||"";
+        add("  "+(r.unchecked?"SKIP":(r.ok?"OK  ":"BAD "))+r.id+(manVer?(" v"+manVer):"")+" · "+sizeTxt+
           (r.ok?(r.why?(" · "+r.why):""):(" · 无法解析（文件可能被截断）："+r.why)));
       }
       add("");
@@ -4589,11 +4696,13 @@ function ohsidianRunPluginIntegrityProbe(){
       var diagBratDir=(man["obsidian42-brat"]&&man["obsidian42-brat"].dir)||(diagCfgDir+"/plugins/obsidian42-brat");
       a.exists(diagBratDir+"/brat-migrations.json").then(function(has){
         add("  BRAT 迁移标记: "+(has?"存在（迁移已跑过）":"不存在（全新安装 → 每次启动都会重跑迁移）"));
+        appendLogTail();
         show();
-      },function(){show()});
+      },function(){appendLogTail();show()});
     },function(){show()});
   }catch(eOuter){
     add("  检查失败: "+String((eOuter&&eOuter.message)||eOuter));
+    appendLogTail();
     show();
   }
 }
@@ -4601,7 +4710,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="197";
+var OHSIDIAN_PATCH_REV="198";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
