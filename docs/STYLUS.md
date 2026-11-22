@@ -63,8 +63,12 @@ InkDoc 侧车 <vault>/.obsidian/ohsidian-ink/docs/<key>.json
 - **浮层打开时（设置/弹窗/命令面板/文件列表/大纲等抽屉）**：ink 工具条、菜单、清除面板、选区条
   一律 `pointer-events:none` 且不可见（`body.ohsidian-overlay-open`），笔与手指点它们都落到浮层上；
   浮层关闭后自动恢复。检测由 `ohsidian-ink.js` 的 `overlayOpenNow()`/`refreshOverlayGuard()` 350ms
-  轮询完成（`is-left-sidedock-open`/`is-right-sidedock-open`、`.modal-container`、`.prompt`、
-  `.suggestion-container`、`.menu`、`.workspace-drawer.is-open`）。
+  轮询完成：
+  - 模态/菜单：`.modal-container`、`.modal-bg`、`.prompt`、`.suggestion-container`、`.menu`（按可见性过滤）；
+  - 左右抽屉（文件列表/大纲/反链）：此布局把开关类加在 **`workspace.containerEl`**（`is-left-sidedock-open` /
+    `is-right-sidedock-open`，仅移动布局生效），移动端抽屉本体是 `.workspace-drawer`（关闭时 `display:none`，
+    打开即可见）——两者都检测；PC/2in1 常驻侧栏不触发（避免桌面模式工具条一直消失）。rev201 只查 body/
+    `.workspace-drawer.is-open`，因此漏掉了抽屉（rev202 修）。
 - **笔落在 Obsidian 其他 UI 或空白/边距**：`pointerdown` 即拦截，不传给 Obsidian。
 - **笔的兼容 touch/mouse 事件**：笔活动窗口内吞掉；1.2s 无笔后恢复给手。
 - 笔从 UI 起笔滑动 >5px：拦截并抑制 click。

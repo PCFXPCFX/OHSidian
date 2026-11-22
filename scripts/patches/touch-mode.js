@@ -4327,6 +4327,49 @@ function ohsidianEnsureAllSettingsTabs(){
    "插件在加载时遇到错误" and the settings page stays missing forever. Register
    any such tab ourselves once the settings modal exists. Per-plugin failures
    are returned with stacks so the on-device diagnostic can show them. */
+/* 2026-11-22 rev202: a plugin may already own a tab entry (by plugin id) even
+   when the instance differs, and the repair pass can run before the plugin's
+   own onLayoutReady callback - both adding the same tab produced duplicate
+   nav entries (report showed obsidian42-brat twice). Register by plugin id and
+   de-duplicate the existing list (keeping the first entry). */
+function ohsidianPluginTabId(tab){
+  try{
+    if(!tab)return "";
+    if(tab.plugin&&tab.plugin.manifest&&tab.plugin.manifest.id)return tab.plugin.manifest.id;
+    if(typeof tab.id==="string"&&tab.id)return tab.id;
+  }catch(e){}
+  return "";
+}
+function ohsidianDedupePluginSettingTabs(setting,out){
+  try{
+    var tabs=setting.pluginTabs||[];
+    if(!tabs.length)return;
+    var seen={},dups=[];
+    for(var i=0;i<tabs.length;i++){
+      var tid=ohsidianPluginTabId(tabs[i]);
+      if(!tid)continue;
+      if(!seen[tid]){seen[tid]=true;continue}
+      dups.push(tabs[i]);
+    }
+    for(var d=0;d<dups.length;d++){
+      var dup=dups[d];
+      var pid=ohsidianPluginTabId(dup);
+      try{
+        if(typeof setting.removeSettingTab==="function")setting.removeSettingTab(dup);
+        else{
+          var idx=(setting.pluginTabs||[]).indexOf(dup);
+          if(idx>=0)setting.pluginTabs.splice(idx,1);
+          if(dup&&dup.navEl&&dup.navEl.parentNode)dup.navEl.parentNode.removeChild(dup.navEl);
+        }
+        out.push(pid+": 重复设置页已清理");
+        try{console.log("[OHSidian] duplicate plugin setting tab removed: "+pid)}catch(eL){}
+      }catch(eDup){
+        out.push(pid+": 重复设置页清理失败 "+String((eDup&&(eDup.stack||eDup.message))||eDup));
+      }
+    }
+    if(dups.length){try{setting.updatePluginSection()}catch(eUp){}}
+  }catch(eOuter){}
+}
 function ohsidianRepairPluginSettingTabs(){
   var out=[];
   try{
@@ -4334,17 +4377,25 @@ function ohsidianRepairPluginSettingTabs(){
     var pl=app&&app.plugins;
     var setting=app&&app.setting;
     if(!pl||!setting||typeof setting.addSettingTab!=="function")return out;
+    ohsidianDedupePluginSettingTabs(setting,out);
     var loaded=pl.plugins||{};
     var tabs=setting.pluginTabs||[];
+    var registered={};
+    for(var ti=0;ti<tabs.length;ti++){
+      var tabId=ohsidianPluginTabId(tabs[ti]);
+      if(tabId&&!registered[tabId])registered[tabId]=true;
+    }
     for(var id in loaded){
       try{
         var pinst=loaded[id];
         if(!pinst)continue;
+        var pid=(pinst.manifest&&pinst.manifest.id)||id;
+        if(registered[pid])continue;
         var stab=pinst.settingsTab;
         if(!stab)continue;
-        if(tabs.indexOf(stab)>=0)continue;
+        if((setting.pluginTabs||[]).indexOf(stab)>=0)continue;
         setting.addSettingTab(stab);
-        tabs=setting.pluginTabs||tabs;
+        registered[pid]=true;
         out.push(id+": 已补注册");
         try{console.log("[OHSidian] plugin setting tab registered late: "+id)}catch(eL){}
       }catch(eR){
@@ -4519,7 +4570,8 @@ function ohsidianInstallTouchProbe(){
 }
 function ohsidianScheduleSettingsTab(){
   try{window.app.workspace.onLayoutReady(function(){
-    try{ohsidianRepairPluginSettingTabs()}catch(eR){}
+    /* no tab repair here on purpose (rev202): plugins register their own tabs
+       from this same callback loop; registering first creates duplicates. */
     ohsidianEnsureAllSettingsTabs();
   })}catch(e){}
   try{ohsidianHookSettingsOpen()}catch(eH){}
@@ -4527,9 +4579,11 @@ function ohsidianScheduleSettingsTab(){
      then let the open() hook do the real work. No polling ladder - the modal is
      the only moment registration can succeed. */
   setTimeout(function(){try{ohsidianEnsureAllSettingsTabs()}catch(e){}},2000);
-  /* the throwing callback runs inside the layout-ready loop, so repair shortly
-     after it; the settings-open hook retries again on every open */
-  setTimeout(function(){try{ohsidianRepairPluginSettingTabs()}catch(e){}},1500);
+  /* the throwing callback runs inside the layout-ready loop, so repair AFTER
+     the loop settles; a too-early pass can register a tab the plugin is about
+     to register itself (duplicate nav entries - rev202 report). The
+     settings-open hook retries again on every open. */
+  setTimeout(function(){try{ohsidianRepairPluginSettingTabs()}catch(e){}},3500);
 }
 /* ---------------------------------------------------------------------------
    rev 201: generic plugin-troubleshooting data. Any renderer error that can be
@@ -4979,7 +5033,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="201";
+var OHSIDIAN_PATCH_REV="202";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the

@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→201）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→202）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 201、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 202、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5455,3 +5455,27 @@ BRAT settingsTab 的 `update()/display()` 在本端口抛错、或 `registerObsi
 `assembleHap` BUILD SUCCESSFUL；HAP 内 asar 复核 rev 201；`verify-release` / `check-docs` 全绿。
 **真机待验**：① 打开设置/文件列表/大纲 → 工具条不可见不可点，关闭后恢复；② 插件报错后
   `plugin-errors.json` 出现且诊断「插件错误」段显示，重启后仍显示（标"上次会话"）。
+
+### 十三、rev 202：抽屉浮层守卫修复 + 插件设置页去重
+
+**问题 1：文件列表/大纲抽屉打开时工具条仍可点**
+
+- 根因：rev201 的 `overlayOpenNow()` 只看 `<body>` 的 `is-left/right-sidedock-open` 与
+  `.workspace-drawer.is-open`。实际此布局把开关类加在 **`workspace.containerEl`**
+  （`is-<side>-sidedock-open`），且移动端抽屉本体 `.workspace-drawer` 是"关闭 display:none、打开显示"
+  的开关方式，两个信号都没被检测到。
+- 修法：`overlayOpenNow()` 增加 ① `workspace.containerEl` 的 sidedock 类（仅移动布局生效，PC/2in1
+  常驻侧栏不隐藏工具条）② 可见的 `.workspace-drawer`（computed display 非 none 且 rect 有面积）。
+
+**问题 2：诊断里"已注册插件设置页"出现两个 obsidian42-brat**
+
+- 根因：补注册在 layout-ready 回调内执行，可能早于插件自己的 `onLayoutReady` 回调；我方先注册
+  `settingsTab`，插件随后用同一对象再 `addSettingTab`，内核不去重 → 设置导航出现两个同名条目。
+- 修法：补注册改为按**插件 id** 幂等；调度从 layout-ready 内 + 1500ms 改为 **layout-ready 之后 3.5s**
+  且不在 layout-ready 循环里注册；新增 `ohsidianDedupePluginSettingTabs()` 在每次补注册/诊断时清理
+  `pluginTabs` 中的重复项（保留第一个并刷新导航）。
+
+**验证**：`--repatch` 全绿（新增「浮层能看到抽屉」「插件设置页去重」两条标记）；`assembleHap`
+BUILD SUCCESSFUL；HAP 内 asar 复核 rev 202；`verify-release` / `check-docs` 全绿。
+**真机待验**：① 打开文件列表/大纲 → 工具条消失、点不到，关闭后 0.5s 内恢复；② 设置导航里每个插件
+  只有一个设置页（诊断「已注册插件设置页」列表无重复）；③ 设置/命令面板等原有浮层行为不变。

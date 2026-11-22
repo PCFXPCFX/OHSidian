@@ -203,7 +203,7 @@ profile 再重签即可。离线改 profile 再自签**不可行**：profile 由
 
 > 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象
 > `main @ e528275`）。报告结论一句话：**两个插件不是同一种死法，也都不是 2.0 的代码改动
-> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **201**）；
+> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **202**）；
 > 报告里"2.0 无关"的增量考古（补丁层/引擎层 diff 与 eval/require/loadPlugin 零交集）不再
 > 赘述，见原报告第三部分。
 
@@ -346,6 +346,8 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 2. **无弹窗、只是设置页不出现** → 吞错型（BRAT 类）。同一诊断看 `secretStorage` 行：
    `OK … true` 正常；`WARN … false（明文模式）` 可用（预期）；`BAD`/`THROWN` 才是引擎断链
    （本版已兜底，正常应显示 WARN）。
+   若设置导航里出现**两个同名插件设置页**：这是补注册与插件自身注册重复（rev 202 已按插件 id 去重，
+   打开设置时会自动清理，报告「插件加载状态」里也不会再重复列）。
    若同时看到「插件 “obsidian42-brat” 在加载时遇到错误」：那是 Obsidian 对**插件
    onLayoutReady 回调抛错**的提示（BRAT 2.2.0 在回调里才调 `addSettingTab`，抛错后设置页
    永远注册不上）。rev198 起：诊断的「插件加载状态」段会显示是否已补注册（`设置页自愈`），
@@ -366,7 +368,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 
 ### 6.7 真机定谳步骤（替代报告 §五的控制台探针）
 
-1. 装本版（rev 201）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
+1. 装本版（rev 202）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
 2. `secretStorage` 行：期望 `WARN adapter=有 · isEncryptionAvailable=false（明文模式）`，
    `引擎 safeStorage: undefined（引擎缺口；补丁已兜底为明文透传）`——若 remote 对象整体缺失则
    该行显示 `window.electron.remote 不可用`，同属引擎缺口，补丁同样兜底；
@@ -385,7 +387,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 - `node scripts/update-obsidian.mjs --repatch` → 内嵌 `verify-asar`（含
   `verify-plugin-install` 行为用例）全绿；
 - `assembleHap` **BUILD SUCCESSFUL**；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability`
-  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="201"`、
+  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="202"`、
   四条 NF 标记、console bridge 错误默认档；
 - `verify-release` / `check-docs` 全绿；
 - 独立只读审查（2026-11-22，对照冻结态代码 + 出货 asar 逐字）：NF-015/017/018 无 P1/P2；
@@ -425,6 +427,11 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 `plugin:<id>:<line>:<col>` sourceURL 的错误（所有插件模块都是经 `window.eval` 带 sourceURL 求值的）——
 据此归到具体插件；没有归属的错误不进插件错误表（仍进 console.log）。
 另配命令 `OHSidian 诊断: 清空插件错误记录`（同时删除持久化文件）。
+
+**设置页注册去重（rev 202）**：补注册按**插件 id** 幂等；每次运行还会清理 `pluginTabs` 里同一插件的重复项
+（保留第一个），并刷新设置页导航。背景：补注册若早于插件自己的 `onLayoutReady` 回调执行，双方各注册一次
+同一 tab，真机上表现为设置页出现两个同名条目；调度已推迟到 layout-ready 之后 3.5s，且 layout-ready 回调内
+不再补注册。
 
 **排查顺序建议**：先看「插件清单」的 `!` 尾注定位是哪个插件、再看「插件错误」拿栈、
 最后看「渲染层日志」补齐上下文；把整份报告复制给维护者即可。

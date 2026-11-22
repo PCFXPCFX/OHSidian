@@ -205,6 +205,15 @@ try {
     'app ink chrome blocked under overlays':
       app.includes('ohsidian-overlay-open') && app.includes('function overlayOpenNow()') &&
       app.includes('refreshOverlayGuard'),
+    // rev202: drawers are signalled on workspace.containerEl and by a visible
+    // .workspace-drawer element (the body-class/`.is-open` check never matched).
+    'app ink overlay sees drawers':
+      app.includes('var wsOpen = wsEl.classList.contains("is-left-sidedock-open")') &&
+      app.includes('querySelectorAll(".workspace-drawer")'),
+    // rev202: plugin setting tabs are registered by plugin id and de-duplicated.
+    'app plugin setting tabs deduped':
+      app.includes('function ohsidianDedupePluginSettingTabs(') &&
+      app.includes('重复设置页已清理'),
     // rev201 task 1: generic plugin troubleshooting surface (error recorder +
     // persisted plugin-errors.json + generalised report + clear command).
     'app plugin error recorder':

@@ -7995,11 +7995,43 @@ var OHSIDIAN_INK_REV = "61";
     try {
       var body = document.body;
       if (!body) return false;
+      // Sidebar drawers in this layout are signalled on the WORKSPACE element
+      // (is-<side>-sidedock-open), not on <body>: the rev201 guard checked the
+      // body and therefore never saw the file list / outline opening.
+      var mobileLayout = false;
+      try {
+        mobileLayout = body.classList.contains("is-mobile") ||
+          body.classList.contains("emulate-mobile") ||
+          body.classList.contains("is-tablet");
+      } catch (eMob) {}
+      try {
+        var wsEl = window.app && window.app.workspace && window.app.workspace.containerEl;
+        if (wsEl && wsEl.classList) {
+          var wsOpen = wsEl.classList.contains("is-left-sidedock-open") ||
+            wsEl.classList.contains("is-right-sidedock-open");
+          // On 2in1/PC the side docks can stay expanded permanently; only the
+          // mobile (touch) drawers should hide the ink chrome.
+          if (wsOpen && mobileLayout) return true;
+        }
+      } catch (eWs) {}
       if (body.classList.contains("is-left-sidedock-open") ||
         body.classList.contains("is-right-sidedock-open")) return true;
+      // Mobile drawers: `.workspace-drawer` is created with hide() (display:none)
+      // and shown when opened, so "visible drawer" == open. Their backdrop is
+      // shown together with them.
+      try {
+        var drawers = document.querySelectorAll(".workspace-drawer");
+        for (var di = 0; di < drawers.length; di++) {
+          var dr = drawers[di];
+          if (!dr) continue;
+          var dcs = getComputedStyle(dr);
+          if (!dcs || dcs.display === "none" || dcs.visibility === "hidden") continue;
+          var drr = dr.getBoundingClientRect();
+          if (drr.width > 8 && drr.height > 8) return true;
+        }
+      } catch (eDr) {}
       var sels = [".modal-container", ".modal-bg", ".prompt", ".suggestion-container",
-        ".menu", ".workspace-drawer.is-open", ".workspace-drawer.is-left.is-open",
-        ".workspace-drawer.is-right.is-open"];
+        ".menu"];
       for (var i = 0; i < sels.length; i++) {
         var nodes;
         try { nodes = document.querySelectorAll(sels[i]); } catch (eQ) { continue; }
