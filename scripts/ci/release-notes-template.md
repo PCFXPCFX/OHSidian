@@ -2,20 +2,26 @@ OHSidian 是 [Obsidian](https://obsidian.md) 的非官方 HarmonyOS 移植版：
 
 > 目标系统：HarmonyOS 6.0.2 起（compatible API 22 / target API 24，真机验证）。遇到问题欢迎提 [Issue](https://github.com/PCFXPCFX/OHSidian/issues)。
 
-## 本版修复（2.0.1）
+## 本版新增与修复（2.1.0）
 
-- **触屏模式下依赖 Node 模块的插件不再"加载失败"**。内核只允许插件 `require` 白名单内的模块（`obsidian` + CodeMirror/Lezer），
-  其余在"模拟移动端"时返回 `null`；本移植的触屏模式正是靠模拟移动端实现，而渲染层其实有完整 Node，
-  于是插件一 `require("fs"/"path"/"electron")` 就报错。现已改为始终走真实 `require`。
-- 由此**触屏模式与桌面窗口模式的插件加载语义一致**，不会再"一动模式插件全变"；设置页里懒加载 Node 的插件也不再空白。
-- **手写笔**：绘图工具激活时，笔尖点在界面上会提示"笔尖只画不点界面，请用手指或切回「指针」"（拦笔行为不变）。
+- **内置 Pandoc（无需安装、无需弱沙箱）**：随包内置官方 Pandoc 3.10（WebAssembly），Enhancing Export /
+  pandoc 类插件导出 docx、pptx、epub、html 等直接可用；平板与 PC 同一构建。限制：不能输出 PDF、
+  不联网、只支持 Lua filter（可执行 filter 会明确拒绝）。
+- **窗口形态状态机**：2in1 最大化/分屏/浮窗与平板触摸形态的布局发布改为显式判定，不再误发布移动布局。
+- **插件链修复**：触屏模式依赖 Node 的插件不再"加载失败"；插件安装先校验再落盘（截断不再写坏）；
+  `secretStorage` 明文兜底让 BRAT 等插件设置页正常注册（密钥明文保存在本地，设置页会提示未加密）；
+  error 级日志默认落盘，插件失败可查。
+- **设置与诊断**：底部新增 Pandoc / 诊断 / 日志三个分区（默认隐藏，可在常规里打开「显示高级信息」）；
+  诊断报告为纯事实格式，且一次只跑一个。
 - 完整清单见 [docs/CHANGELOG.md](https://github.com/PCFXPCFX/OHSidian/blob/main/docs/CHANGELOG.md)。
 
-**仍存在的插件失败面（与 2.0.1 无关，属内核策略）**：内核硬拒载名单（`settings-search`、旧版 `cmdr` / `obsidian-image-toolkit`、
-`better-pdf-plugin` 1.4.0）、deprecated 版本表、真正只支持移动端的插件、以及依赖原生模块或未实现 Electron API 的插件。
+**仍存在的失败面（属内核/平台策略，与本版无关）**：内核硬拒载名单（`settings-search`、旧版 `cmdr` /
+`obsidian-image-toolkit`、`better-pdf-plugin` 1.4.0）、deprecated 版本表、真正只支持移动端的插件、
+依赖原生模块或未实现 Electron API 的插件；内置 Pandoc 不支持 PDF 与可执行 filter。
 
-**已知问题**：关闭应用前刚改过文件名、且此后再未书写时，最后一笔仍可能在退出时丢失（下一版补 `beforeunload` 兜底）；
-同一 PDF 在第二个窗口打开时，"恢复原始 PDF"只对执行恢复的窗口立即生效，另一窗口重开该文档后同步。
+**已知问题**：内置 Pandoc 的插件级端到端导出仍需真机确认；关闭应用前刚改过文件名、且此后再未书写时，
+最后一笔仍可能在退出时丢失（下一版补 `beforeunload` 兜底）；同一 PDF 在第二个窗口打开时，
+"恢复原始 PDF"只对执行恢复的窗口立即生效，另一窗口重开该文档后同步。
 
 ## 下载
 

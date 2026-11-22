@@ -5731,3 +5731,23 @@ gz 只记大小；顺带修掉 `checkHash('pandoc-wasm'/'wasi-shim')` 与锁键�
 ② 非 pandoc 的 `execSync`/`spawnSync` 插件（git 类、同步格式化类）行为恢复；③ Enhancing Export
 导出 docx/pptx/epub（同时判别 pandoc hook 对插件是否生效，审计 §4.1 的判别项）。
 
+、release 2.1.0：版本号 2.0.1 → 2.1.0（versionCode 2010000）
+
+按审计报告 NF-024 的建议，本窗口（rev193~213）含**内置 Pandoc**与**窗口状态机**两项功能级变更，
+外加一处 P0 修复（rev197）与四条插件链修复（NF-015~018），按 2.0.2 发布不足以表达语义，
+提升到 **2.1.0**。
+
+- `AppScope/app.json5`：`versionCode` 2000001 → **2010000**，`versionName` 2.0.1 → **2.1.0**
+  （编码规则 `主*1e6+次*1e4+修订`）；CI 的 tag 流程会按 tag 覆盖这两个值，仓库值用于本地构建、
+  关于页与冒烟包；
+- `docs/CHANGELOG.md` 新增 2.1.0 段：内置 Pandoc / 窗口与形态 / 插件链 / 设置与诊断 / 审计修复；
+- `docs/RELEASE.md` 版本头、versionCode 示例、关于页、HAP 文件名示例与 tag 命令全部对齐 2.1.0；
+  `docs/STYLUS.md` 三处版本引用同步（状态行、版本对照、release HAP 验收值）；
+- `scripts/ci/release-notes-template.md` 改为 2.1.0 发布说明（新增内置 Pandoc 能力与限制、
+  仍存在的插件失败面、已知问题）。
+
+**验证**：`assembleHap` 重建后 HAP 内 `module.json` 的 `versionName/versionCode` 应为
+2.1.0/2010000；verify-asar / verify-plugin-install / verify-pandoc-wasm / verify-release /
+check-docs 全绿。obsidian.asar 与 patch rev 不变（仍 rev213），本次只需重打 HAP。
+**发布动作（需人工）**：打 tag `v2.1.0`，由 CI 以 tag 重建对外包并生成 SHA256SUMS。
+
