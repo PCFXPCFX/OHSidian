@@ -1,6 +1,6 @@
 # 发布流程：构建、门禁、签名与 Release
 
-> 适用版本：**v2.1.0（内置 Pandoc 版）**。发布前按第 1 节逐项打勾；构建细节与
+> 适用版本：**v2.1.1（内置 Pandoc 许可合规版）**。发布前按第 1 节逐项打勾；构建细节与
 > CI 实现见第 2–5 节。安装包体积分析已归档到 [archive/HAP-SIZE](archive/HAP-SIZE.md)。
 
 ## 1. 发布前检查清单
@@ -10,7 +10,7 @@
 ### 1.1 版本与文档
 
 - [ ] `AppScope/app.json5`：`versionName` 与本次 tag 一致，`versionCode = 主*1e6+次*1e4+修订`
-      （2.1.0 → `2010000`）。
+      （2.1.1 → `2010001`）。
 - [ ] `README.md` / `README_EN.md` 的版本号、系统要求、构建命令与当前实现一致。
 - [ ] `node scripts/check-docs.cjs` 通过（相对链接无失效）。
 - [ ] 门禁结论必须抄当次实际输出（`verify-*` / `check-docs` 的末行与失败项），
@@ -50,7 +50,7 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
       （`verify-asar` 的 PluginManager 工厂门禁已覆盖"压缩类被补丁截断"这类回归）；
 - [ ] 设置 → 手写笔可打开，笔能出墨，关闭后 PDF 叠层为 0；
 - [ ] 打开 PDF 写一笔，离开后注释位置正确（不整体左下偏移）；
-- [ ] 关于页显示 `2.1.0`。
+- [ ] 关于页显示 `2.1.1`。
 
 本地 HAP 只用于冒烟；对外发布包由 CI 以 tag 重新构建。
 
@@ -142,7 +142,7 @@ Release 附件的 `SHA256SUMS.txt` / `MD5SUMS.txt` 与 HAP 同时生成。产物
 
 ```text
 OHSidian-v<版本>-<图标>-icon-<signed|unsigned>.hap
-# 例：OHSidian-v2.1.0-obsidian-icon-unsigned.hap
+# 例：OHSidian-v2.1.1-obsidian-icon-unsigned.hap
 ```
 
 图标段 `ohsidian` / `obsidian` 对应两种桌面图标变体。校验：
@@ -155,8 +155,8 @@ md5sum -c MD5SUMS.txt
 
 ```powershell
 # Windows PowerShell
-Get-FileHash .\OHSidian-v2.1.0-*-icon-unsigned.hap -Algorithm SHA256
-Get-FileHash .\OHSidian-v2.1.0-*-icon-unsigned.hap -Algorithm MD5
+Get-FileHash .\OHSidian-v2.1.1-*-icon-unsigned.hap -Algorithm SHA256
+Get-FileHash .\OHSidian-v2.1.1-*-icon-unsigned.hap -Algorithm MD5
 ```
 
 ## 5. 发布操作顺序
@@ -166,8 +166,8 @@ Get-FileHash .\OHSidian-v2.1.0-*-icon-unsigned.hap -Algorithm MD5
 3. 打 tag 并推送：
 
    ```bash
-   git tag -a v2.1.0 -m "OHSidian 2.1.0（内置 Pandoc 版）"
-   git push origin v2.1.0
+   git tag -a v2.1.1 -m "OHSidian 2.1.1（内置 Pandoc 许可合规版）"
+   git push origin v2.1.1
    ```
 
    **tag 就是版本号**：CI 以 tag 为准，自动把 `versionName`/`versionCode` 写入

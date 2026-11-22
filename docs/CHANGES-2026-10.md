@@ -5777,3 +5777,27 @@ check-docs 全绿。obsidian.asar 与 patch rev 不变（仍 rev213），本次�
 `check-docs` 全绿；HAP 重建后在 `resources/resfile/pandoc/` 下可直接看到三份许可证与声明。
 **未改变**：引擎仍随包内置、离线可用；不新增运行时下载；patch rev 不变（仍 rev213）。
 
+
+### 二十七、release 2.1.1：许可合规单独发版（versionCode 2010001）
+
+背景：`v2.1.0` tag 已于 `67c9076`（版本号提交）建立并发布；随后补齐的内置 Pandoc 许可材料
+（`229c4cd`：GPL-2.0 全文、WASI shim MIT 全文、精确源码声明、LICENSE「第三方组件」一节）
+在 tag **之后**，因此 2.1.0 的发布包不含这些文件。经确认 2.1.0 已对外，不移动既有 tag，
+改为**把许可合规作为 2.1.1 发布**（功能与 2.1.0 完全一致）。
+
+- `AppScope/app.json5`：`versionName` 2.1.0 → **2.1.1**，`versionCode` 2010000 → **2010001**
+  （主*1e6+次*1e4+修订）；
+- `docs/CHANGELOG.md` 新增 2.1.1 段（许可合规内容 + 与 2.1.0 的关系说明）；
+- `docs/RELEASE.md`（版本头、versionCode 示例、关于页、HAP 文件名、tag 命令）、
+  `docs/STYLUS.md`（状态行、版本对照、release HAP 验收值）、
+  `scripts/ci/release-notes-template.md`（标题 2.1.1 + 许可合规条目）同步；
+- 许可材料本身未变（仍是 `229c4cd` 的内容：`scripts/licenses/` 两份受版本管理的许可证 +
+  `PANDOC-SOURCE.txt` 生成逻辑 + 门禁断言）。
+
+**验证**：`assembleHap` 重建后 HAP 内 `module.json` 的 app.versionName/versionCode 应为
+2.1.1/2010001，且 `resources/resfile/pandoc/` 仍含三份许可证与 `PANDOC-SOURCE.txt`；
+`build-pandoc-wasm --check`（licenses present）、`verify-pandoc-wasm`、`verify-asar`、
+`verify-release`、`check-docs` 全绿。obsidian.asar 与 patch rev 不变（仍 rev213）。
+**发布动作（需人工）**：`git push origin main` 后打新 tag `v2.1.1`，由 CI 重建对外包
+（2.1.0 的 tag 与发布包保持原样）。
+

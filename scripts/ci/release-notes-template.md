@@ -2,7 +2,10 @@ OHSidian 是 [Obsidian](https://obsidian.md) 的非官方 HarmonyOS 移植版：
 
 > 目标系统：HarmonyOS 6.0.2 起（compatible API 22 / target API 24，真机验证）。遇到问题欢迎提 [Issue](https://github.com/PCFXPCFX/OHSidian/issues)。
 
-## 本版新增与修复（2.1.0）
+## 本版新增与修复（2.1.1）
+
+- **许可合规（2.1.1 新增）**：随包提供内置 Pandoc 的 GPL-2.0 许可证**全文**、WASI 运行时的 MIT
+  许可全文、以及含精确版本/源码地址/sha256 的第三方源码声明；组件仍随包内置，无需用户下载。
 
 - **内置 Pandoc（无需安装、无需弱沙箱）**：随包内置官方 Pandoc 3.10（WebAssembly），Enhancing Export /
   pandoc 类插件导出 docx、pptx、epub、html 等直接可用；平板与 PC 同一构建。限制：不能输出 PDF、

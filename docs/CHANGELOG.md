@@ -4,6 +4,26 @@
 > [CHANGES-2026-09](CHANGES-2026-09.md)、[CHANGES-2026-10](CHANGES-2026-10.md)
 > （开发日志，不是发布说明）。
 
+## 2.1.1（内置 Pandoc 许可合规）
+
+`versionCode 2010001` · Obsidian 1.13.7 · 内核 `ink rev 61`
+
+> 在 2.1.0 的基础上补齐内置 Pandoc 的许可合规材料；功能与 2.1.0 一致。
+
+**许可合规（本版新增）**
+
+- 随包提供 **GPL-2.0 许可证全文**（`resources/resfile/pandoc/LICENSE-GPL-2.0.txt`），
+  不再只有许可声明；
+- 随包提供 WASI 运行时 `browser_wasi_shim` 的 **MIT 许可证全文**；
+- `PANDOC-SOURCE.txt` 重写为完整第三方声明：三个组件（Pandoc 3.10 引擎 GPL-2.0-or-later、
+  `pandoc-wasm` 封装 MIT、`browser_wasi_shim` MIT OR Apache-2.0）的版权/许可、Hackage 与
+  GitHub 精确源码地址、两个 npm tarball 的 sha256，以及 GPL-2.0 第 3 条的源码提供声明；
+- 项目 `LICENSE` 新增中英双语「第三方组件」一节，README / README_EN 的许可段同步；
+- 组件仍随 HAP **内置**、离线可用，**无需用户下载**；发布门禁新增许可断言
+  （漏带许可证会直接失败）。
+
+**与 2.1.0 的关系**：功能完全相同；2.1.0 的 tag 已发布，许可材料随 2.1.1 一并发布。
+
 ## 2.1.0（内置 Pandoc 版）
 
 `versionCode 2010000` · Obsidian 1.13.7 · 内核 `ink rev 61`
