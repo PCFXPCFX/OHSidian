@@ -1658,16 +1658,61 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
-  // rev205 (pandoc-on-wasm): the renderer needs the filesystem path of the
-  // bundled pandoc assets (resources/resfile/pandoc). resourceDir is the HAP
-  // installation directory; the renderer reads this from the mode file.
+  // rev206 (pandoc-on-wasm): the renderer needs the filesystem path of the
+  // bundled pandoc assets. resourceDir semantics differ between HAP install
+  // layouts (rev205 guessed one form and the device reported "not found"), so
+  // this method PROBES the candidate layouts with fileIo.accessSync and
+  // publishes the directory that actually contains pandoc-service.cjs. It also
+  // publishes the raw roots + the tried list so renderer diagnostics can
+  // explain a miss without another build cycle.
   private publishPandocDir(): void {
-    let pandocDir: string = '';
+    let resourceDir: string = '';
+    let bundleCodeDir: string = '';
     try {
-      pandocDir = this.context.resourceDir + '/resources/resfile/pandoc';
-    } catch (eDir) {
-      LogUtil.warn(TAG, 'resourceDir unavailable for pandoc: ' + JSON.stringify(eDir));
-      return;
+      resourceDir = this.context.resourceDir || '';
+    } catch (eRes) {
+      LogUtil.warn(TAG, 'resourceDir read failed: ' + JSON.stringify(eRes));
+    }
+    try {
+      bundleCodeDir = this.context.getApplicationContext().bundleCodeDir || '';
+    } catch (eCode) {
+      LogUtil.warn(TAG, 'bundleCodeDir read failed: ' + JSON.stringify(eCode));
+    }
+    const roots: Array<string> = [];
+    if (resourceDir.length > 0) {
+      roots.push(resourceDir);
+    }
+    if (bundleCodeDir.length > 0 && roots.indexOf(bundleCodeDir) < 0) {
+      roots.push(bundleCodeDir);
+    }
+    // Candidate layouts: root already points at resources/resfile, HAP resfile
+    // kept as installed, resfile flattened to resources/, or bundle root.
+    const suffixes: Array<string> = ['', '/resources/resfile', '/resources'];
+    const tried: string[] = [];
+    let chosen: string = '';
+    for (let ri = 0; ri < roots.length && chosen.length === 0; ri++) {
+      for (let si = 0; si < suffixes.length; si++) {
+        const dir: string = roots[ri] + suffixes[si] + '/pandoc';
+        tried.push(dir);
+        try {
+          if (fileIo.accessSync(dir + '/pandoc-service.cjs')) {
+            chosen = dir;
+            break;
+          }
+        } catch (eProbe) {
+          // candidate miss
+        }
+      }
+    }
+    if (chosen.length === 0) {
+      tried.push('/data/storage/el1/bundle/resources/resfile/pandoc');
+      try {
+        if (fileIo.accessSync('/data/storage/el1/bundle/resources/resfile/pandoc/pandoc-service.cjs')) {
+          chosen = '/data/storage/el1/bundle/resources/resfile/pandoc';
+        }
+      } catch (eFinal) {
+        // miss
+      }
     }
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
@@ -1683,17 +1728,23 @@ export class WebAbility extends WebBaseAbility {
       } catch (eRead) {
         cfg = {};
       }
-      if (cfg['pandocDir'] === pandocDir) {
+      const triedText: string = JSON.stringify(tried);
+      if (cfg['pandocDir'] === chosen && cfg['pandocDirTried'] === triedText &&
+        cfg['resourceDir'] === resourceDir) {
         return;
       }
-      cfg['pandocDir'] = pandocDir;
+      cfg['pandocDir'] = chosen;
+      cfg['pandocDirTried'] = triedText;
+      cfg['resourceDir'] = resourceDir;
+      cfg['bundleCodeDir'] = bundleCodeDir;
       this.publishModeFileAtomic(filePath, cfg);
-      LogUtil.info(TAG, 'pandoc dir published: ' + pandocDir);
+      LogUtil.info(TAG, 'pandoc dir published: ' + (chosen.length > 0 ? chosen : '(not found)') +
+        ', resourceDir=' + resourceDir + ', bundleCodeDir=' + bundleCodeDir +
+        ', tried=' + triedText);
     } catch (err) {
       LogUtil.error(TAG, 'failed to write pandocDir to mode file: ' + JSON.stringify(err));
     }
   }
-
   // Publishes the installed system font family names (font.getSystemFontList)
   // into the mode file as cfg.systemFonts. The renderer's font picker
   // (OHSidian: 界面字体命令) offers these so the user can apply the font

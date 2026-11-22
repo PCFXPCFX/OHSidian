@@ -249,7 +249,7 @@ try {
     // rev205: built-in pandoc (WebAssembly) - renderer loader + child_process
     // shim + settings/status/command surface.
     'app built-in pandoc wasm patched in':
-      app.includes('window.__ohsidianPandocPatchRev = 205') &&
+      app.includes('window.__ohsidianPandocPatchRev = 206') &&
       app.includes('pandoc-service.cjs') &&
       app.includes('__ohsidianPandocWrapped') &&
       app.includes('Pandoc（内置 WASM）'),
@@ -257,6 +257,13 @@ try {
       app.includes('ohsidianBuiltinPandocLabel') &&
       app.includes('ohsidian-diag-pandoc-wasm') &&
       app.includes('row("Pandoc(内置)"'),
+    // rev206: device first run could not locate the assets, so the loader now
+    // probes candidate layouts and the self-test/probe surfaces the tried dirs.
+    'app pandoc asset path probe':
+      app.includes('pandocDirTried') &&
+      app.includes('function pandocProbe()') &&
+      app.includes('ohsidian-diag-pandoc-paths') &&
+      app.includes('ohsidianPandocProbeLines'),
     'app font scale follower': app.includes('applyFontScale'),
     'app style-font follower (OhosThemeFont)': app.includes('"OhosThemeFont","HarmonyOS Sans"'),
     'app documents-dir migration': app.includes('pickMigration') && app.includes('当前仓库在应用沙箱内'),

@@ -24,8 +24,8 @@
  * ========================================================================== */
 ;(function () {
   try {
-    if (window.__ohsidianPandocPatchRev === 205) return;
-    window.__ohsidianPandocPatchRev = 205;
+    if (window.__ohsidianPandocPatchRev === 206) return;
+    window.__ohsidianPandocPatchRev = 206;
     if (window.__ohsidianPandoc) return;
 
     var fs = require("fs");
@@ -54,29 +54,101 @@
     }
 
     var cachedDir = null;
-    function pandocDir() {
-      if (cachedDir !== null) return cachedDir || null;
-      var candidates = [];
-      try {
-        var cfg = readModeConfig();
-        if (cfg && typeof cfg.pandocDir === "string" && cfg.pandocDir) candidates.push(cfg.pandocDir);
-      } catch (e0) { /* ignore */ }
-      try {
-        if (process && process.resourcesPath) candidates.push(path.join(process.resourcesPath, "pandoc"));
-      } catch (e1) { /* ignore */ }
-      try {
-        if (process && process.resourcesPath) candidates.push(path.join(process.resourcesPath, "resfile", "pandoc"));
-      } catch (e2) { /* ignore */ }
-      for (var i = 0; i < candidates.length; i++) {
-        try {
-          if (candidates[i] && fs.existsSync(path.join(candidates[i], SERVICE_FILE))) {
-            cachedDir = candidates[i];
-            return cachedDir;
-          }
-        } catch (e3) { /* ignore */ }
+    var lastTried = [];
+
+    function uniqPush(list, dir) {
+      if (!dir) return;
+      var p = String(dir).replace(/\/+$/, "");
+      if (p && list.indexOf(p) < 0) list.push(p);
+    }
+
+    /* Every plausible location of resources/resfile/pandoc. The ArkTS side
+       probes on install and publishes the hit, but older/compat layouts and a
+       late publish are covered here too. */
+    function candidateDirs() {
+      var out = [];
+      var cfg = null;
+      try { cfg = readModeConfig(); } catch (e0) { cfg = null; }
+      function addBase(base) {
+        if (!base) return;
+        var b = String(base).replace(/\/+$/, "");
+        uniqPush(out, b + "/pandoc");
+        uniqPush(out, b + "/resources/resfile/pandoc");
+        uniqPush(out, b + "/resources/pandoc");
       }
-      cachedDir = "";
+      if (cfg) {
+        if (typeof cfg.pandocDir === "string") uniqPush(out, cfg.pandocDir);
+        try {
+          if (typeof cfg.pandocDirTried === "string" && cfg.pandocDirTried) {
+            var tried = JSON.parse(cfg.pandocDirTried);
+            if (Array.isArray(tried)) {
+              for (var ti = 0; ti < tried.length; ti++) uniqPush(out, tried[ti]);
+            }
+          }
+        } catch (eTried) { /* ignore */ }
+        addBase(cfg.resourceDir);
+        addBase(cfg.bundleCodeDir);
+      }
+      try { if (process && process.execPath) addBase(path.dirname(process.execPath)); } catch (e1) { /* ignore */ }
+      try { if (process && process.resourcesPath) addBase(process.resourcesPath); } catch (e2) { /* ignore */ }
+      try {
+        var electronApi = require("electron");
+        if (electronApi && electronApi.app && typeof electronApi.app.getAppPath === "function") {
+          addBase(path.dirname(electronApi.app.getAppPath()));
+        }
+      } catch (e3) { /* ignore */ }
+      try {
+        var remoteApi = require("@electron/remote");
+        if (remoteApi && remoteApi.app && typeof remoteApi.app.getAppPath === "function") {
+          addBase(path.dirname(remoteApi.app.getAppPath()));
+        }
+      } catch (e4) { /* ignore */ }
+      uniqPush(out, "/data/storage/el1/bundle/resources/resfile/pandoc");
+      uniqPush(out, "/data/storage/el1/bundle/resources/pandoc");
+      return out;
+    }
+
+    function pandocDir() {
+      if (cachedDir) return cachedDir;
+      var dirs = candidateDirs();
+      lastTried = [];
+      for (var i = 0; i < dirs.length; i++) {
+        var dir = dirs[i];
+        var exists = false;
+        try { exists = fs.existsSync(path.join(dir, SERVICE_FILE)); } catch (e) { exists = false; }
+        lastTried.push({ dir: dir, exists: exists });
+        if (exists) {
+          cachedDir = dir;
+          return dir;
+        }
+      }
       return null;
+    }
+
+    /* Diagnostic snapshot: mode-file hints, engine paths and every tried dir.
+       The settings self-test shows this when the assets cannot be found. */
+    function pandocProbe() {
+      pandocDir();
+      var env = {};
+      try { env.execPath = process.execPath; } catch (e0) { /* ignore */ }
+      try { env.resourcesPath = process.resourcesPath || ""; } catch (e1) { /* ignore */ }
+      try { env.cwd = process.cwd(); } catch (e2) { /* ignore */ }
+      try {
+        var electronApi = require("electron");
+        if (electronApi && electronApi.app) {
+          env.appPath = electronApi.app.getAppPath();
+          env.userData = electronApi.app.getPath("userData");
+        }
+      } catch (e3) { /* ignore */ }
+      var mode = {};
+      try {
+        var cfg = readModeConfig() || {};
+        mode.pandocDir = cfg.pandocDir;
+        mode.pandocDirTried = cfg.pandocDirTried;
+        mode.resourceDir = cfg.resourceDir;
+        mode.bundleCodeDir = cfg.bundleCodeDir;
+      } catch (e4) { /* ignore */ }
+      return { dir: cachedDir, mode: mode, env: env, tried: lastTried };
     }
 
     var service = null;
@@ -98,7 +170,7 @@
       try {
         var dir = pandocDir();
         if (!dir) {
-          throw new Error("pandoc 资源未找到（pandocDir 未发布或 HAP 未包含 resources/resfile/pandoc）");
+          throw new Error("pandoc 资源未找到（点「自检」可看路径探针；HAP 需包含 resources/resfile/pandoc）");
         }
         var api = require(path.join(dir, SERVICE_FILE));
         if (!api || typeof api.createService !== "function" || typeof api.createPandocInstance !== "function") {
@@ -399,11 +471,11 @@
     }
 
     window.__ohsidianPandoc = {
-      patchRev: 205,
+      patchRev: 206,
       dir: function () { return pandocDir(); },
       version: function () { return pandocVersion(); },
       status: function () {
-        var s = { version: pandocVersion(), dir: pandocDir(), ready: false, error: "", service: null };
+        var s = { version: pandocVersion(), dir: pandocDir(), ready: false, error: "", service: null, tried: lastTried.slice() };
         if (service) {
           try {
             var info = service.info();
@@ -412,14 +484,19 @@
             s.service = info;
           } catch (e) { s.error = String((e && e.message) || e); }
         }
-        if (!s.dir) s.error = s.error || "pandoc 资源未找到（pandocDir 未发布）";
+        if (!s.dir) s.error = s.error || "pandoc 资源未找到（pandocDir 未发布；点自检看路径探针）";
         else if (serviceError) s.error = String((serviceError && serviceError.message) || serviceError);
         return s;
       },
-      selfTest: function () { return getService().selfTest(); },
-      run: function (argv, stdin, cwd) {
-        return getService().runCli({ argv: argv, stdin: stdin, cwd: cwd });
+      selfTest: function () {
+        return Promise.resolve().then(function () { return getService().selfTest(); });
       },
+      run: function (argv, stdin, cwd) {
+        return Promise.resolve().then(function () {
+          return getService().runCli({ argv: argv, stdin: stdin, cwd: cwd });
+        });
+      },
+      probe: function () { return pandocProbe(); },
       reset: function () { service = null; serviceError = null; },
       _wrapChildProcess: wrapChildProcess,
       _shellSplit: shellSplit,

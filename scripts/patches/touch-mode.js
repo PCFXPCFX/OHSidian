@@ -220,6 +220,40 @@ function ohsidianBuiltinPandocLabel(){
     return "pandoc "+s.version+" (wasm) · 未使用（懒加载）";
   }catch(e){return "未知: "+String((e&&e.message)||e)}
 }
+/* rev206: shared failure report. The self-test click used to die silently when
+   the assets were missing (getService threw synchronously); the failure modal
+   now always opens and carries the renderer path probe (mode fields, engine
+   paths, every candidate dir and whether it exists). */
+function ohsidianPandocProbeLines(){
+  var L=[];
+  try{
+    var p=window.__ohsidianPandoc;
+    if(!p){L.push("  window.__ohsidianPandoc 不存在（pandoc 补丁未加载）");return L}
+    var s=p.status();
+    L.push("  状态: "+(s.ready?("已就绪 · pandoc "+s.version):(s.error||"未初始化")));
+    var pr=p.probe?p.probe():null;
+    if(pr){
+      if(pr.dir)L.push("  资源目录: "+pr.dir);
+      L.push("  模式文件字段:");
+      L.push("    pandocDir="+(pr.mode.pandocDir||"(空)"));
+      L.push("    resourceDir="+(pr.mode.resourceDir||"(空)"));
+      L.push("    bundleCodeDir="+(pr.mode.bundleCodeDir||"(空)"));
+      L.push("  引擎路径:");
+      L.push("    execPath="+(pr.env.execPath||"?"));
+      L.push("    resourcesPath="+(pr.env.resourcesPath||"(空)"));
+      L.push("    appPath="+(pr.env.appPath||"(空)"));
+      if(pr.tried&&pr.tried.length){
+        L.push("  尝试过的目录("+pr.tried.length+"):");
+        for(var i=0;i<pr.tried.length;i++){
+          L.push("    "+(pr.tried[i].exists?"[有] ":"[无] ")+pr.tried[i].dir);
+        }
+      }
+    }
+  }catch(eProbe){
+    L.push("  探针失败: "+String((eProbe&&eProbe.message)||eProbe));
+  }
+  return L;
+}
 /* Atomic mode-file publish (H1): writeFileSync truncates first, so a crash
    (or a concurrent ArkTS reader) could observe an empty/partial file between
    truncate and write. Write the temp file first, then rename over the
@@ -4107,7 +4141,14 @@ function ohsidianSettingsRows(root){
             ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",lines);
             bpLabel.textContent=ohsidianBuiltinPandocLabel();
           }).catch(function(eBp){
-            try{new Notice("Pandoc 自检失败: "+String((eBp&&eBp.message)||eBp))}catch(eN){}
+            try{
+              var failL=["OHSidian 诊断: Pandoc（内置 WASM）自检失败","",
+                "  错误: "+String((eBp&&eBp.message)||eBp),""];
+              failL=failL.concat(ohsidianPandocProbeLines());
+              ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",failL);
+            }catch(eN){
+              try{new Notice("Pandoc 自检失败: "+String((eBp&&eBp.message)||eBp))}catch(eN2){}
+            }
           }).then(function(){bpBtn.disabled=false;bpBtn.textContent="自检";});
         }catch(eBp2){bpBtn.disabled=false;bpBtn.textContent="自检";}
       });
@@ -5269,7 +5310,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="205";
+var OHSIDIAN_PATCH_REV="206";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -5434,7 +5475,14 @@ var install=function(app){
             L.push("  资源目录: "+(window.__ohsidianPandoc.dir()||"(未找到)"));
             L.push("  限制: 无 PDF / 无网络 / 仅 Lua filter；插件 execFile/spawn 调用会被自动接管。");
             ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",L);
-          }).catch(function(ePw){try{new Notice("Pandoc 自检失败: "+String((ePw&&ePw.message)||ePw))}catch(eN){}});
+          }).catch(function(ePw){
+            try{
+              var failL2=["OHSidian 诊断: Pandoc（内置 WASM）自检失败","",
+                "  错误: "+String((ePw&&ePw.message)||ePw),""];
+              failL2=failL2.concat(ohsidianPandocProbeLines());
+              ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",failL2);
+            }catch(eN){}
+          });
         }catch(ePw2){}
       }});
     app.commands.addCommand({id:"ohsidian-diag-plugins",name:"OHSidian 诊断: 插件排查（清单 / 错误 / 日志）",
@@ -5443,6 +5491,17 @@ var install=function(app){
       callback:function(){try{ohsidianClearPluginErrors()}catch(e){}}});
     app.commands.addCommand({id:"ohsidian-diag-log-clear",name:"OHSidian 诊断: 清空渲染层日志",
       callback:function(){try{ohsidianClearConsoleLog()}catch(e){}}});
+    app.commands.addCommand({id:"ohsidian-diag-pandoc-paths",name:"OHSidian 诊断: Pandoc 路径探针",
+      callback:function(){
+        try{
+          var L=["OHSidian 诊断: Pandoc 路径探针",""];
+          L=L.concat(ohsidianPandocProbeLines());
+          L.push("");
+          L.push("  说明: 资源目录应包含 pandoc-service.cjs 与 pandoc.wasm.gz；");
+          L.push("  若全部 [无]，把本报告发给维护者（ArkTS 发布路径需要按实际布局调整）。");
+          ohsidianShowReportModal("OHSidian 诊断: Pandoc 路径探针",L);
+        }catch(ePaths){}
+      }});
     try{ohsidianScheduleSettingsTab()}catch(eTab){}
     /* The ink layer needs the loopback socket even when no native video was
        opened; retry until the ArkTS page has published its port file. */

@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→204）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→206）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 204、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 206、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5557,3 +5557,22 @@ BUILD SUCCESSFUL；HAP 内 asar 复核 rev 202；`verify-release` / `check-docs`
 rev 205 与 patch 标记、`modules.abc` 含 `publishPandocDir`、HAP 含 `resources/resfile/pandoc/*`。
 **真机待验**：① 设置→诊断→Pandoc 自检通过；② 用 Enhancing Export 导出 docx/pptx/epub；③ 平板与 PC 同一 HAP 均可用；
 ④ PDF 导出给出明确提示。
+
+### 十七、rev 206：修复内置 pandoc 的自检无弹窗与资源路径未发布
+
+真机第一次运行 rev205 暴露两个问题：
+
+1. **设置里「Pandoc（内置 WASM）」点自检没有弹窗**：资源缺失时 `getService()` 同步抛错，被 click 处理器的
+   try/catch 静默吞掉。修法：`selfTest()`/`run()` 始终返回 Promise，失败走 `.catch` 并**总是**打开报告弹窗，
+   内容含错误 + 路径探针（模式字段 / execPath / resourcesPath / appPath / 每个候选目录是否存在）；
+2. **`pandocDir` 未发布 / 资源未找到**：rev205 直接拼 `resourceDir + '/resources/resfile/pandoc'`，与设备实际
+   安装布局不符。修法：ArkTS `publishPandocDir()` 改为用 `fileIo.accessSync` 探测
+   `resourceDir`/`bundleCodeDir` × `''`/`/resources/resfile`/`/resources` 候选矩阵，发布命中目录，并写入
+   `pandocDirTried`/`resourceDir`/`bundleCodeDir`；渲染层多候选路径 + 失败不缓存（晚发布可自愈）+
+   `execPath`/`resourcesPath`/`appPath`/固定绝对路径兜底；新增命令「OHSidian 诊断: Pandoc 路径探针」。
+
+**验证**：`--repatch`/`verify-asar`（新增 pandoc 路径探针标记）/`verify-pandoc-wasm`/`verify-release`/
+`check-docs` 全绿；`assembleHap` BUILD SUCCESSFUL；HAP 内 asar 复核 rev206、`modules.abc` 含
+`pandocDirTried`/`bundleCodeDir` 探测逻辑。
+**真机待验**：① 设置→诊断→Pandoc（内置 WASM）→自检能弹出结果；② 若仍报未找到，自检弹窗/「Pandoc 路径探针」
+会列出候选目录与存在性，据此可直接定位安装布局；③ 成功后用 Enhancing Export 导出 docx/pptx/epub。
