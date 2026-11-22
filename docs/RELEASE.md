@@ -40,7 +40,8 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
 
 安装 `electron/build/default/outputs/default/electron-default-signed.hap`，确认：
 
-- [ ] 冷启动进入上次仓库，窗口铺满（平板触摸形态）；
+- [ ] 冷启动进入上次仓库，窗口铺满（平板触摸形态）；**不得出现「加载 Obsidian 时发生错误」**
+      （`verify-asar` 的 PluginManager 工厂门禁已覆盖"压缩类被补丁截断"这类回归）；
 - [ ] 设置 → 手写笔可打开，笔能出墨，关闭后 PDF 叠层为 0；
 - [ ] 打开 PDF 写一笔，离开后注释位置正确（不整体左下偏移）；
 - [ ] 关于页显示 `2.0.1`。

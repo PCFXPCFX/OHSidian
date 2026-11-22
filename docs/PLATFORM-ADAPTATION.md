@@ -203,7 +203,7 @@ profile 再重签即可。离线改 profile 再自签**不可行**：profile 由
 
 > 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象
 > `main @ e528275`）。报告结论一句话：**两个插件不是同一种死法，也都不是 2.0 的代码改动
-> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **196**）；
+> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **197**）；
 > 报告里"2.0 无关"的增量考古（补丁层/引擎层 diff 与 eval/require/loadPlugin 零交集）不再
 > 赘述，见原报告第三部分。
 
@@ -240,6 +240,15 @@ profile 再重签即可。离线改 profile 再自签**不可行**：profile 由
 **实现边界（如实记录）**：① 预取失败会让**整单安装中止**——旧代码在 main.js 下载失败时
 只记一行 `main.js not found` 并继续写 manifest，等于装一个缺件的插件；② ID 不匹配时会
 先多下载一次 main.js（"先校验后落盘"的代价），用户只会看到 `Plugin ID mismatch.`。
+
+**实现约束（P0 教训）**：内核压缩后的类成员是**一条逗号表达式**
+（`return v(t,e),method1=...,method2=...,t`）。往方法链里插新成员必须用 `,` 连接且**不能带
+`;`**——否则 `return` 提前结束，类工厂返回的是被插的函数而不是类：`new Plugins(app)` 得到
+helper 返回的 Promise，`app.plugins` 变成 Promise，启动即报
+`TypeError: i.app.plugins.on is not a function`（2026-11-22 真机回归，见 CHANGES 第 219 轮 §十）。
+门禁 `verify-plugin-install` 现在会**取出出货 asar 里的 PluginManager 类工厂并求值**，断言
+`installPlugin/enablePlugin/checkForUpdates/__ohsidianFetchPluginBundle` 都在原型上，
+这类"语法合法但运行时类被破坏"的补丁不会再静默出货。
 
 **为什么不用 `content-length`**：GitHub/CDN 对文本常做 gzip，引擎 `requestUrl` 解码后的
 字节数与响应头长度不可比，误判会把**好插件**判坏。语法探测对审计实测截断点全命中
@@ -345,7 +354,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 
 ### 6.7 真机定谳步骤（替代报告 §五的控制台探针）
 
-1. 装本版（rev 196）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
+1. 装本版（rev 197）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
 2. `secretStorage` 行：期望 `WARN adapter=有 · isEncryptionAvailable=false（明文模式）`，
    `引擎 safeStorage: undefined（引擎缺口；补丁已兜底为明文透传）`——若 remote 对象整体缺失则
    该行显示 `window.electron.remote 不可用`，同属引擎缺口，补丁同样兜底；
@@ -364,7 +373,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 - `node scripts/update-obsidian.mjs --repatch` → 内嵌 `verify-asar`（含
   `verify-plugin-install` 行为用例）全绿；
 - `assembleHap` **BUILD SUCCESSFUL**；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability`
-  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="196"`、
+  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="197"`、
   四条 NF 标记、console bridge 错误默认档；
 - `verify-release` / `check-docs` 全绿；
 - 独立只读审查（2026-11-22，对照冻结态代码 + 出货 asar 逐字）：NF-015/017/018 无 P1/P2；

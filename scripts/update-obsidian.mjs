@@ -476,9 +476,15 @@ async function main() {
     });
   });
   return Promise.all([zy(manifestUrl).then(function(resp){ return resp.text; }),guarded]);
-};`;
+}`;
   const PLUGIN_INSTALL_HELPER_SRC = 't.prototype.installPlugin=function(e,t,n){return y(this,void 0,Promise,';
-  const PLUGIN_INSTALL_HELPER_DST = PLUGIN_BUNDLE_HELPER + '\n' + PLUGIN_INSTALL_HELPER_SRC;
+  /* The minified class body is `return v(t,e),method1=...,method2=...,t` - one
+     comma expression. This helper must therefore be joined with a COMMA and
+     must NOT end with a semicolon: a `;` there terminates the return early,
+     the factory yields the helper function instead of the class, and
+     `new Plugins(app)` returns the helper's Promise - Obsidian then dies at
+     boot with "i.app.plugins.on is not a function" (device report 2026-11-22). */
+  const PLUGIN_INSTALL_HELPER_DST = PLUGIN_BUNDLE_HELPER + ',' + PLUGIN_INSTALL_HELPER_SRC;
   const pluginInstallFetchSrc = 'case 1:return m.trys.push([1,3,,4]),[4,zy(Py(e,t,eL)).text];';
   const pluginInstallFetchDst = 'case 1:return m.trys.push([1,3,,4]),[4,this.__ohsidianFetchPluginBundle(Py(e,t,eL),Py(e,t,tL))];';
   const pluginInstallPairSrc = 'case 2:return a=m.sent(),(s=JSON.parse(a)).id&&s.id===i?[3,4]:';

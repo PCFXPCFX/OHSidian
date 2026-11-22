@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→197）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 196、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 197、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5354,3 +5354,30 @@ P1/P2；NF-016 有 1 个 P1 与 3 个 P2，全部已修，并复跑全部门禁�
   2in1 启动门控改用 `captionForm()`（`inWindowForm()` 在 2in1 恒 false）、
   `enforceFrameStyle` latch 只在实际成功时置位、机上诊断 >6 MB 标 SKIP 并单独计数、
   BRAT 迁移路径改用 `vault.configDir`、NF-016 隐私面补记。
+
+### 十、P0 回归（2026-11-22，真机首启报错）
+
+**症状**：装 rev 196 HAP 后冷启动，Obsidian 启动页显示
+「加载 Obsidian 时发生错误。 TypeError: i.app.plugins.on is not a function」。
+
+**根因**：NF-015 的 helper 用文本补丁插在压缩类的**方法链**里。该内核把类成员写成一条逗号
+表达式：`var m4=function(e){function t(t){…}return v(t,e),method1=…,method2=…,t}(FD)`。
+helper 以 `};` 结尾，这个 `;` 在方法链中**提前结束了 return**：类工厂不再返回类 `t`，而是返回
+helper 函数本身；`s=this.plugins=new m4(this)` 变成用 helper 当构造器 → 返回 `Promise.all(...)`，
+`app.plugins` 成了 Promise；紧接着 `this.setting=new Aie(this)` 构造社区插件设置页时执行
+`i.app.plugins.on("changed",…)` → TypeError，启动中止。
+
+**影响**：整包无法启动（P0）。所有既有 marker/语法门禁都发现不了——语法合法、字符串齐全；
+v195/196 之前的补丁没有往类方法链里插过成员，这是第一次。
+
+**修复**：helper 改为以 `}` 结尾、用 `,` 与后续方法连接（`update-obsidian.mjs` 的
+`PLUGIN_INSTALL_HELPER_DST`），补丁 rev 196→197；重建 asar 与 HAP。
+
+**门禁补强**（这次必须能拦住）：`verify-plugin-install.cjs` 新增两类断言——
+① 结构：helper 必须由 `,t.prototype.installPlugin` 连接、不得出现 `};t.prototype.installPlugin`；
+② **运行时**：从出货 asar 中提取 PluginManager 类工厂，在桩环境里 `with` 求值，断言返回值
+是类且 `installPlugin/enablePlugin/checkForUpdates/__ohsidianFetchPluginBundle` 都在原型上。
+已用 rev 196 的坏 asar 复现该门禁失败，修复后全绿。
+
+**教训**：对压缩内核做文本补丁时，"插进去的代码语法合法"不等于"宿主类仍然完整"；凡插入到
+`return a,b,c` 这类逗号表达式内部的补丁，都要有运行时/结构双门禁。

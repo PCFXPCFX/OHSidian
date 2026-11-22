@@ -39,17 +39,78 @@ try {
 /* ---- NF-015: the prefetch helper as shipped ------------------------------ */
 const HELPER_START = 't.prototype.__ohsidianFetchPluginBundle=function(manifestUrl,mainUrl){';
 const helperStart = app.indexOf(HELPER_START);
-const helperEnd = helperStart >= 0 ? app.indexOf('t.prototype.installPlugin=function', helperStart) : -1;
+const helperEnd = helperStart >= 0 ? app.indexOf(',t.prototype.installPlugin=function', helperStart) : -1;
 const helperSrc = helperStart >= 0 && helperEnd > helperStart ? app.slice(helperStart, helperEnd) : null;
 check('install prefetch helper present in app.js', !!helperSrc);
-check('install prefetch ends at its statement boundary',
-  !!helperSrc && helperSrc.trimEnd().endsWith('};'));
+check('install prefetch ends at its statement boundary (comma-joined, no ;)',
+  !!helperSrc && helperSrc.trimEnd().endsWith('}') && !helperSrc.trimEnd().endsWith(';'));
 check('install prefetch validates with new Function (loadPlugin parity)',
   !!helperSrc && helperSrc.includes('new Function(String(resp.text).replace(f4,"")+v4)'));
 check('install prefetch retries through the release proxy',
   !!helperSrc && helperSrc.includes('releases.obsidian.md/proxy?url='));
 check('install prefetch marks the rejection as incomplete',
   !!helperSrc && helperSrc.includes('__ohsidianPluginDownloadIncomplete=true'));
+/* ---- Structural + runtime: the helper is one element of the minified class
+   body's `return v(t,e),method=...,t` comma expression. A semicolon there ends
+   the return early, the factory yields the helper function instead of the
+   PluginManager class, `new Plugins(app)` produces the helper's Promise and
+   Obsidian fails at boot with "i.app.plugins.on is not a function" (device
+   report 2026-11-22). Marker checks cannot see this, so evaluate the shipped
+   factory and assert that it really is the class. ---- */
+check('install helper joins the class method list with a comma',
+  app.includes('},t.prototype.installPlugin=function(e,t,n){'));
+check('install helper does not terminate the class return early',
+  !/};\s*t\.prototype\.installPlugin=/.test(app));
+(function verifyShippedPluginManagerClass() {
+  const ctorAnchor = 'i.manifests={},i.plugins={}';
+  const ctor = app.indexOf(ctorAnchor);
+  check('PluginManager constructor found in app.js', ctor >= 0);
+  if (ctor < 0) return;
+  const before = app.slice(Math.max(0, ctor - 160), ctor);
+  const m = before.match(/var ([A-Za-z_$][\w$]*)=function\(e\)\{function t\(t\)\{var n,i=e\.call\(this\)\|\|this;return\s*$/);
+  check('PluginManager factory start locatable', !!m);
+  if (!m) return;
+  const name = m[1];
+  const start = app.lastIndexOf('var ' + name + '=function(e){', ctor);
+  const endMarker = ',t}(FD)';
+  const end = app.indexOf(endMarker, ctor);
+  check('PluginManager factory end locatable', start >= 0 && end > start);
+  if (start < 0 || end <= start) return;
+  /* include the comma-returned class and the `(FD)` invocation, otherwise this
+     would only evaluate the outer wrapper function, not its result */
+  const factorySrc = app.slice(start, end + endMarker.length);
+  const stub = new Proxy(function () {}, {
+    get: (t, p) => (p === Symbol.toPrimitive ? () => 'stub' : stub),
+    apply: () => stub,
+    construct: () => stub,
+  });
+  const envBase = {
+    v: function (t, e) {
+      t.prototype = e && e.prototype ? Object.create(e.prototype) : {};
+      t.prototype.constructor = t;
+    },
+  };
+  /* With-scope proxy: every unresolved identifier is a stub. Symbol.unscopables
+     MUST stay undefined, otherwise the with-lookup treats every name as
+     unscopable and falls through to the real global scope ("FD is not defined"). */
+  const env = new Proxy(envBase, {
+    has: () => true,
+    get: (t, p) => (p === Symbol.unscopables ? undefined : (p in t ? t[p] : stub)),
+  });
+  let T = null;
+  try {
+    T = new Function('__env', 'with(__env){' + factorySrc + '\nreturn ' + name + ';}')(env);
+  } catch (e) {
+    check('PluginManager factory evaluates', false);
+    return;
+  }
+  check('PluginManager factory yields the class (not the helper)',
+    typeof T === 'function' && !!T.prototype &&
+    typeof T.prototype.installPlugin === 'function' &&
+    typeof T.prototype.enablePlugin === 'function' &&
+    typeof T.prototype.checkForUpdates === 'function' &&
+    typeof T.prototype.__ohsidianFetchPluginBundle === 'function');
+})();
 check('installPlugin wires the validating prefetch into case 1',
   app.includes('case 1:return m.trys.push([1,3,,4]),[4,this.__ohsidianFetchPluginBundle(Py(e,t,eL),Py(e,t,tL))];'));
 check('installPlugin unpacks the pair (a=manifest, d=main)',
