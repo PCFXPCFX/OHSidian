@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→209）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→210）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 209、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 210、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5632,3 +5632,20 @@ rev208 真机自检：`pandoc 3.10 · 已就绪`，`version`/`markdown -> html` 
 **验证**：build-pandoc-wasm 重建并更新 lock；--repatch/verify-asar（rev209 标记）/verify-pandoc-wasm/
 verify-release 全绿；assembleHap BUILD SUCCESSFUL；HAP 内 pandoc-host.cjs 含 tmpDir 逻辑。
 **真机待验**：自检三项全部 OK（docx 应有字节数）；随后用 Enhancing Export 导出 docx/pptx/epub。
+
+### 二十一、rev 210：设置「诊断」收敛为三张卡片（纯事实报告、统一格式），命令面板诊断命令移除
+
+此前设置「诊断」组 10 行、报告里大量分析/建议句，且 Pandoc 路径输入在整理时被弄丢。现在：
+
+- **三张卡片、同一版式**：通用诊断 / Pandoc / 插件诊断；每张 = 标题 + 右侧实时状态（补丁号、内置 pandoc 状态、
+  插件数量与设置页数量）+ 一个主按钮「运行」（清理类动作为文字链接），无说明段落；
+- **Pandoc 卡片恢复路径输入**：环境检查用的 Pandoc 路径输入框回到卡片内（保存在 ui-prefs，仅用于检查，不参与导出）；
+- **报告统一为纯事实**：头部固定「补丁: / 内核:」，正文为 ⟍小节 + 「键: 值」行；新增 `ohsidianCompactLines()`
+  过滤分析/建议句（"请…/建议…/→…/结论…"与以 。结尾的句子），三份报告格式一致；
+- **日志档位切换移到「常规」组**（运行日志捕获 → 档位: 仅错误 / 全量 / 关闭），诊断卡片只读；
+- **命令面板诊断命令全部移除**（`ohsidian-diag-*`、`ohsidian-console-capture`），设置页是唯一入口。
+
+**验证**：--repatch/verify-asar（新增「三卡片/纯事实/路径输入/日志移到常规/无诊断命令」标记）/
+verify-plugin-install/verify-release 全绿；assembleHap BUILD SUCCESSFUL；HAP 内 asar 复核 rev210。
+**真机待验**：设置→诊断只有三张卡片、样式一致；Pandoc 卡片能输入路径；三份报告只有「键: 值」行；
+命令面板无诊断命令。

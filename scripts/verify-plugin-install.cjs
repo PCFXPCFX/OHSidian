@@ -139,15 +139,15 @@ check('console bridge uses a real ipcRenderer handle',
   !app.includes('var __ohIpc=require("@electron/remote").ipcRenderer;'));
 check('vault-open migration uses the same IPC handle',
   app.includes('var vaultIpc=ohsidianIpcRenderer();'));
-check('capture command exposes the tri-state cycle',
-  app.includes('运行日志捕获 (仅错误/全量/关闭, 重启生效)'));
+check('log capture cycle exposed in general settings',
+  app.includes('ohsidianCycleConsoleCapture') && app.includes('运行日志捕获'));
 check('renderer safeStorage fallback block present',
   app.includes('window.__ohsidianSafeStorageFallback=') &&
   app.includes('getSelectedStorageBackend:function(){return "basic_text"}'));
 check('secretStorage desktop adapter falls back to plaintext',
   app.includes('secretStorage uses plaintext passthrough (NF-018)'));
 check('on-device plugin integrity diagnostic present',
-  app.includes('ohsidianRunPluginIntegrityProbe') && app.includes('ohsidian-diag-plugin'));
+  app.includes('ohsidianRunPluginIntegrityProbe') && app.includes('插件诊断'));
 
 /* rev198 (BRAT settings tab still missing on device): the diagnostic must be
    able to surface the real error - Error.stack through the console bridge,
@@ -157,7 +157,7 @@ check('console bridge keeps Error.stack (JSON.stringify would lose it)',
 check('diagnostic reports plugin load state + plugin setting tabs',
   app.includes('已注册插件设置页') && app.includes('loadingPluginId='));
 check('diagnostic appends the console.log tail',
-  app.includes('渲染层日志（console.log 末尾') && app.includes('appendLogTail'));
+  app.includes('appendLogTail') && app.includes('本会话日志'));
 check('plugin setting-tab repair shim present (BRAT onLayoutReady throw)',
   app.includes('function ohsidianRepairPluginSettingTabs(') &&
   app.includes('plugin setting tab registered late') &&
@@ -170,7 +170,7 @@ check('BRAT fingerprint normalizes the install transform (no false positive)',
   app.includes('归一化(去掉内核追加的 nosourcemap 标记)') &&
   app.includes('安装时追加的 +18 B 标记属正常'));
 check('diagnostic detects a plugin file replaced after boot',
-  app.includes('BRAT 文件时效') && app.includes('当前运行的是旧代码'));
+  app.includes('BRAT 文件时效') && app.includes('stale(文件晚于本会话启动)'));
 
 /* ---- Behaviour: synthetic downloads ------------------------------------- */
 if (helperSrc) {
@@ -364,7 +364,7 @@ if (helperSrc) {
       check("diagnostic: truncated plugin flagged BAD", /BAD bad/.test(text));
       check("diagnostic: unreadable plugin flagged BAD", /BAD gone/.test(text));
       check("diagnostic: huge plugin size-only (no synchronous parse)", /只报大小/.test(text));
-      check("diagnostic: verdict counts both failures", /发现 2 个无法解析/.test(text));
+      check("diagnostic: verdict counts both failures", /失败: 2/.test(text));
     })
     .then(async () => {
       /* ---- rev201: plugin error recorder (attribution + persistence) ---- */

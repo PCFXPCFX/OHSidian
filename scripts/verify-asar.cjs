@@ -147,16 +147,17 @@ try {
     // the shell probe passing the path as argv ($0) instead of pasting it into
     // the command string, and exec only for absolute paths.
     'app pandoc probe exec-bit EACCES split': app.includes('exec-eacces-perm'),
-    'app pandoc report verdict index': app.includes('结论汇总（每行一个候选'),
+    'app pandoc report index': app.includes('"▍外部"') && app.includes('"候选: "+cands.length'),
     'app pandoc shell probe passes path as argv': app.includes('"$0" --version'),
-    'app pandoc probe absolute paths only': app.includes('这不是绝对路径（插件可能按 PATH 解析）'),
-    'app pandoc settings row is diagnostics-only': app.includes('只用于本页的环境检查'),
+    'app pandoc probe absolute paths only': app.includes('execve: skipped (relative)'),
+    'app pandoc path input restored': app.includes('ohsidian-diag-path') &&
+      app.includes('ohsidianSetPandocPath'),
     // Weak-sandbox decision (HB-1 ④, 2026-11-18): ArkTS publishes the measured
     // sandbox type into the shared mode file, the probe reads it, and EPERM in a
     // weak-sandbox build gets the B-WS-6 wording instead of the signature story.
     'app sandbox mode read from mode file': app.includes('function ohsidianSandboxMode') && app.includes('cfg.sandbox'),
     'app pandoc probe weak-sandbox EPERM text': app.includes('当前是弱沙箱（CUSTOM_SANDBOX 已授予）'),
-    'app pandoc report sandbox line': app.includes('"沙箱形态: "+ohsidianSandboxLabel(sandbox)'),
+    'app pandoc report sandbox line': app.includes('"沙箱: "+(sandbox||"unknown")'),
     // Round 195 (patch rev 195), both markers are unique to this patch (the
     // ohsidian prefix keeps them out of upstream's minified names):
     // ① the inline Pandoc check row got its own copy button (the command-
@@ -164,7 +165,7 @@ try {
     //   fallback covers the embedded renderer refusing navigator.clipboard;
     // ② the 跟随系统 layout flip is merged over a 2000ms window so ONE window
     //   action causes at most ONE reload (state machine §九 / invariant I9).
-    'app diag copy button': app.includes('ohsidianCopyText') && app.includes('复制结果'),
+    'app diag reports copyable': app.includes('ohsidianCopyText') && app.includes('ohsidianShowReportModal'),
     'app layout flip debounce': app.includes('ohsidianFlipSettleMs=2000') &&
       app.includes('ohsidianFlipSettleRun'),
     // BUG-005: the mobile toolbar must not be a window drag region - this
@@ -195,7 +196,7 @@ try {
       !app.includes('mk("div","checkbox-container'),
     // Self-report command: proves which patch revision is actually running and
     // why the settings section did or did not register.
-    'app build/settings status command': app.includes('ohsidianBuildStatusLines') && app.includes('ohsidian-diag-build'),
+    'app build/settings status report': app.includes('ohsidianBuildStatusLines') && app.includes('ohsidianShowStatusReport'),
     // BUG-005 touch probe — TEMPORARY as well: logs what a bottom-of-screen
     // touch actually hits inside the page. Remove with the toolbar fix.
     'app touch probe (temporary)': app.includes('ohsidianInstallTouchProbe'),
@@ -220,15 +221,25 @@ try {
       app.includes('ohsidianRecordConsoleError') && app.includes('plugin-errors.json') &&
       app.includes('OHSIDIAN_PLUGIN_ERR_MAX'),
     'app plugin troubleshooting report':
-      app.includes('插件排查（清单 / 错误 / 日志）') &&
-      app.includes('ohsidian-diag-plugins-clear') &&
+      app.includes('插件诊断') &&
+      app.includes('ohsidianRunPluginIntegrityProbe') &&
       app.includes('插件错误（最近 12 条）'),
     // rev203: settings-page diagnostics hub, console.log in the status report,
     // sandbox diagnosis (declared / ACL / API) and the kernel settings-key fix.
+    // rev210: three fact-only cards with one layout; diagnostics live only here.
     'app settings diagnostics hub':
-      app.includes('itemEl(diag,"补丁与设置状态"') &&
-      app.includes('itemEl(diag,"支持文件"') &&
-      app.includes('function ohsidianShowStatusReport()'),
+      app.includes('ohsidian-diag-card') &&
+      app.includes('function ohsidianDiagHead') &&
+      app.includes('"通用诊断"') && app.includes('"Pandoc"') && app.includes('"插件诊断"'),
+    'app diagnostics commands removed':
+      !app.includes('id:"ohsidian-diag-') &&
+      !app.includes('id:"ohsidian-console-capture"'),
+    'app diagnostics are fact-only':
+      app.includes('function ohsidianCompactLines') &&
+      app.includes('补丁: "+OHSIDIAN_PATCH_REV') &&
+      app.includes('内核: "+kernel'),
+    'app log capture moved to general settings':
+      app.includes('运行日志捕获') && app.includes('ohsidianCycleConsoleCapture'),
     'app status report carries console log':
       app.includes('function ohsidianLogTailLines(') &&
       app.includes('▍渲染层日志（console.log 末尾，最多 40 行；优先错误/插件行）'),
@@ -239,7 +250,7 @@ try {
       app.includes('已折叠更早会话'),
     'app clear renderer log':
       app.includes('function ohsidianClearConsoleLog()') &&
-      app.includes('ohsidian-diag-log-clear'),
+      app.includes('"清空日志"'),
     'app sandbox diagnosis explains strong':
       app.includes('function ohsidianSandboxMeta()') &&
       app.includes('本包未声明 CUSTOM_SANDBOX') &&
@@ -251,18 +262,16 @@ try {
     'app built-in pandoc wasm patched in':
       app.includes('window.__ohsidianPandocPatchRev = 209') &&
       app.includes('pandoc-service.cjs') &&
-      app.includes('__ohsidianPandocWrapped') &&
-      app.includes('Pandoc（内置 WASM）'),
+      app.includes('__ohsidianPandocWrapped'),
     'app built-in pandoc wired to diagnostics':
       app.includes('ohsidianBuiltinPandocLabel') &&
-      app.includes('ohsidian-diag-pandoc-wasm') &&
-      app.includes('row("Pandoc(内置)"'),
+      app.includes('function ohsidianRunPandocDiag') &&
+      app.includes('row("Pandoc内置"'),
     // rev206: device first run could not locate the assets, so the loader now
     // probes candidate layouts and the self-test/probe surfaces the tried dirs.
     'app pandoc asset path probe':
       app.includes('pandocDirTried') &&
       app.includes('function pandocProbe()') &&
-      app.includes('ohsidian-diag-pandoc-paths') &&
       app.includes('ohsidianPandocProbeLines'),
     // rev207: the engine renderer has no WebAssembly, so the service falls back
     // to the main process over IPC; host diagnostics report both processes.
@@ -274,7 +283,7 @@ try {
     // rev208: V8 is jitless on this engine, so pandoc runs in a utility
     // process started with --no-jitless; diagnostics expose host capability.
     'app pandoc host diagnostics':
-      app.includes('ohsidian-diag-pandoc-host') &&
+      app.includes('ohs-pandoc-host') &&
       app.includes('工具进程: wasm='),
     'app font scale follower': app.includes('applyFontScale'),
     'app style-font follower (OhosThemeFont)': app.includes('"OhosThemeFont","HarmonyOS Sans"'),

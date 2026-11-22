@@ -182,8 +182,8 @@ Get-FileHash .\OHSidian-v2.0.1-*-icon-unsigned.hap -Algorithm MD5
   再检查对应场景的探针；不要在 gate 未过时发版。
 - **构建成功但启动闪退**：确认 `buildMode` 为 `release` 时 ArkGuard 仍关闭；本仓库
   已在构建配置中关闭混淆，若手动改动过请恢复。
-- **插件加载失败 / 插件没有设置页**：先让用户跑 设置 →「诊断」组 →「插件排查（清单 / 错误 / 日志）」
-  → 检查（或命令面板同名命令），整份报告可一键复制。报告里：`插件清单` 用 `BAD`/`!` 定位可疑插件，
+- **插件加载失败 / 插件没有设置页**：先让用户跑 设置 →「诊断」→「插件诊断」→ 运行，整份报告可一键复制。
+  报告里：`插件清单` 用 `BAD`/`!` 定位可疑插件，
   `插件错误` 给出带 `plugin:<id>:行:列` 的错误栈（含上次会话，持久化在
   `<Documents|userData>/OHSidian/plugin-errors.json`），`渲染层日志` 优先列 error/插件行。
   有「加载失败」弹窗 = 文件可能被截断（`BAD`，卸载后换网络重装）；无弹窗、只是设置页缺失 =
@@ -193,11 +193,11 @@ Get-FileHash .\OHSidian-v2.0.1-*-icon-unsigned.hap -Algorithm MD5
   `execFile`/`spawn` 调 pandoc 会被自动接管，`--version`/md→docx/html/epub/pptx/odt/Lua filter
   /reference-doc 均可用，**PC 与平板一致，无需弱沙箱或外部二进制**。不支持：PDF 输出（需
   LaTeX/Typst，请改用内置 PDF 导出）、远程 URL 资源（不联网）、可执行 filter（仅 Lua）。
-  诊断：设置 →「诊断」→「Pandoc（内置 WASM）」→ 自检，或命令面板同名命令。
+  诊断：设置 →「诊断」→「Pandoc」→ 运行（卡片内含环境路径输入与内置自检）。
   构建侧：`npm ci --prefix scripts && node scripts/build-pandoc-wasm.mjs`（未执行时内置 pandoc
   显示"不可用"，但不会影响其它功能）。
 - **需要渲染层日志**：error 级默认就落盘（`<Documents|userData>/OHSidian/console.log`，
-  512 KB 轮转）；要 log/info 全量，用命令面板「OHSidian 诊断: 运行日志捕获」或 设置 →「诊断」组
-  的「运行日志捕获 → 切换」切到「全量」并重启（重启生效）。「补丁与设置状态」报告现在自带
+  512 KB 轮转）；要 log/info 全量，用 设置 →「常规」→「运行日志捕获」→ 切换 切到「全量」
+  并重启（重启生效）。「通用诊断」报告自带
   console.log 尾部，一份报告即可作为支持附件（**只列本会话**，更早启动的记录已折叠；要清零用设置「诊断」组的
   「清空渲染层日志」）。
