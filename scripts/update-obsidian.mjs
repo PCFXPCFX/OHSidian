@@ -432,6 +432,77 @@ async function main() {
   // actual mobile LAYOUT) is untouched.
   const pluginRequireSrc = 'a=document.body.hasClass("emulate-mobile"),s=function(e){return u4.hasOwnProperty(e)?';
   const pluginRequireDst = 'a=!1,s=function(e){return u4.hasOwnProperty(e)?';
+
+  /* -------------------------------------------------------------------------
+     NF-015 (report 2026-11-22): plugin downloads used to be written to disk
+     with ZERO validation. `zy()` retries through the release proxy only when
+     the request THROWS; when a peer resets mid-body and the network stack
+     still reports success, installPlugin writes the truncated bytes verbatim
+     and every later loadPlugin() eval dies with SyntaxError -> the generic 563
+     "插件加载失败" notice, forever, with no trace in any log. The audit caught
+     a deterministic truncation point at 1,548,288 bytes on this environment and
+     the biggest community plugin (nutstore-sync 1.6.2, 4,182,455 bytes) is
+     exactly the class that hits it. Fix: prefetch manifest + main.js BEFORE
+     anything is written, parse the body exactly the way loadPlugin will
+     (`replace(f4,"")+v4`, evaluated as a function body), retry once through
+     the release proxy, and abort with an explicit message instead of writing a
+     plugin the kernel can never load. Parsing 4 MB costs ~100 ms once, at
+     install time only.
+     ------------------------------------------------------------------------- */
+  const PLUGIN_BUNDLE_HELPER = `t.prototype.__ohsidianFetchPluginBundle=function(manifestUrl,mainUrl){
+  var looksComplete=function(resp){
+    if(!resp||typeof resp.text!=="string"||resp.text.length<64)return false;
+    try{ new Function(String(resp.text).replace(f4,"")+v4); }catch(e){ return false }
+    return true;
+  };
+  var incomplete=function(resp){
+    var err=new Error("plugin main.js incomplete ("+(resp&&typeof resp.text==="string"?resp.text.length:0)+" chars)");
+    err.__ohsidianPluginDownloadIncomplete=true;
+    return err;
+  };
+  var fetchMain=function(url){
+    return zy(url).then(function(resp){
+      if(looksComplete(resp))return resp.text;
+      throw incomplete(resp);
+    });
+  };
+  var guarded=fetchMain(mainUrl).then(null,function(first){
+    if(!first||first.__ohsidianPluginDownloadIncomplete!==true)throw first;
+    try{ console.warn("[OHSidian] plugin main.js looks truncated, retrying through the release proxy:",mainUrl,first.message); }catch(eLog){}
+    return fetchMain("https://releases.obsidian.md/proxy?url="+encodeURIComponent(mainUrl)).then(null,function(second){
+      /* keep the truncation verdict when the retry itself fails: the proxy
+         being unreachable does not make the first body complete. */
+      throw (second&&second.__ohsidianPluginDownloadIncomplete===true)?second:first;
+    });
+  });
+  return Promise.all([zy(manifestUrl).then(function(resp){ return resp.text; }),guarded]);
+};`;
+  const PLUGIN_INSTALL_HELPER_SRC = 't.prototype.installPlugin=function(e,t,n){return y(this,void 0,Promise,';
+  const PLUGIN_INSTALL_HELPER_DST = PLUGIN_BUNDLE_HELPER + '\n' + PLUGIN_INSTALL_HELPER_SRC;
+  const pluginInstallFetchSrc = 'case 1:return m.trys.push([1,3,,4]),[4,zy(Py(e,t,eL)).text];';
+  const pluginInstallFetchDst = 'case 1:return m.trys.push([1,3,,4]),[4,this.__ohsidianFetchPluginBundle(Py(e,t,eL),Py(e,t,tL))];';
+  const pluginInstallPairSrc = 'case 2:return a=m.sent(),(s=JSON.parse(a)).id&&s.id===i?[3,4]:';
+  const pluginInstallPairDst = 'case 2:return l=m.sent(),a=l[0],d=l[1],(s=JSON.parse(a)).id&&s.id===i?[3,4]:';
+  const pluginInstallFailSrc = 'case 3:return l=m.sent(),console.error(l),o.containerEl.removeClass("is-loading"),o.setMessage(y4.msgFailedToInstallPlugin({name:r})),setTimeout((function(){return o.hide()}),3e3),[2];';
+  const pluginInstallFailDst = 'case 3:return l=m.sent(),console.error(l),o.containerEl.removeClass("is-loading"),o.setMessage((l&&(l.__ohsidianPluginDownloadIncomplete===true||l instanceof SyntaxError))?"安装失败：插件文件下载不完整（疑似网络截断），请更换网络后重试":y4.msgFailedToInstallPlugin({name:r})),setTimeout((function(){return o.hide()}),6e3),[2];';
+  const pluginInstallWriteSrc = 'case 12:return m.trys.push([12,15,,16]),[4,zy(Py(e,t,tL)).text];';
+  const pluginInstallWriteDst = 'case 12:return m.trys.push([12,15,,16]),[4,(d&&d.length?d:zy(Py(e,t,tL)).then(function(resp){return resp.text}))];';
+  /* A plugin that is ALREADY broken on disk (installed before this fix) keeps
+     failing at loadPlugin's eval with SyntaxError. Give that failure its own
+     actionable notice instead of the generic 563 so support can tell the two
+     apart: 563 + SyntaxError = the file itself is incomplete. */
+  const pluginLoadSyntaxSrc = 'case 3:return i=r.sent(),this.loadingPluginId=null,new Aw(bd.interface.msgFailedToLoadPlugin({plugin:e})),console.error("Plugin failure: "+e,i),[2,!1];';
+  const pluginLoadSyntaxDst = 'case 3:return i=r.sent(),this.loadingPluginId=null,new Aw(bd.interface.msgFailedToLoadPlugin({plugin:e})),(i instanceof SyntaxError)&&(new Aw("插件「"+e+"」的 main.js 无法解析：文件可能下载不完整。请在插件市场卸载后更换网络重新安装。",12e3),console.error("[OHSidian] plugin file unparsable (truncated download?): "+e+" :: "+(i&&i.message))),console.error("Plugin failure: "+e,i),[2,!1];';
+  /* NF-018 (report 2026-11-22): the kernel's desktop secretStorage adapter
+     reads window.electron.remote.safeStorage, which this engine does not
+     implement (0 hits in the wrapper main.js and the ArkTS tree). Giving it
+     the kernel's mobile semantics - plaintext passthrough, encryption
+     "unavailable" - is what makes BRAT 2.2.0's token migration complete. The
+     fallback object itself comes from the touch-mode patch
+     (window.__ohsidianSafeStorageFallback); this patch only makes the adapter
+     prefer it when the engine value is missing or incomplete. */
+  const secretStorageAdapterSrc = 'n.safeStorage=window.electron.remote.safeStorage,n}';
+  const secretStorageAdapterDst = 'n.safeStorage=(function(){var s=null;try{s=window.electron&&window.electron.remote&&window.electron.remote.safeStorage}catch(e){s=null}if(s&&typeof s.isEncryptionAvailable==="function"&&typeof s.encryptString==="function"&&typeof s.decryptString==="function"&&typeof s.getSelectedStorageBackend==="function")return s;try{console.warn("[OHSidian] engine has no remote.safeStorage - secretStorage uses plaintext passthrough (NF-018)")}catch(eW){}return window.__ohsidianSafeStorageFallback||{isEncryptionAvailable:function(){return false},getSelectedStorageBackend:function(){return "basic_text"},encryptString:function(v){return String(v)},decryptString:function(v){return String(v)}}})(),n}';
   const APP_BODY_PATCHES = [
     [drawerSwitchSrc, drawerSwitchDst, 'vault drawer switch routed to openVaultChooser',
       'vault drawer switch site not found (app.js layout changed?); ' +
@@ -448,6 +519,22 @@ async function main() {
     [pluginRequireSrc, pluginRequireDst, 'plugin require() no longer gated by EmulateMobile (touch mode)',
       'loadPlugin require-shim site not found (app.js layout changed?); ' +
       'touch mode will keep failing every plugin that requires a Node module'],
+    // NF-015: plugin install integrity (report 2026-11-22).
+    [PLUGIN_INSTALL_HELPER_SRC, PLUGIN_INSTALL_HELPER_DST, 'plugin install: manifest+main.js prefetched and parsed before any write',
+      'installPlugin site not found (app.js layout changed?); a truncated plugin main.js will still be written unchecked'],
+    [pluginInstallFetchSrc, pluginInstallFetchDst, 'plugin install: downloads go through the validating prefetch',
+      'installPlugin manifest download site not found (app.js layout changed?); truncation defence is inactive'],
+    [pluginInstallPairSrc, pluginInstallPairDst, 'plugin install: prefetched manifest+main.js unpacked',
+      'installPlugin manifest-check site not found (app.js layout changed?); truncation defence is inactive'],
+    [pluginInstallFailSrc, pluginInstallFailDst, 'plugin install: incomplete download gets an explicit message',
+      'installPlugin failure site not found (app.js layout changed?); truncated installs keep the generic message'],
+    [pluginInstallWriteSrc, pluginInstallWriteDst, 'plugin install: main.js write uses the validated body',
+      'installPlugin main.js write site not found (app.js layout changed?); truncation defence is inactive'],
+    [pluginLoadSyntaxSrc, pluginLoadSyntaxDst, 'plugin load: SyntaxError gets a "file may be truncated" notice',
+      'enablePlugin failure site not found (app.js layout changed?); a truncated plugin keeps the generic notice'],
+    // NF-018: secretStorage on a desktop-form package without engine safeStorage.
+    [secretStorageAdapterSrc, secretStorageAdapterDst, 'secretStorage desktop adapter falls back to plaintext (engine has no safeStorage)',
+      'k6 safeStorage site not found (app.js layout changed?); BRAT-style secretStorage plugins will keep failing silently'],
   ];
   for (const [src, dst, okMsg, warnMsg] of APP_BODY_PATCHES) {
     // src FIRST: the drawer dst token ("i.app.openVaultChooser()") also exists

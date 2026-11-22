@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const { extractFile } = require('@electron/asar');
+const { spawnSync } = require('child_process');
 
 // The OB wrapper main.js ships inside the HAP (resfile), NOT inside the asar,
 // so it must be verified by reading the file directly.
@@ -59,7 +60,11 @@ try {
     // Round 98r revert: the vdec-shim experiment is shelved (see
     // docs/CHANGES-2026-09.md HEVC verdict); assert the toggle is GONE.
     'app video-hw toggle removed (98r revert)': !app.includes('ohsidian-video-hw'),
-    'app console bridge opt-in (round 96b)': app.includes('ohsidianConsoleCapture'),
+    // Round 96b bridge, error-default since NF-016. The ipcRenderer handle is
+    // part of the gate: the original wiring used @electron/remote, which does
+    // not export ipcRenderer, so the bridge was dead until the 2026-11-22 fix.
+    'app console bridge (errors by default since NF-016)':
+      app.includes('ohsidianConsoleCapture') && app.includes('ohsidianIpcRenderer'),
     'main console bridge (round 96b)': main.includes('__ohsidianConsoleBridge'),
     // pdf.js 5 loads pdf.worker.min.mjs as a module worker. Without a
     // JavaScript Content-Type the module worker is rejected and pdf.js
@@ -256,6 +261,16 @@ try {
     if (!v) ok = false;
     console.log((v ? '  OK  ' : '  FAIL') + ' ' + k);
   }
+  /* Behavioural gate for the plugin-install / secretStorage patches
+     (report 2026-11-22 NF-015/NF-018). Marker strings prove the patch is
+     present; this proves the SHIPPED helper still does its job (validate a
+     plugin body before writing it, recover a truncated body through the
+     release proxy, fall back to plaintext secretStorage). Fixtures are
+     synthetic, so it needs no network and no plugin files. */
+  const installGate = spawnSync(process.execPath, [path.join(__dirname, 'verify-plugin-install.cjs')], {
+    stdio: 'inherit', cwd: __dirname, env: { ...process.env, OHSIDIAN_ASAR_PATH: asarPath },
+  });
+  if (installGate.status !== 0) ok = false;
   console.log(ok ? 'FRESH-PROCESS VERIFY: SYNTAX OK | all markers present' : 'FRESH-PROCESS VERIFY: FAILURES');
   process.exit(ok ? 0 : 1);
 } catch (e) {

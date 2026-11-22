@@ -198,3 +198,187 @@ profile 再重签即可。离线改 profile 再自签**不可行**：profile 由
 - **WS-6** 探针异步化 + 超时预算分层——现在三段 execve 是同步的，弱沙箱下首次执行可能真的变慢；V-WS-4 取值后再决定；
 - **WS-3** 自有导出功能的 `spawn` 五条纪律（现在没有自有导出实现，先作为规范）；
 - **WS-4 收口**：插件路径执行面收窄到"只实测绝对路径"（已做第一步），"执行前确认清单"随弱沙箱包一起做。
+
+## 六、插件加载与 `secretStorage`（2026-11-22 定谳，NF-015~NF-018）
+
+> 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象
+> `main @ e528275`）。报告结论一句话：**两个插件不是同一种死法，也都不是 2.0 的代码改动
+> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **196**）；
+> 报告里"2.0 无关"的增量考古（补丁层/引擎层 diff 与 eval/require/loadPlugin 零交集）不再
+> 赘述，见原报告第三部分。
+
+### 6.1 两种死法（一句话版）
+
+| 对象 | 死法 | 工程侧对策 |
+| --- | --- | --- |
+| 坚果云 1.6.2（**有** 563「插件加载失败」弹窗） | 4.18 MB 的 `main.js` 在不稳链路被中段截断（审计实测确定性断点 1,548,288 B）→ `window.eval` 直接 SyntaxError → `enablePlugin` catch → 563 弹窗；设置页是下游症状（注册在 `onload` 最后一行） | **NF-015** 安装前完整性校验 + 代理重试 + 显式失败；**NF-016** 让失败有日志可取证 |
+| BRAT 2.2.0（**无**弹窗，只有设置页消失） | 设置页注册在吞错异步链末端：`loadSettings → migrateTokensToSecretStorage → app.secretStorage.setSecret` → 内核桌面适配器 `k6` 读 `window.electron.remote.safeStorage` → 引擎零实现 → TypeError 被 `.catch(console.error)` 吞掉 → 注册永不执行、每启动复发 | **NF-018** `safeStorage` 明文兜底（对齐内核移动端 `C6` 语义）；**NF-016** 让被吞的那行 `console.error` 有据可查 |
+
+两类失败的现场判别（支持用）：**有弹窗 = 同步链抛错**（先查 `main.js` 完整性）；
+**无弹窗但设置页消失 = 吞错型**（先查 `secretStorage` 状态）。§6.6 给了 1 分钟话术。
+
+### 6.2 NF-015：插件安装完整性（`installPlugin` 零校验）
+
+原链（`app.js`，上游逐字）：`zy()` 只在**请求抛异常**时才走 `releases.obsidian.md/proxy`
+重试；若对端在中段重置而网络栈仍报成功，`installPlugin` 把残缺字节**原样落盘**，
+之后每次 `loadPlugin` 的 `eval` 必 SyntaxError，用户只看到 563，永远无法自愈。
+
+新流程（`scripts/update-obsidian.mjs` 文本补丁，注入 `Plugins.prototype.__ohsidianFetchPluginBundle`）：
+
+1. **先下载、后写盘**：manifest + `main.js` 在插件目录创建之前一起预取；
+2. **同一语法门槛**：对 `main.js` 做 `new Function(text.replace(f4,"")+v4)`——与
+   `loadPlugin` 的 eval 包装同构（`f4` 剥 sourcemap、`v4` 补 `/* nosourcemap */`）；空体或
+   <64 字符直接判不完整；
+3. **一次代理重试**：语法失败 → 经 `https://releases.obsidian.md/proxy?url=…` 再取一次；
+   代理自身失败不会吞掉"截断"结论（仍报不完整）；
+4. **失败即中止**：**未写任何文件**，安装对话框显示「安装失败：插件文件下载不完整（疑似网络
+   截断），请更换网络后重试」，`console.error` 带原始错误（NF-016 会落盘）；
+5. **已装坏的文件**：`enablePlugin` 的 catch 对 `SyntaxError` 追加专用 Notice
+   （「main.js 无法解析：文件可能下载不完整…」），与普通加载错误区分；
+6. 正常下载（含全部主流大插件）零额外行为：解析 4 MB 约 100 ms，只在安装时一次。
+
+**实现边界（如实记录）**：① 预取失败会让**整单安装中止**——旧代码在 main.js 下载失败时
+只记一行 `main.js not found` 并继续写 manifest，等于装一个缺件的插件；② ID 不匹配时会
+先多下载一次 main.js（"先校验后落盘"的代价），用户只会看到 `Plugin ID mismatch.`。
+
+**为什么不用 `content-length`**：GitHub/CDN 对文本常做 gzip，引擎 `requestUrl` 解码后的
+字节数与响应头长度不可比，误判会把**好插件**判坏。语法探测对审计实测截断点全命中
+（1.0/1.5/2/3/4 MB 全部 SyntaxError；随机切点 300 个里 3 个仍可解析，另一次 500 个切点实测
+14 个 ≈ 2.8%）。**残余**：切在语句边界、恰好仍可解析的截断拦不住——它会以"加载后
+`No exports detected`（不是 SyntaxError）→ 通用 563"出现；这类只能靠卸载重装或将来的
+`requestUrl` 层长度校验处理，不要把它当成已覆盖。
+
+**门禁**：`scripts/verify-plugin-install.cjs`（由 `verify-asar.cjs` 调用，CI 自动覆盖）——
+从**出货 asar** 里取出 helper 与机上诊断函数，用合成下载/合成仓库跑 5 个下载行为用例、
+3 个 `safeStorage` 兜底用例、7 个诊断输出断言；不是只对 marker 字符串做检查。
+
+### 6.3 NF-018：`secretStorage` 明文兜底
+
+断链点（内核 `app.js` 逐字）：`k6` 构造 `n.safeStorage=window.electron.remote.safeStorage`。
+引擎侧 `safeStorage` 零实现（wrapper `main.js` 与 ArkTS 树 grep 均 0），于是
+`isEncryptionAvailable()` 抛 TypeError → 内核 `load()` 的 catch 吞掉 → `adapter=null`
+→ `setSecret()` 抛 "Secure storage is not available." → BRAT 迁移失败。
+
+两侧补丁：
+
+| 位置 | 内容 |
+| --- | --- |
+| `touch-mode.js`（渲染层前置） | 定义 `window.__ohsidianSafeStorageFallback`：`isEncryptionAvailable()=false`、`getSelectedStorageBackend()="basic_text"`、`encryptString/decryptString` 明文透传；并尽力写入 `window.electron.remote.safeStorage`（getter-only 时静默失败，不影响 k6 回退） |
+| `update-obsidian.mjs`（`k6` 构造） | 引擎 `safeStorage` **四个方法齐全**才采用；缺任一即用上面的兜底对象（内联副本，window 对象缺失时也可用） |
+
+明文保存这一点与内核移动端适配器 `C6` 相同；但 **`isEncryptionAvailable()` 的返回值比 C6
+更诚实**：`E6.isEncryptionAvailable()` 对 C6 返回 true（`!(adapter instanceof k6)`），所以
+移动端不会弹「密钥未加密」警告；本补丁走 k6 路径返回 false，反而会触发内核自带的警告
+（带"了解/忽略"按钮）。安全结论不变：插件可用、密钥不加密。
+
+**安全取舍（明确记录）**：`app.secretStorage` 里的密钥（如 BRAT token）**明文落盘**
+（localStorage `secrets-encrypted`）。这不是本轮引入的新暴露面——移动端内核本来就这么做——
+但仍需产品确认接受；若将来引擎实现真实 `safeStorage`，检测通过即自动改用，无需再改补丁。
+边界：不改变 SELinux 域、签名身份裁决、文件权限；只修 `app.secretStorage` 的桌面适配器。
+
+### 6.4 NF-016：渲染层错误日志默认落盘（T2-9）
+
+原状：console bridge 纯 opt-in，且开了要下次启动才生效；本案整个 21 秒日志**零渲染层输出**，
+插件失败只能靠代码考古。现在三态（`localStorage.ohsidianConsoleCapture`）：
+
+| 值 | 含义 |
+| --- | --- |
+| 不存在 | **仅错误（默认）**：`console.error` + `window.onerror` + `unhandledrejection` 落盘 |
+| `"1"` | 全量（log/info/warn/error/debug） |
+| `"0"` | 关闭（显式 opt-out） |
+
+命令面板「OHSidian 诊断: 运行日志捕获 (仅错误/全量/关闭, 重启生效)」循环切换；
+主进程侧继续写 `<Documents|userData>/OHSidian/console.log`（512 KB 单轮转，限流 40 行/s 不变）。
+诊断状态页「调试」段新增「日志捕获」行显示当前档位。
+
+**本轮同时修掉一条从未生效的旧接线（P1，独立审查发现）**：round-96b 的桥接用
+`require("@electron/remote").ipcRenderer`，而 `@electron/remote` 的 renderer 入口只导出模块
+getter（`app`/`dialog`/`BrowserWindow`…），**不导出 `ipcRenderer`** → 恒 undefined → 旧桥从上线
+起一行也没发出去，`console.log` 从未产生。现改为 `window.electron.ipcRenderer ||
+require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSync(...)` 同一通道），
+门禁新增接线断言防回退。同一根因的既有 bug 一并修复：「迁移仓库到文件管理可见的位置」最后
+一步 `remote.ipcRenderer.sendSync("vault-open")` 同样恒失败（用户看到"打开新仓库失败"并停留
+在旧仓库）。
+
+**隐私面（明确记录）**：默认档会把 `console.error` 原文写入**公共 Documents** 下的
+`<Documents>/OHSidian/console.log`（Documents 不可用时落 userData），插件错误串可能含仓库
+路径、URL 或 token。这是"失败可取证"的取舍；要停用就切「关闭」档（显式 opt-out）。
+
+### 6.5 NF-017：WMS decor 能力缓存（T2-2）
+
+触屏冷启动固定 6+ 条 E/W：`SetWindowTitleMoveEnabled: The device is not supported` ×3 轮、
+`GetTitleButtonVisible: device not support` ×2、`{"code":801}` ×3（title move/topmost/modal）。
+新增 `web_engine/src/main/ets/common/WindowDecorCapability.ets`：
+
+- 按调用 kind 缓存 801；**首次**一条 info 点名该能力，之后同类 801 降 debug（不再每次刷 E/W）；
+- **不跳过任何调用**：801 可能是形态相关的（同一进程里触摸全屏窗没有标题条，
+  而另一扇自由窗仍然需要 caption/拖动/modal），应用层无法可靠区分"设备不支持"与
+  "当前形态不支持"，跳过会让后开的自由窗少配置一项——这是有回归风险的"优化"；
+- 真正的噪声削减来自**调用点门控**：启动装饰块的标题条族只在窗口形态（`captionForm()`，
+  即 `inWindowForm() || 2in1`）时调用；`AppWindowAdapter.setUseNativeFrame` 路径仍会调用
+  （它必须按 Obsidian 的 frame 决策改标题条），那里只靠日志降级；
+- 非 801 错误保持 warn（不静默）。
+
+配套：启动装饰块里"标题条族"（titleMove/titleButtons/topmost/resizeDrag）只在窗口形态调用
+——与 Round 154「decor 是形态属性」同一结论；2in1 必须用 `captionForm()` 显式纳入（其
+`inWindowForm()` 恒 false，只按它判断会漏发）；触屏全屏只留一条 debug。
+证据锚点：`decor API answered 801 (device does not support it): <kind> - repeats at debug level`
+（每 kind 一次 info，之后 debug）。
+`ensureSystemCaption` 的既有 801 语义（返回 false + latch）不变。
+与状态机的关系：横切 A（装饰）**仍未**由形状机驱动（§8.3 差异 3 不变），本轮只做能力缓存
+与噪声治理，避免把"能力缺失"误当成"状态错误"。
+
+### 6.6 支持话术（用户/同学侧，1 分钟判定）
+
+1. **有「插件加载失败」弹窗** → 同步链抛错（坚果云类）。**设置 → OHSidian 设置页 →「诊断」组
+   →「插件完整性与安全存储」→ 检查**（或命令面板「OHSidian 诊断: 插件完整性与安全存储」）：
+   `BAD … main.js … 无法解析` = 文件被截断，卸载后换网络重装；字节数对但仍 BAD = 真损坏，
+   重装同版本；`SKIP` = 超过 6 MB 未解析，需对照发行包大小人工确认。
+2. **无弹窗、只是设置页不出现** → 吞错型（BRAT 类）。同一诊断看 `secretStorage` 行：
+   `OK … true` 正常；`WARN … false（明文模式）` 可用（预期）；`BAD`/`THROWN` 才是引擎断链
+   （本版已兜底，正常应显示 WARN）。
+3. **要完整栈**：默认已捕获 error 级；全量用命令面板切「全量」并重启，取
+   `<Documents|userData>/OHSidian/console.log`（512 KB 轮转，旧文件 `.old.log`）。
+4. 诊断输出都有复制按钮：报告弹窗「复制详细信息」、设置内联「复制结果」。
+5. 坚果云版本锚点：1.6.2 `main.js` = **4,182,455 B**；BRAT 2.2.0 = **138,873 B**
+   （其他版本对照 GitHub release 资产大小）。
+
+### 6.7 真机定谳步骤（替代报告 §五的控制台探针）
+
+1. 装本版（rev 196）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
+2. `secretStorage` 行：期望 `WARN adapter=有 · isEncryptionAvailable=false（明文模式）`，
+   `引擎 safeStorage: undefined（引擎缺口；补丁已兜底为明文透传）`——若 remote 对象整体缺失则
+   该行显示 `window.electron.remote 不可用`，同属引擎缺口，补丁同样兜底；
+3. BRAT：重装 2.2.0 → 设置页应出现；诊断里「BRAT 迁移标记: 存在（迁移已跑过）」；
+4. 坚果云：市场卸载 → 重装 1.6.2 → 加载成功、设置页出现；若中途报「下载不完整」，
+   那是 NF-015 按预期拦截，换网络重试即可（不会再落一个坏文件）；
+5. 触屏冷启动：hilog 里 decor 噪声从 6+ 条降为**每个 kind 至多一条 info**
+   （`decor API answered 801 (device does not support it): <kind>`；触屏预计 ≥2 个 kind：
+   `modal` + `setUseNativeFrame` 路径的 `titleMove`/`titleButtons`）；WMS 原生打印的
+   `SetWindowTitleMoveEnabled: The device is not supported` 只对未被门控的那几次调用保留；
+6. 渲染层失败取证：故意禁用/删除某插件 `main.js` 后重启，`console.log` 应出现
+   `[OHSidian:web][error] Plugin failure: …`。
+
+### 6.8 验证记录（2026-11-22，本机）
+
+- `node scripts/update-obsidian.mjs --repatch` → 内嵌 `verify-asar`（含
+  `verify-plugin-install` 行为用例）全绿；
+- `assembleHap` **BUILD SUCCESSFUL**；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability`
+  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="196"`、
+  四条 NF 标记、console bridge 错误默认档；
+- `verify-release` / `check-docs` 全绿；
+- 独立只读审查（2026-11-22，对照冻结态代码 + 出货 asar 逐字）：NF-015/017/018 无 P1/P2；
+  NF-016 1 个 P1（bridge 接线死路）+ 3 个 P2（门禁假保障、文档入口、验收锚点），全部修复并
+  复跑门禁，详见 `docs/CHANGES-2026-10.md` 第 219 轮 §九；
+- **未做真机验证**（本机无设备），V-1~V-6 见 §6.7。
+
+### 6.9 仍未做（本轮范围外）
+
+- 报告 §1.5.1 的**引擎网络栈截断语义**仍无法从仓库闭环（NF-015 让上层可判定、可重试，
+  但"半截响应是否被当成成功"取决于引擎闭源面）；若真机复现拦截率不足，再评估
+  `requestUrl` 层长度校验；
+- 安装完整性只覆盖**市场安装/更新**（`installPlugin`）：手动放入/BRAT 自装的插件只能靠
+  §6.7 诊断事后判定；要做主动修复需在 `loadPlugin` 失败时引导重装（未做）；
+- BRAT 2.3.0-beta 与旧版 2.0.8 回退话术待真机确认；
+- `secretStorage` 的**真加密**（引擎补齐 `safeStorage`）仍是 NF-018 的长期项；
+- NF-017 只覆盖 decor family；`GetTitleButtonVisible` 等**引擎内部**调用由引擎发起，应用层管不到。

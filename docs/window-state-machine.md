@@ -751,6 +751,10 @@ Bug1 四入口全部不再产生 `systemMode=touch` 日志 + V1-V15 核心行，
 1. **phone 整列不实现**（见上）；代码里 `deviceType === 'phone'` 的旧分支保留原样不再维护。
 2. **override（I8）仍在渲染层**：`writeSystemMode` 照写，渲染层 `resolveWant` 以 override 优先，语义与改造前一致。
 3. **几何 / insets（横切 B）/ 装饰（横切 A）未迁移**：`pushSafeAreaInsets`、`ensureSystemCaption`、`applyLayoutFullscreenForMode`、`forceFullscreenWindow` 仍用 `inWindowForm()/freeWindowForm()`（其中 `freeWindowForm()` 仍读实时状态）。它们**不参与发布判定**（I1 成立），迁移留到步 3。
+   - 第 219 轮（NF-017，报告 T2-2）只做了**噪声治理与能力缓存**：`WindowDecorCapability` 按调用 kind
+     缓存 801（首条 info，重复降 debug，**不跳过调用**），启动装饰块的标题条族只在窗口形态
+     `captionForm()`（`inWindowForm() || 2in1`——2in1 上 `inWindowForm()` 恒 false，只按它会漏发）
+     时调用。装饰/insets **仍未**由形状机驱动；不要把"设备不支持 801"当成"状态判定错误"。
 4. **SPLIT 只发布**：分屏的 rect/inset 刷新交给 `windowRectChange/windowSizeChange`，不重跑自由窗几何阶梯（避免与 Round 87/92/153 打架）。
 5. **焦点仲裁已实现**：`windowEvent` 的 `WINDOW_ACTIVE/INACTIVE` 已有（Round 99 的 `publishFocusedWindow` 就用它），因此规格 §5.3 的"焦点窗形状优先"直接落地——切到哪个窗口就按那个窗口的形状重新发布，后台窗口不再写文件。剩余差异只有横切 A/B（装饰/insets）的迁移。
 
@@ -778,6 +782,8 @@ Bug1 四入口全部不再产生 `systemMode=touch` 日志 + V1-V15 核心行，
   `setFullScreen(true|false) ignored: …`
 - 焦点仲裁：`focused window: <xcomponentId>` 之后应看到一次按该窗口形状的发布日志（或 `systemMode` 未变时的早退）
 - 启动：`window shape machine: profile=…, pcMode=false, shape=…`
+- decor 能力（NF-017）：`decor API answered 801 (device does not support it): <kind> - repeats at debug level`
+  （每 kind 一次；触屏形态启动另有 debug 行 `caption decor calls skipped: touch form factor 801=[…]`）。
 
 验收矩阵仍以规格 §十三 V1-V15 + 按钮报告 B1-B12 为准；本轮新增的重点三条：
 ① 平板 PC 关 + 自由多窗最大化 → **无 reload**、仍桌面布局（V4）；

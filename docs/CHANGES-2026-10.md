@@ -5223,3 +5223,134 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 3. 2in1 最大化/恢复/沉浸 → 发布恒 desktop、无 reload（V1/V2）；
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
+
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196）
+
+输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
+报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
+`main.js` 在不稳链路被中段截断（审计实测确定性断点 1,548,288 B）→ `eval` SyntaxError → 563
+弹窗；BRAT 2.2.0 的设置页注册在吞错异步链末端，迁移必经 `app.secretStorage.setSecret` →
+内核桌面适配器读 `window.electron.remote.safeStorage` → 引擎零实现 → TypeError 被
+`.catch(console.error)` 吞掉 → 注册永不执行。本轮落地报告 NF-015/016/017/018 四条。
+（报告"2.0 无关"的增量考古见原报告第三部分；本轮**不动**插件 require 白名单——报告 §1.3
+已证对坚果云全版本无收益。）
+
+### 一、NF-015：插件安装完整性（P1）
+
+- 根因链（上游 `app.js` 逐字）：`zy()` 只在请求**抛异常**时才代理重试；半截响应被当成成功
+  时，`installPlugin` 把残缺 `main.js` 原样落盘、零校验，之后每次 `loadPlugin` 的 `eval`
+  必 SyntaxError。
+- 新流程：`Plugins.prototype.__ohsidianFetchPluginBundle` **先下载后写盘**（manifest+main.js
+  在插件目录创建前预取），对 main.js 做 `new Function(text.replace(f4,"")+v4)`（与
+  `loadPlugin` 同一语法门槛），失败经 `releases.obsidian.md/proxy` 重试一次，仍失败则
+  **未写任何文件**并显示「安装失败：插件文件下载不完整（疑似网络截断），请更换网络后重试」；
+  代理自身失败不吞掉"截断"结论。
+- 已装坏的插件：`enablePlugin` 的 catch 对 `SyntaxError` 追加专用 Notice
+  （「main.js 无法解析：文件可能下载不完整…」），与普通加载失败区分。
+- 不用 `content-length`：gzip 后长度不可比，误判会弄坏**好插件**。语法探测对审计实测截断点
+  （1.0/1.5/2/3/4 MB）全部命中；**残余**：切在语句边界、仍可解析的截断（随机切点实测约 3%）
+  语法门槛拦不住，会以"加载后 No exports detected → 通用 563"出现——如实记录，未覆盖。
+- 边界：预取失败会中止整单安装（旧代码 main.js 下载失败仍继续写 manifest）；ID 不匹配时会
+  多下载一次 main.js（先校验后落盘）。
+- 成本：4 MB 解析约 100 ms，仅安装时一次；正常插件零额外行为。
+
+### 二、NF-018：`secretStorage` 明文兜底（P1，安全取舍已记录）
+
+- 断链点：内核 `k6` 构造 `n.safeStorage=window.electron.remote.safeStorage`；引擎无
+  `safeStorage`，于是 `isEncryptionAvailable()` TypeError → 内核 catch 吞掉 → `adapter=null`
+  → `setSecret()` 抛 "Secure storage is not available." → BRAT 迁移失败且无提示、每启动复发。
+- 两侧补丁：`touch-mode.js` 前置定义 `window.__ohsidianSafeStorageFallback`（加密不可用、
+  明文透传、`basic_text` 后端）；`update-obsidian.mjs` 把 `k6` 构造改为「引擎四方法
+  （`isEncryptionAvailable`/`encryptString`/`decryptString`/`getSelectedStorageBackend`）齐全
+  才用，否则用兜底」。明文保存与内核移动端 `C6` 相同；`isEncryptionAvailable()=false` 比 C6
+  更诚实（C6 路径下内核返回 true、不弹警告），因此本补丁会触发内核自带的「密钥未加密」警告。
+- **取舍**：密钥明文落盘（localStorage `secrets-encrypted`）。移动端内核本来如此，不是本轮新增
+  暴露面；引擎将来提供真 `safeStorage` 时自动改用。不改 SELinux/签名/文件权限。
+
+### 三、NF-016：渲染层错误日志默认落盘（P2，T2-9）
+
+- 三态：不存在 = **仅错误（默认）**（`console.error` + `window.onerror` +
+  `unhandledrejection`）；`"1"` = 全量；`"0"` = 关闭。命令面板「运行日志捕获
+  (仅错误/全量/关闭, 重启生效)」循环切换；诊断状态页「调试」段新增「日志捕获」行。
+- 主进程侧不变（`<Documents|userData>/OHSidian/console.log`，512 KB 轮转，40 行/s 限流），
+  ready 日志文案改为「error lines always captured」。
+- 目的：本案 21 秒日志零渲染层输出，插件失败只能靠代码考古；现在开机即有据。
+- **P1 修复（独立审查发现）**：round-96b 的桥接用 `require("@electron/remote").ipcRenderer`，
+  但该 renderer 模块只导出模块 getter、**不导出 ipcRenderer** → 恒 undefined → 旧桥自上线起
+  一行未发、`console.log` 从未产生。改为 `window.electron.ipcRenderer ||
+  require("electron").ipcRenderer`（内核自身同通道），门禁新增接线断言；同一根因的
+  「迁移仓库到可见文件夹」最后一步 `remote.ipcRenderer.sendSync("vault-open")` 也一并修复。
+- 隐私面：默认档把 `console.error` 原文写入公共 Documents 下的 `console.log`（Documents
+  不可用时落 userData），错误串可能含路径/URL/token；要停用切「关闭」档（显式 opt-out）。
+
+### 四、NF-017：WMS decor 能力缓存（P3，T2-2）
+
+- 新增 `web_engine/src/main/ets/common/WindowDecorCapability.ets`：按 kind 缓存 801，
+  首次一条 info，之后重复 801 降 debug；非 801 错误保持 warn。**不跳过调用**——801 可能
+  与形态相关（同一进程里触摸全屏窗没有标题条，另一扇自由窗仍需要），跳过会让后开的自由窗
+  少配置一项，属有回归风险的优化；噪声削减来自下面的调用点门控。
+- 启动装饰块：标题条族只在 `inWindowForm()` 调用（Round 154「decor 是形态属性」同一结论），
+  触屏全屏不再发这些注定 801 的调用；`ensureSystemCaption` 既有语义（返回 false + latch）不变。
+- `AppWindowAdapter` 的 8 处 decor 调用（title buttons ×2、topmost、setUseNativeFrame ×2、
+  movable、resizable、modal）全部收口到缓存；`WebAbility.enforceFrameStyle` 同样收口。
+
+### 五、顺带：机上可用的插件完整性诊断
+
+命令面板新增「OHSidian 诊断: 插件完整性与安全存储」——报告 §五的控制台探针在平板上无法输入，
+改为应用内一键出报告（可复制）：
+① `secretStorage` 适配器与 `isEncryptionAvailable()`；② 引擎 `safeStorage` 缺口；
+③ 逐个插件的 `main.js` 字节数 + 与 `loadPlugin` 同构的解析结果（BAD = 截断实锤）；
+④ BRAT 迁移标记是否存在。只读；插件体逐个解析（不并发读入内存）、上限 20 个。
+
+### 六、验证（本机，2026-11-22）
+
+- 新增 `scripts/verify-plugin-install.cjs`（由 `verify-asar.cjs` 调用，CI 自动覆盖）：
+  从**出货 asar** 取 helper 与机上诊断函数，用合成下载/合成仓库跑 5 个下载行为用例、
+  4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
+  IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
+- `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
+  `decor API answered 801`；HAP 内 asar 复核 rev 196、四条 NF 标记、错误默认档、复制按钮仍在。
+- `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
+- 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
+  §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
+
+### 七、真机验收清单（新）
+
+1. **BRAT 2.2.0**：重装 → 设置页出现；诊断里「BRAT 迁移标记: 存在」；`secretStorage` 行
+   `WARN … isEncryptionAvailable=false（明文模式）`；重启不再复现。
+2. **坚果云 1.6.2**：市场卸载 → 重装 → 加载成功、设置页出现；`main.js` = 4,182,455 B；
+   弱网/断网重试时若弹「下载不完整」= NF-015 按预期拦截（旧行为是装个坏的）。
+3. **触屏冷启动**：decor 801 噪声从 6+ 条降到**每个 kind ≤1 条 info**
+   （`decor API answered 801 …`；触屏预计 ≥2 个 kind：`modal` + `setUseNativeFrame` 路径的
+   `titleMove`/`titleButtons`）；WMS 原生打印只对未被门控的那几次调用保留。
+4. **渲染层取证**：默认档下 `console.log` 出现 `[OHSidian:web][error] Plugin failure: …`；
+   命令切「全量」重启后 log/info 才有。
+5. **诊断命令**：报告弹窗可复制；BAD/OK 与真实文件一致。
+6. **不回归**：2in1 最大化/恢复/沉浸、平板自由窗标题条拖动/三键、设置页开关仍正常
+   （NF-017 只改"何时调/怎么记日志"，2in1 上这些能力都是 supported，不会触发缓存）。
+
+### 八、未做
+
+- 引擎网络栈对截断体的语义仍无法从仓库闭环；手动放置/BRAT 自装插件只能事后诊断，
+  未做"加载失败→引导重装"的自动修复；
+- 真加密（引擎补齐 `safeStorage`）仍是 NF-018 长期项；
+- `GetTitleButtonVisible` 等引擎内部 decor 调用应用层管不到；
+- 本轮未提版本号（仍 2.0.1），发版时再定 2.0.2。
+
+### 九、独立审查（2026-11-22 二次）与修复
+
+只读审查（对照冻结态代码 + 出货 asar 逐字，独立于本机门禁）结论：NF-015/017/018 实现无
+P1/P2；NF-016 有 1 个 P1 与 3 个 P2，全部已修，并复跑全部门禁：
+
+- **P1**：console bridge 的 `@electron/remote.ipcRenderer` 恒 undefined（见 §三），已改真实
+  IPC 句柄并加门禁；同一根因的 vault-open 迁移失败一并修。
+- **P2-1 门禁假保障**：`verify-plugin-install` 原先自带 f4/v4、只查 marker。现改为**从出货
+  asar 提取内核真实 f4/v4** 实例化 helper，并断言 installPlugin 的 case1/2/10/12 精确接线、
+  IPC 接线、safeStorage 四方法判定；另加机上诊断 7 项行为断言。
+- **P2-2 文档入口不存在**：原来只有命令面板入口。现设置页「诊断」组新增「插件完整性与安全
+  存储」行（组名 `Pandoc 诊断` → `诊断`），文档与命令面板两个入口都成立。
+- **P2-3 验收锚点与实现不符**："最多 1 条 info" 改为"每个 kind 至多 1 条"，并说明 WMS 原生行。
+- **P3 处置**：C6 语义措辞、四方法 vs 三方法（代码补第 4 个校验）、随机截断残余比例、
+  2in1 启动门控改用 `captionForm()`（`inWindowForm()` 在 2in1 恒 false）、
+  `enforceFrameStyle` latch 只在实际成功时置位、机上诊断 >6 MB 标 SKIP 并单独计数、
+  BRAT 迁移路径改用 `vault.configDir`、NF-016 隐私面补记。

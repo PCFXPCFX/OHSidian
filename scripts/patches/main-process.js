@@ -188,14 +188,16 @@ var __ohDvRegister=function(){
 var __ohDvRegisterLater=function(){setTimeout(__ohDvRegister,0)};
 if(__ohDvApp.isReady()){__ohDvRegisterLater()}else{__ohDvApp.on("ready",__ohDvRegisterLater)}
 }catch(e){}})();
-/* Console bridge main-process side (round 96b): receives renderer console
-   lines (opt-in, see the TOUCH patch) and (1) re-prints them with the
+/* Console bridge main-process side (round 96b, error-default since NF-016):
+   receives renderer console lines (mode: errors only by default, all levels
+   opt-in - see the TOUCH patch) and (1) re-prints them with the
    [OHSidian:web] prefix on the main process console - visible in hilog
    whenever the engine routes main stderr there, same as the other
    [OHSidian] main lines - and (2) appends them to
    <Documents|userData>/OHSidian/console.log (single 512KB rotation to
    console.old.log), pullable from 文件管理 or \`hdc file recv\` on the
-   public Documents path. */
+   public Documents path. The error-only default is what turns "plugin died
+   silently" into a stack in that file without any user setup. */
 ;(function(){try{
 if(globalThis.__ohsidianConsoleBridge)return;globalThis.__ohsidianConsoleBridge=true;
 var __cbEl=require("electron"),__cbFs=require("fs"),__cbPath=require("path");
@@ -234,7 +236,7 @@ __cbEl.ipcMain.on("ohs-console",function(_evt,payload){
     __cbAppend("[OHSidian:web]["+m+"] "+text);
   }catch(e){}
 });
-try{console.log("[OHSidian] console bridge ready (renderer opt-in: 命令面板 → 运行日志捕获)")}catch(e2){}
+try{console.log("[OHSidian] console bridge ready (renderer: error lines always captured; full capture via 命令面板 → 运行日志捕获)")}catch(e2){}
 }catch(e){}})();
 /* Trash purge: 60s after startup (and once more on will-quit, F-N16 - a
    session shorter than 60s or a multi-day background session used to miss

@@ -1,19 +1,50 @@
 ;(function(){try{
 if(window.__ohsidianTouchPatch==="22")return;window.__ohsidianTouchPatch="22";
-/* Console -> main bridge (round 96b): the renderer console never reaches
-   hilog natively. Opt-in via the command "OHSidian: 运行日志捕获 开/关"
-   (persisted in localStorage, takes effect on the next app start): the
-   console methods + global error traps are wrapped and each line is
-   forwarded to the main process (ipc 'ohs-console'), which re-prints it
-   with the [OHSidian:web] prefix (shows up in hilog IF the engine routes
+/* Console -> main bridge (round 96b; error-level default since NF-016, 2026-11-22).
+   The renderer console never reaches hilog natively. Mode is persisted in
+   localStorage and takes effect on the next app start:
+     absent/unset = ERRORS ONLY (default), "1" = all levels, "0" = off.
+   The error-only default is the T2-9 fix: a plugin that dies silently in the
+   renderer (BRAT 2.2.0's swallowed secretStorage failure, a truncated
+   main.js) used to leave ZERO trace anywhere - not in hilog, not on disk -
+   so the failure had to be reconstructed by code archaeology. The console
+   methods + global error traps are wrapped and each line is forwarded to the
+   main process (ipc 'ohs-console'), which re-prints it with the
+   [OHSidian:web] prefix (shows up in hilog IF the engine routes
    main-process stderr there) and appends it to
    <Documents|userData>/OHSidian/console.log (512KB single rotation,
    pullable via 文件管理 or hdc file recv). Rate-limited to 40 lines/s. */
-var consoleCaptureOn=(function(){try{return localStorage.getItem("ohsidianConsoleCapture")==="1"}catch(e){return false}})();
-var consoleForward=null;
-if(consoleCaptureOn){
+var consoleCaptureMode=(function(){
   try{
-    var __ohIpc=require("@electron/remote").ipcRenderer;
+    var v=localStorage.getItem("ohsidianConsoleCapture");
+    return v==="1"?"all":(v==="0"?"off":"error");
+  }catch(e){return "error"}
+})();
+window.__ohsidianConsoleCaptureMode=consoleCaptureMode;
+/* Renderer-side IPC handle. `@electron/remote` exports module getters only
+   (app / BrowserWindow / dialog / ...) - it does NOT re-export ipcRenderer, so
+   `require("@electron/remote").ipcRenderer` is undefined. The round-96b
+   console bridge was built on exactly that expression, i.e. it never sent a
+   single line: console.log was never created and the "opt-in logging" claim
+   was never true (audit 2026-11-22, P1). The kernel itself uses
+   `electron.ipcRenderer.sendSync(...)`, and this file already does the same
+   for the frame probe - reuse that channel, with require("electron") as the
+   fallback in case window.electron is not populated yet. */
+function ohsidianIpcRenderer(){
+  try{
+    var el=window.electron;
+    if(el&&el.ipcRenderer&&typeof el.ipcRenderer.send==="function")return el.ipcRenderer;
+  }catch(e0){}
+  try{
+    var reqEl=require("electron");
+    if(reqEl&&reqEl.ipcRenderer)return reqEl.ipcRenderer;
+  }catch(e1){}
+  return null;
+}
+var consoleForward=null;
+if(consoleCaptureMode!=="off"){
+  try{
+    var __ohIpc=ohsidianIpcRenderer();
     if(__ohIpc&&typeof __ohIpc.send==="function"){
       var __cfSent=0,__cfSec=0;
       consoleForward=function(level,args){
@@ -38,7 +69,7 @@ if(consoleCaptureOn){
   try{
     var orig=console[m];
     console[m]=function(){
-      try{if(consoleForward)consoleForward(m,Array.prototype.slice.call(arguments))}catch(eF){}
+      try{if(consoleForward&&(consoleCaptureMode==="all"||m==="error"))consoleForward(m,Array.prototype.slice.call(arguments))}catch(eF){}
       return orig.apply(console,arguments);
     };
   }catch(e){}
@@ -65,6 +96,41 @@ try{
     process.versions=Object.assign({},process.versions,{electron:"28.2.3"});
   }
 }catch(e){}
+/* ---------------------------------------------------------------------------
+   NF-018 (report 2026-11-22): the kernel's DESKTOP secretStorage adapter (k6)
+   constructor starts with `this.safeStorage = window.electron.remote.safeStorage`.
+   This engine has no safeStorage at all (0 hits in the wrapper main.js and in
+   the ArkTS tree), so the adapter object exists but its first call
+   (isEncryptionAvailable) throws TypeError, the kernel's own load catch
+   swallows it, `adapter` stays null, and every plugin that uses the Obsidian
+   1.11.4+ app.secretStorage API dies silently. BRAT 2.2.0 is the reported
+   case: its token migration runs BEFORE addSettingTab and its
+   `.catch(console.error)` hides the failure (no notice, no settings tab,
+   every boot - the migration marker is only written on success).
+   Mirror the kernel's own MOBILE adapter semantics instead of failing: no OS
+   keychain, values kept as plaintext, isEncryptionAvailable() = false so the
+   kernel shows its stock "secrets are not encrypted" warning. The k6
+   constructor itself is patched in update-obsidian.mjs and falls back to this
+   object; the assignment below is a best effort for plugins that read
+   window.electron.remote.safeStorage directly (remote.safeStorage may be a
+   getter-only property - then the assignment is a silent no-op).
+   SECURITY: secrets (e.g. BRAT tokens) are NOT encrypted at rest. That is
+   already what the kernel does on mobile (adapter C6) and its keychain UI
+   warns about it; this does not introduce a new exposure class, it makes the
+   desktop adapter match the mobile one. */
+var __ohPlainSafeStorage={
+  isEncryptionAvailable:function(){return false},
+  getSelectedStorageBackend:function(){return "basic_text"},
+  encryptString:function(s){return String(s)},
+  decryptString:function(v){return (v===null||v===undefined)?"":String(v)}
+};
+window.__ohsidianSafeStorageFallback=__ohPlainSafeStorage;
+try{
+  var __ohEl=window.electron;
+  if(__ohEl&&__ohEl.remote&&!__ohEl.remote.safeStorage){
+    __ohEl.remote.safeStorage=__ohPlainSafeStorage;
+  }
+}catch(eSS){}
 var KEY="EmulateMobile";
 var MODE_FILE="/ohsidian-mode.json";
 function dataDir(){
@@ -3181,7 +3247,13 @@ function migrateVaultToVisibleFolder(){
         opened=true;
         try{new Notice("OHSidian: 已复制 "+n+" 个文件到 "+target+"（跳过软链接 "+sk+" 个），正在打开新仓库…")}catch(e){}
         try{
-          var r=remote.ipcRenderer.sendSync("vault-open",target,!1);
+          /* Same dead handle as the console bridge: @electron/remote has no
+             ipcRenderer (audit 2026-11-22, P1 follow-up), so the last step of
+             "migrate vault to a visible folder" always failed with
+             "Cannot read properties of undefined". */
+          var vaultIpc=ohsidianIpcRenderer();
+          if(!vaultIpc)throw new Error("ipcRenderer unavailable");
+          var r=vaultIpc.sendSync("vault-open",target,!1);
           if(r!==!0){try{new Notice("OHSidian: 打开新仓库返回 "+r)}catch(e){}}
         }catch(e){try{new Notice("OHSidian: 打开新仓库失败 "+e.message)}catch(e2){}}
       });
@@ -3874,7 +3946,10 @@ function ohsidianSettingsRows(root){
       });
     /* 手写笔设置现在是独立的“手写笔”选项卡，见 ohsidianBuildStylusTab(). */
     /* --- 诊断 --- */
-    var diag=newGroup("Pandoc 诊断");
+    /* Group renamed from "Pandoc 诊断": it now also hosts the plugin-integrity /
+       secretStorage report (NF-015 / NF-018), same report as the command-palette
+       entry, so support can reach it without the palette. */
+    var diag=newGroup("诊断");
     var pathCtl=itemEl(diag,"Pandoc 路径",
       "只用于本页的环境检查，本应用不会用它执行导出。导出由第三方插件自己做，插件读的是它自己的配置——"+
       "把插件里填的路径粘到这里就能检查那条路径。留空或填回默认值即恢复默认：" + OHSIDIAN_PANDOC_DEFAULT);
@@ -3948,6 +4023,18 @@ function ohsidianSettingsRows(root){
         "max-height:360px;overflow:auto;font-size:12px;padding:10px;border-radius:8px;"+
         "background:var(--background-secondary)";
       diag.appendChild(outEl);
+    }
+    /* NF-015 / NF-018 on-device adjudication: same copyable report the command
+       palette opens (ohsidian-diag-plugins), also reachable from 设置 → 诊断. */
+    var pluginCtl=itemEl(diag,"插件完整性与安全存储",
+      "检查已安装插件的 main.js 是否完整（与内核加载时同一解析门槛）以及 secretStorage 是否可用（BRAT 类插件依赖），报告可一键复制。只读。");
+    if(pluginCtl){
+      var pluginBtn=document.createElement("button");
+      pluginBtn.textContent="检查";
+      pluginBtn.addEventListener("click",function(){
+        try{ohsidianRunPluginIntegrityProbe()}catch(ePj){}
+      });
+      pluginCtl.appendChild(pluginBtn);
     }
   }catch(e){
     window.__ohsidianSettingsError="渲染设置页失败: "+String((e&&e.message)||e);
@@ -4386,11 +4473,135 @@ function ohsidianScheduleSettingsTab(){
      the only moment registration can succeed. */
   setTimeout(function(){try{ohsidianEnsureAllSettingsTabs()}catch(e){}},2000);
 }
+/* NF-015 / NF-018 on-device adjudication (report 2026-11-22 §五). The console
+   probes in that report are impossible to type on a tablet, so the two decisive
+   checks run here and land in the copyable report modal:
+     - per installed plugin: main.js byte size + whether it PARSES the same way
+       loadPlugin evaluates it (a truncated download always dies there, and the
+       user only sees the generic 563 "插件加载失败" notice);
+     - secretStorage: adapter presence and isEncryptionAvailable() - the exact
+       call BRAT 2.2.0's migration dies on - plus the raw engine
+       window.electron.remote.safeStorage gap;
+     - the BRAT migration marker (absent = fresh install, so the migration
+       re-runs on every boot).
+   Read-only. Plugin bodies are parsed one at a time (never all at once: a vault
+   with 20 multi-MB plugins would otherwise hold ~100 MB of text) and the list
+   is capped, so the command cannot stall the renderer on a big vault. */
+function ohsidianRunPluginIntegrityProbe(){
+  var L=[];
+  var add=function(s){L.push(s)};
+  var show=function(){
+    try{ohsidianShowReportModal("OHSidian 诊断: 插件完整性与安全存储",L)}catch(eShow){}
+  };
+  try{
+    add("OHSidian 补丁 "+OHSIDIAN_PATCH_REV+" · "+new Date().toISOString());
+    add("");
+    add("▍安全存储 (secretStorage)");
+    var ss=window.app&&window.app.secretStorage;
+    if(!ss){
+      add("  无此 API（内核 < 1.11.4，插件不会用到）");
+    }else{
+      var enc="?";
+      try{enc=String(ss.isEncryptionAvailable())}catch(eEnc){enc="THROWN: "+String((eEnc&&eEnc.message)||eEnc)}
+      var hasAdapter=false;
+      try{hasAdapter=!!ss.adapter}catch(eAd){hasAdapter=false}
+      if(enc==="true"){
+        add("  OK   adapter="+(hasAdapter?"有":"无")+" · isEncryptionAvailable=true（系统密钥库可用）");
+      }else if(enc==="false"){
+        add("  WARN adapter="+(hasAdapter?"有":"无")+" · isEncryptionAvailable=false（明文模式：插件可用，密钥不加密）");
+        add("       内核会在钥匙串设置页显示\"密钥未加密\"警告，属预期");
+      }else{
+        add("  BAD  adapter="+(hasAdapter?"有":"无")+" · isEncryptionAvailable="+enc);
+        add("       使用 app.secretStorage 的插件会静默失败（BRAT 迁移即此类）");
+      }
+    }
+    try{
+      var rawSS="window.electron.remote 不可用";
+      if(window.electron&&window.electron.remote){
+        rawSS="undefined";
+        try{rawSS=typeof window.electron.remote.safeStorage}catch(eRaw){rawSS="THROWN: "+String((eRaw&&eRaw.message)||eRaw)}
+      }
+      add("  引擎 safeStorage: "+rawSS+
+        (rawSS==="undefined"?"（引擎缺口；补丁已兜底为明文透传）":""));
+    }catch(eR){}
+    var a=window.app&&window.app.vault&&window.app.vault.adapter;
+    var man=(window.app&&window.app.plugins&&window.app.plugins.manifests)||{};
+    var ids=Object.keys(man);
+    add("");
+    add("▍插件文件完整性（.obsidian/plugins/<id>/main.js）");
+    if(!a||typeof a.read!=="function"){add("  仓库适配器不可用");show();return}
+    /* Exactly the transform loadPlugin applies before evaluating the file
+       (`d.replace(f4,"")+v4` in installPlugin), so the verdict here is the
+       same verdict the kernel reaches - not a different parser. */
+    var f4p=/^\/\/[@#] sourceMappingURL=data:application\/json(?:;charset[:=][^;]+)?;base64,.*$/gm;
+    var v4p="\n/* nosourcemap */";
+    var probeFile=function(id){
+      var dir=(man[id]&&man[id].dir)||(".obsidian/plugins/"+id);
+      var file=dir+"/main.js";
+      return a.stat(file).then(function(st){
+        var size=(st&&st.size)||0;
+        /* Parsing is synchronous (~100 ms for 4 MB). A vault with twenty
+           multi-MB plugins would freeze the renderer for seconds, so bodies
+           above 6 MB only report their size: the probe looks for TRUNCATION,
+           which by definition is the small/shorter file. */
+        if(size>6*1024*1024){
+          /* Unchecked != OK: a truncated >6 MB body must not be counted as
+             "parseable" in the verdict. */
+          return {id:id,size:size,ok:true,unchecked:true,why:"超过 6 MB，只报大小、未解析"};
+        }
+        return a.read(file).then(function(txt){
+          var ok=true,why="";
+          try{new Function(String(txt).replace(f4p,"")+v4p)}catch(eP){ok=false;why=String((eP&&eP.message)||eP)}
+          return {id:id,size:size,ok:ok,why:why};
+        });
+      }).catch(function(eF){
+        return {id:id,size:-1,ok:false,why:"读取失败: "+String((eF&&eF.message)||eF)};
+      });
+    };
+    if(!ids.length){add("  没有已安装的插件");add("");show();return}
+    var limited=ids.slice(0,20);
+    if(ids.length>limited.length)add("  插件较多，只检查前 "+limited.length+" 个");
+    var queue=limited.slice(0),results=[];
+    var step=function(){
+      if(!queue.length)return Promise.resolve(results);
+      var id=queue.shift();
+      return probeFile(id).then(function(r){results.push(r);return step()});
+    };
+    step().then(function(res){
+      res.sort(function(x,y){
+        if(x.ok!==y.ok)return x.ok?1:-1;
+        return y.size-x.size;
+      });
+      var bad=0,unchecked=0;
+      for(var i=0;i<res.length;i++){
+        var r=res[i];
+        if(!r.ok)bad++;
+        if(r.unchecked)unchecked++;
+        var sizeTxt=r.size<0?"?":(r.size>=1048576?(Math.round(r.size/1048576*10)/10+" MB"):(Math.round(r.size/1024)+" KB"));
+        add("  "+(r.unchecked?"SKIP":(r.ok?"OK  ":"BAD "))+r.id+" · "+sizeTxt+
+          (r.ok?(r.why?(" · "+r.why):""):(" · 无法解析（文件可能被截断）："+r.why)));
+      }
+      add("");
+      var diagVerdict=bad?("发现 "+bad+" 个无法解析的 main.js —— 大概率下载被截断：在插件市场卸载后换网络重装"):"已检查的 main.js 全部可解析";
+      if(unchecked)diagVerdict+="（另有 "+unchecked+" 个超过 6 MB 未解析，请对照发行包大小人工确认）";
+      add("  结论："+diagVerdict);
+      var diagCfgDir=(window.app&&window.app.vault&&window.app.vault.configDir)||".obsidian";
+      var diagBratDir=(man["obsidian42-brat"]&&man["obsidian42-brat"].dir)||(diagCfgDir+"/plugins/obsidian42-brat");
+      a.exists(diagBratDir+"/brat-migrations.json").then(function(has){
+        add("  BRAT 迁移标记: "+(has?"存在（迁移已跑过）":"不存在（全新安装 → 每次启动都会重跑迁移）"));
+        show();
+      },function(){show()});
+    },function(){show()});
+  }catch(eOuter){
+    add("  检查失败: "+String((eOuter&&eOuter.message)||eOuter));
+    show();
+  }
+}
 /* One-glance answer to "is the patch I am running the one we just built?".
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="195";
+var OHSIDIAN_PATCH_REV="196";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -4474,6 +4685,7 @@ function ohsidianBuildStatusLines(){
   row("沙箱",ohsidianSandboxLabel(ohsidianSandboxMode()));
   /* ---- 调试 --------------------------------------------------------- */
   sec("调试");
+  row("日志捕获",(window.__ohsidianConsoleCaptureMode==="all"?"全量":(window.__ohsidianConsoleCaptureMode==="off"?"关闭":"仅错误(默认)"))+" · 重启生效");
   var wantT=null;
   try{var cfgT=readMode();wantT=resolveWant(cfgT)}catch(eW){}
   row("触屏模式","EmulateMobile "+(localStorage.getItem(KEY)?"开":"关")+" · "+
@@ -4544,6 +4756,8 @@ var install=function(app){
       }});
     app.commands.addCommand({id:"ohsidian-diag-pandoc",name:"OHSidian 诊断: Pandoc 环境",
       callback:function(){ohsidianRunPandocProbe()}});
+    app.commands.addCommand({id:"ohsidian-diag-plugins",name:"OHSidian 诊断: 插件完整性与安全存储",
+      callback:function(){try{ohsidianRunPluginIntegrityProbe()}catch(e){}}});
     try{ohsidianScheduleSettingsTab()}catch(eTab){}
     /* The ink layer needs the loopback socket even when no native video was
        opened; retry until the ArkTS page has published its port file. */
@@ -4562,13 +4776,27 @@ var install=function(app){
     /* BUG-001: install the text-over-binary write guard as early as the vault
        allows - it is the only guard that covers code paths we do not know. */
     try{ohsidianInstallWriteGuard()}catch(eWG){}
-    app.commands.addCommand({id:"ohsidian-console-capture",name:"OHSidian 诊断: 运行日志捕获 开/关 (重启生效)",
+    /* NF-016 tri-state, cycled by this one command:
+       仅错误(默认) -> 全量 -> 关闭 -> 仅错误 ...
+       "仅错误" is the default for new/updated installs (no localStorage key),
+       so a renderer failure leaves a forensic trail with zero setup; "关闭" is
+       an explicit opt-out. Takes effect on the next app start (same as before). */
+    app.commands.addCommand({id:"ohsidian-console-capture",name:"OHSidian 诊断: 运行日志捕获 (仅错误/全量/关闭, 重启生效)",
       callback:function(){
         try{
-          var on=localStorage.getItem("ohsidianConsoleCapture")==="1";
-          if(on)localStorage.removeItem("ohsidianConsoleCapture");
-          else localStorage.setItem("ohsidianConsoleCapture","1");
-          try{new Notice("OHSidian 运行日志捕获 → "+(on?"关闭":"开启")+" (重启应用后生效)")}catch(e){}
+          var cur=localStorage.getItem("ohsidianConsoleCapture");
+          var nextLabel="";
+          if(cur==="1"){
+            localStorage.setItem("ohsidianConsoleCapture","0");
+            nextLabel="关闭";
+          }else if(cur==="0"){
+            localStorage.removeItem("ohsidianConsoleCapture");
+            nextLabel="仅错误 (默认)";
+          }else{
+            localStorage.setItem("ohsidianConsoleCapture","1");
+            nextLabel="全量";
+          }
+          try{new Notice("OHSidian 运行日志捕获 → "+nextLabel+" (重启应用后生效)")}catch(e){}
         }catch(e){}
       }});
     /* Zoom-style font scale chooser: cycles 跟随系统 → 100% → 110% → 125% →

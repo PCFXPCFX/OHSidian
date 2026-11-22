@@ -46,6 +46,7 @@ import CheckEmptyUtils from '../utils/CheckEmptyUtils';
 import { WebBaseAbility } from './WebBaseAbility';
 import lazy { GlobalThisHelper } from '../utils/GlobalThisHelper';
 import { WindowStyle, IStyleData, IUpdateStyle } from '../common/WindowStyle';
+import { WindowDecorCapability } from '../common/WindowDecorCapability';
 import { CommandType } from '../common/Constants';
 import { PermissionManagerAdapter } from '../adapter/PermissionManagerAdapter';
 import { RunningLockAdapter } from '../adapter/RunningLockAdapter';
@@ -818,18 +819,28 @@ export class WebAbility extends WebBaseAbility {
     }
     this.frameEnforceAt = now;
     const keep: boolean = this.keepSystemTitleButtons();
-    try {
-      this.mainWindow.setWindowDecorVisible(false);
+    /* NF-017: on a device that answers 801 these two calls fail on every 3 s
+       enforcement pass. Route them through the capability cache: the first
+       801 is reported once, the repeats drop to debug. */
+    const frameWin = this.mainWindow;
+    const decorOk: boolean = WindowDecorCapability.run('decorVisible', () => {
+      frameWin.setWindowDecorVisible(false);
+    });
+    if (decorOk) {
       this.decorVisibleLast = false;
-      this.mainWindow.setWindowTitleButtonVisible(keep, keep, keep);
+    }
+    const buttonsOk: boolean = WindowDecorCapability.run('titleButtons', () => {
+      frameWin.setWindowTitleButtonVisible(keep, keep, keep);
+    });
+    if (decorOk && buttonsOk) {
+      /* latches only claim what the WMS accepted; a refused call keeps them
+         on the "not applied yet" side so the next event retries */
       this.captionApplied = false;
       if (this.frameOwnerApplied !== 'app') {
         this.frameOwnerApplied = 'app';
         LogUtil.info(TAG, '[OHSidian] frame style = app-drawn: system caption off, buttons=' +
           keep);
       }
-    } catch (frameException) {
-      LogUtil.warn(TAG, 'enforce frame style failed: ' + JSON.stringify(frameException));
     }
   }
 
@@ -1370,6 +1381,15 @@ export class WebAbility extends WebBaseAbility {
 
   private inWindowForm(): boolean {
     return this.pcModeEnabled || this.freeWindowForm();
+  }
+
+  // NF-017 (review 2026-11-22): the caption family belongs to every WINDOWED
+  // form. inWindowForm() is intentionally false on 2in1 (there pcModeEnabled is
+  // never boot-read and freeWindowForm() is tablet/phone-only), but a 2in1
+  // window is an ordinary desktop window with a system caption. Gate the
+  // startup decor block on this predicate, not on inWindowForm().
+  private captionForm(): boolean {
+    return this.inWindowForm() || deviceInfo.deviceType === '2in1';
   }
 
   // BUG-003: the engine's remembered BrowserWindow rect lives in
@@ -3087,36 +3107,39 @@ export class WebAbility extends WebBaseAbility {
           LogUtil.info(TAG, '[OHSidian] startup decor: hideTitleBar=' + this.hideTitleBar +
             ' keepButtonsPref=' + this.keepSystemTitleButtons() +
             ' pcMode=' + this.pcModeEnabled + ' inWindow=' + this.inWindowForm());
+        } catch (logException) {
+          /* diagnostics only: a failed startup log must not skip the decor call */
+        }
+        WindowDecorCapability.run('decorVisible', () => {
           mainWin.setWindowDecorVisible(!this.hideTitleBar);
           this.decorVisibleLast = !this.hideTitleBar;
-        } catch (exception) {
-          LogUtil.warn(TAG, 'Failed to set window decor visible: ' + JSON.stringify(exception));
-        }
+        });
       }
 
       if (this.useDarkMode) {
         let buttonStyle: window.DecorButtonStyle = {
           colorMode: ConfigurationConstant.ColorMode.COLOR_MODE_DARK
         };
-        try {
+        WindowDecorCapability.run('decorButtonStyle', () => {
           mainWin.setDecorButtonStyle(buttonStyle);
-        } catch (exception) {
-          LogUtil.warn(TAG, 'Failed to set window decor button style: ' + JSON.stringify(exception));
-        }
+        });
       }
-      try {
-        // Title-drag lives on the SYSTEM caption here: pushSafeAreaInsets
-        // re-shows the caption for free windows, so the move capability must
-        // follow the caption, not hideTitleBar. (The engine also maps web-side
-        // -webkit-app-region to a window move, but only on the borderless path
-        // - rounds 182/183 - so it is not a substitute while the caption is
-        // shown.) Enabling it unconditionally is safe: fullscreen windows have
-        // no caption strip to drag.
-        mainWin.setWindowTitleMoveEnabled(true);
-      } catch (exception) {
-        LogUtil.warn(TAG, 'Failed to set window title move enabled: ' + JSON.stringify(exception));
-      }
-      try {
+      /* NF-017 (report 2026-11-22 T2-2): the caption family is a FORM-FACTOR
+         property (round 154 reached the same conclusion), and a device that
+         answers 801 answers it on every boot. Issue these only for a windowed
+         form; the capability cache keeps the first 801 per kind at info level
+         and drops the repeats to debug. It never skips a call: a free window
+         of the same process may still need the capability. */
+      if (this.captionForm()) {
+        WindowDecorCapability.run('titleMove', () => {
+          // Title-drag lives on the SYSTEM caption here: pushSafeAreaInsets
+          // re-shows the caption for free windows, so the move capability must
+          // follow the caption, not hideTitleBar. (The engine also maps web-side
+          // -webkit-app-region to a window move, but only on the borderless path
+          // - rounds 182/183 - so it is not a substitute while the caption is
+          // shown.)
+          mainWin.setWindowTitleMoveEnabled(true);
+        });
         // BUG-002: on HarmonyOS this call DRAWS the buttons, it does not merely
         // grant a capability. Passing the raw flags through was wrong because
         // they default to true (WebBaseAbility.ets:67-69, loosened on 2026-05-15
@@ -3132,32 +3155,30 @@ export class WebAbility extends WebBaseAbility {
           ' keepPref=' + this.keepSystemTitleButtons() +
           ' maximizable=' + this.maximizable + ' minimizable=' + this.minimizable +
           ' closable=' + this.closable + ' => visible=' + buttonsVisible);
-        mainWin.setWindowTitleButtonVisible(buttonsVisible && this.maximizable,
-          buttonsVisible && this.minimizable, buttonsVisible && this.closable);
-      } catch (exception) {
-        LogUtil.warn(TAG, 'Failed to set window title button visible: ' + JSON.stringify(exception));
+        WindowDecorCapability.run('titleButtons', () => {
+          mainWin.setWindowTitleButtonVisible(buttonsVisible && this.maximizable,
+            buttonsVisible && this.minimizable, buttonsVisible && this.closable);
+        });
+        WindowDecorCapability.run('topmost', () => {
+          mainWin.setWindowTopmost(this.alwaysOntop);
+        });
+        WindowDecorCapability.run('resizeDrag', () => {
+          mainWin.setResizeByDragEnabled(this.resizable);
+        });
+      } else {
+        LogUtil.debug(TAG, '[OHSidian] caption decor calls skipped: touch form factor ' +
+          WindowDecorCapability.snapshot());
       }
-      try {
-        mainWin.setWindowTopmost(this.alwaysOntop);
-      } catch (exception) {
-        LogUtil.warn(TAG, 'Failed to set window topmost: ' + JSON.stringify(exception));
-      }
-      try {
-        mainWin.setResizeByDragEnabled(this.resizable);
-      } catch (exception) {
-        LogUtil.warn(TAG, 'Failed to set resize by drag enabled: ' + JSON.stringify(exception));
-      }
-      try {
+      /* Modal-ness is not form-factor bound: a dialog ability can be windowed
+         even while the main window is fullscreen, so keep issuing it (the
+         cache still collapses a device that answers 801). */
+      WindowDecorCapability.run('modal', () => {
         windowStage.setWindowModal(this.isModal);
-      } catch (exception) {
-        LogUtil.warn(TAG, 'Failed to set window modal: ' + JSON.stringify(exception));
-      }
+      });
       if (this.isPanel) {
-        try {
+        WindowDecorCapability.run('titleHover', () => {
           mainWin.setTitleAndDockHoverShown(false, false);
-        } catch (exception) {
-          LogUtil.warn(TAG, 'Failed to set title and dock hover shown: ' + JSON.stringify(exception));
-        }
+        });
       }
 
       // window title button rect change callback must registered after loadContent/setUIContent

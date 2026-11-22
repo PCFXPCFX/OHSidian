@@ -42,6 +42,7 @@ import { fileIo } from '@kit.CoreFileKit';
 import { AbilityManager } from '../common/AbilityManager';
 import { BaseAdapter } from '../common/BaseAdapter';
 import { ConfigData } from '../common/Constants';
+import { WindowDecorCapability } from '../common/WindowDecorCapability';
 import { ContextAdapter } from './ContextAdapter';
 import { IStyleData, IUpdateStyle, WindowStyle } from '../common/WindowStyle';
 import { WebProxy } from '../interface/WebProxy';
@@ -245,7 +246,12 @@ export class AppWindowAdapter extends BaseAdapter {
     if (!preferences) {
       return;
     }
-    proxy?.getWindow()?.setWindowTitleButtonVisible(preferences.maximizable, preferences.minimizable, preferences.closable);
+    const win = proxy?.getWindow();
+    const preferenceSnapshot: WindowPreferences = preferences;
+    WindowDecorCapability.run('titleButtons', () => {
+      win?.setWindowTitleButtonVisible(preferenceSnapshot.maximizable,
+        preferenceSnapshot.minimizable, preferenceSnapshot.closable);
+    });
   }
 
   private showWindowTitleButtons(id: number) {
@@ -257,7 +263,10 @@ export class AppWindowAdapter extends BaseAdapter {
       preferences.closable = true;
       proxy?.setWindowPreferences(preferences);
     }
-    proxy?.getWindow()?.setWindowTitleButtonVisible(true, true, true);
+    const titleButtonWin = proxy?.getWindow();
+    WindowDecorCapability.run('titleButtons', () => {
+      titleButtonWin?.setWindowTitleButtonVisible(true, true, true);
+    });
   }
 
   // Round 99: the vault chooser (starter window) is the one that calls
@@ -601,12 +610,16 @@ export class AppWindowAdapter extends BaseAdapter {
   @LogMethod
   setAlwaysOnTop(id: number, onTop: boolean) {
     let windowClass = this.getWindow(id);
-    let promise = windowClass?.setWindowTopmost(onTop);
-    promise?.then(() => {
-      LogUtil.info(TAG, `Succeeded in setting the window to be topmost.`);
-    }).catch((err: BusinessError) => {
-      LogUtil.error(TAG, `Failed to set the window to be topmost. Cause code: ${err.code}, message: ${err.message}`);
-    });
+    try {
+      let promise = windowClass?.setWindowTopmost(onTop);
+      promise?.then(() => {
+        LogUtil.info(TAG, `Succeeded in setting the window to be topmost.`);
+      }).catch((err: BusinessError) => {
+        WindowDecorCapability.record('topmost', err);
+      });
+    } catch (exception) {
+      WindowDecorCapability.record('topmost', exception);
+    }
   }
 
   @LogMethod
@@ -1157,8 +1170,12 @@ export class AppWindowAdapter extends BaseAdapter {
         ' id=' + id + ' userDrawsFrame=' + userDraws);
       if (useNativeFrame && userDraws) {
         const keep: boolean = this.keepSystemTitleButtonsPref();
-        windowClass?.setWindowDecorVisible(false);
-        windowClass?.setWindowTitleButtonVisible(keep, keep, keep);
+        WindowDecorCapability.run('decorVisible', () => {
+          windowClass?.setWindowDecorVisible(false);
+        });
+        WindowDecorCapability.run('titleButtons', () => {
+          windowClass?.setWindowTitleButtonVisible(keep, keep, keep);
+        });
         let prefs: WindowPreferences | undefined = proxy?.getWindowPreferences();
         if (prefs) {
           prefs.hideTitleBar = true;
@@ -1167,14 +1184,18 @@ export class AppWindowAdapter extends BaseAdapter {
         LogUtil.info(TAG, '[OHSidian] setUseNativeFrame(true) overridden by frame style, buttons=' + keep);
         return;
       }
-      windowClass?.setWindowDecorVisible(useNativeFrame);
+      WindowDecorCapability.run('decorVisible', () => {
+        windowClass?.setWindowDecorVisible(useNativeFrame);
+      });
       // Keep title-bar dragging enabled regardless of the frame style: the WMS
       // caption is the drag surface whenever it is shown, and setUseNativeFrame
       // can hide it without touching the capability (round-56 "title bar cannot
       // move" root cause). Web-side -webkit-app-region is a SECOND surface that
       // this engine honours only on the borderless path (rounds 182/183), so it
       // is not a substitute while the caption is drawn.
-      windowClass?.setWindowTitleMoveEnabled(true);
+      WindowDecorCapability.run('titleMove', () => {
+        windowClass?.setWindowTitleMoveEnabled(true);
+      });
       let preferences: WindowPreferences | undefined = proxy?.getWindowPreferences();
       if (preferences) {
         preferences.hideTitleBar = !useNativeFrame;
@@ -1234,11 +1255,9 @@ export class AppWindowAdapter extends BaseAdapter {
   @LogMethod
   setMovable(id: number, movable: boolean) {
     let windowClass = this.getWindow(id);
-    try {
+    WindowDecorCapability.run('titleMove', () => {
       windowClass?.setWindowTitleMoveEnabled(movable);
-    } catch (exception) {
-      LogUtil.error(TAG, `Failed to set the window Movable. Cause code: ${exception.code}, message: ${exception.message}`);
-    }
+    });
   }
 
   @LogMethod
@@ -1251,10 +1270,10 @@ export class AppWindowAdapter extends BaseAdapter {
     // fullscreen.
     try {
       windowClass?.setResizeByDragEnabled(resizable).then(() => {}).catch((err: BusinessError) => {
-        LogUtil.error(TAG, `Failed to set the window resizable. Cause ${JSON.stringify(err)}`);
+        WindowDecorCapability.record('resizeDrag', err);
       });
     } catch (exception) {
-      LogUtil.error(TAG, `Failed to set the window resizable. Cause code: ${exception.code}, message: ${exception.message}`);
+      WindowDecorCapability.record('resizeDrag', exception);
     }
   }
 
@@ -1310,7 +1329,9 @@ export class AppWindowAdapter extends BaseAdapter {
   @LogMethod
   setWindowModal(modal: boolean, id: number) {
     let windowStage = this.abilityManager.getProxy(id)?.getWindowStage();
-    windowStage?.setWindowModal(modal);
+    WindowDecorCapability.run('modal', () => {
+      windowStage?.setWindowModal(modal);
+    });
   }
 
   @LogMethod
