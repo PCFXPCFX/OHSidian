@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→198）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→199）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 198、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 199、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5404,6 +5404,16 @@ BRAT 2.2.0 的 `addSettingTab(this.settingsTab)` 正好在这个回调里：回�
   失败时把每个插件的栈写进日志并在诊断里显示。对 BRAT 这类"回调抛错导致 tab 丢失"的插件，
   补注册成功后设置页立即出现（临时兜底，不等于根因修复）。
 
-**仍未完成**：根因要等真机的回调错误栈（rev198 诊断的「渲染层日志」段）。可能方向：
+**rev 199（拿到栈之后）**：根因在**插件文件本身**。真机栈为
+`je.getSettingDefinitions → R is not a function`；BRAT 的 `R` 就是 `getTranslations`（i18n 模块）。
+设备上的 `obsidian42-brat/main.js` = **214 KB / ≥85 行**，而官方 2.2.0 release 是
+**138,873 B / 45 行**且含 `function R(...)`（sha256 前 16 位 `d2fb579d4e83162a`）——语法可解析但内部函数缺失，
+正是 NF-015 文档里记录的"残余坏构建"（语法门槛放行、运行时才炸），且它不在市场安装链上（BRAT 自我更新/镜像站），
+NF-015 拦不到。**内核侧无需改**：处置是重装官方插件。为此 rev199 给诊断补两段——
+「BRAT main.js 指纹」（字节/行数/sha256 + 官方 2.2.0 / 2.3.0-beta.1 对照）与
+「BRAT 失败位置」（按栈的行/列打印源码窗口、`getSettingDefinitions` 附近代码、i18n 函数是否存在），
+让同类问题一次定位到文件而不是内核。设置页补注册兜底保留（对完整 bundle 有效）。
+
+**仍未完成**（原记）：
 BRAT settingsTab 的 `update()/display()` 在本端口抛错、或 `registerObsidianProtocolHandler` 抛错；
 拿到栈后再决定是补平台 API 还是继续用补注册兜底。

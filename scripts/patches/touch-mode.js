@@ -4344,7 +4344,9 @@ function ohsidianRepairPluginSettingTabs(){
         out.push(id+": 已补注册");
         try{console.log("[OHSidian] plugin setting tab registered late: "+id)}catch(eL){}
       }catch(eR){
-        out.push(id+": 补注册失败 "+String((eR&&(eR.stack||eR.message))||eR));
+        var errText=String((eR&&(eR.stack||eR.message))||eR);
+        out.push(id+": 补注册失败 "+errText);
+        try{window.__ohsidianPluginTabError={id:id,stack:errText}}catch(eKeep){}
         try{console.error("[OHSidian] plugin setting tab registration failed: "+id,eR)}catch(eL2){}
       }
     }
@@ -4658,6 +4660,8 @@ function ohsidianRunPluginIntegrityProbe(){
         return a.read(file).then(function(txt){
           var ok=true,why="";
           try{new Function(String(txt).replace(f4p,"")+v4p)}catch(eP){ok=false;why=String((eP&&eP.message)||eP)}
+          if(id==="obsidian42-brat"){try{window.__ohsidianProbeBratText=String(txt)}catch(eKeepB){}
+            try{window.__ohsidianProbeBratSize=size}catch(eKeepS){}}
           return {id:id,size:size,ok:ok,why:why};
         });
       }).catch(function(eF){
@@ -4689,6 +4693,57 @@ function ohsidianRunPluginIntegrityProbe(){
           (r.ok?(r.why?(" · "+r.why):""):(" · 无法解析（文件可能被截断）："+r.why)));
       }
       add("");
+      /* rev199: identify WHICH build is on disk. A bundle can parse and still
+         be broken (a repackaged/mirror build with a missing internal helper:
+         BRAT 2.2.0 calls `R()` = getTranslations and dies with "R is not a
+         function"). Known official fingerprints let support say "reinstall"
+         instead of chasing the kernel. */
+      var BRAT_KNOWN={"d2fb579d4e83162a":"官方 2.2.0（完整）",
+        "668c9ad121c04108":"官方 2.3.0-beta.1（完整）"};
+      try{
+        var bratTxt=window.__ohsidianProbeBratText||"";
+        if(bratTxt){
+          var cr=require("crypto");
+          var bratBytes=0;
+          try{bratBytes=Buffer.byteLength(bratTxt,"utf8")}catch(eBB){bratBytes=bratTxt.length}
+          var bratLines=bratTxt.split("\n").length;
+          var bratSha=cr.createHash("sha256").update(bratTxt,"utf8").digest("hex").slice(0,16);
+          add("  BRAT main.js 指纹: "+bratBytes+" B · "+bratLines+" 行 · sha256(16)="+bratSha);
+          if(BRAT_KNOWN[bratSha]){
+            add("  判定: "+BRAT_KNOWN[bratSha]);
+          }else{
+            add("  判定: 非官方/未知构建（镜像站、重打包或开发版常见）。");
+            add("        若注册失败信息含 \"is not a function\"，说明这份 bundle 内部函数缺失，");
+            add("        请卸载插件后从官方市场或 GitHub Release 重装（官方 2.2.0 = 138873 B）。");
+          }
+          add("  i18n 函数名: "+(bratTxt.indexOf("function R(")>=0?"含 function R(（官方同构）":(bratTxt.indexOf("getTranslations")>=0?"含 getTranslations 标识":"两者都没有 —— bundle 不完整")));
+        }
+      }catch(eFP){add("  BRAT 指纹计算失败: "+String((eFP&&eFP.message)||eFP))}
+      /* locate the failing source line from the last registration stack */
+      try{
+        var tabErr=window.__ohsidianPluginTabError;
+        var bratTxt2=window.__ohsidianProbeBratText||"";
+        if(tabErr&&tabErr.stack&&bratTxt2){
+          var mm=tabErr.stack.match(/plugin:obsidian42-brat:(\d+):(\d+)/);
+          if(mm){
+            var errLine=parseInt(mm[1],10),errCol=parseInt(mm[2],10);
+            var allLines=bratTxt2.split("\n");
+            var target=allLines[errLine-1]||"";
+            add("");
+            add("▍BRAT 失败位置（"+tabErr.id+" · 第 "+errLine+" 行 / 第 "+errCol+" 列）");
+            var seg=target.slice(Math.max(0,errCol-240),errCol+240);
+            add("  "+seg);
+            var gsd=bratTxt2.indexOf("getSettingDefinitions");
+            if(gsd>=0){
+              add("");
+              add("  getSettingDefinitions 附近：" + bratTxt2.slice(gsd,gsd+420).replace(/\n/g," ⏎ "));
+            }
+            add("  提示: 上面若出现 R()/getTranslations 这类调用而文件里没有对应定义，");
+            add("        就是 bundle 不完整；无需改内核，重装官方插件即可。");
+          }
+        }
+      }catch(eLoc){add("  失败位置定位异常: "+String((eLoc&&eLoc.message)||eLoc))}
+      add("");
       var diagVerdict=bad?("发现 "+bad+" 个无法解析的 main.js —— 大概率下载被截断：在插件市场卸载后换网络重装"):"已检查的 main.js 全部可解析";
       if(unchecked)diagVerdict+="（另有 "+unchecked+" 个超过 6 MB 未解析，请对照发行包大小人工确认）";
       add("  结论："+diagVerdict);
@@ -4710,7 +4765,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="198";
+var OHSIDIAN_PATCH_REV="199";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the

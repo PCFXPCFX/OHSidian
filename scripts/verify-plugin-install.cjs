@@ -162,6 +162,10 @@ check('plugin setting-tab repair shim present (BRAT onLayoutReady throw)',
   app.includes('function ohsidianRepairPluginSettingTabs(') &&
   app.includes('plugin setting tab registered late') &&
   app.includes('设置页自愈: '));
+check('BRAT bundle fingerprint + failure source locator present',
+  app.includes('BRAT main.js 指纹') &&
+  app.includes('__ohsidianPluginTabError') &&
+  app.includes('失败位置（'));
 
 /* ---- Behaviour: synthetic downloads ------------------------------------- */
 if (helperSrc) {
