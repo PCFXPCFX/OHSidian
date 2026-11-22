@@ -5,6 +5,8 @@
  *   web_engine/src/main/resources/resfile/pandoc/pandoc-service.cjs
  *   web_engine/src/main/resources/resfile/pandoc/pandoc-version.txt
  *   web_engine/src/main/resources/resfile/pandoc/LICENSE-pandoc-wasm.txt
+ *   web_engine/src/main/resources/resfile/pandoc/LICENSE-GPL-2.0.txt
+ *   web_engine/src/main/resources/resfile/pandoc/LICENSE-browser-wasi-shim.txt
  *   web_engine/src/main/resources/resfile/pandoc/PANDOC-SOURCE.txt
  *
  * Why this shape:
@@ -42,6 +44,10 @@ const TEMP = path.join(CACHE, 'build');
 const RES = path.join(ROOT, 'web_engine/src/main/resources/resfile/pandoc');
 const LOCK = path.join(ROOT, 'scripts/pandoc-wasm.lock.json');
 const SERVICE_SRC = path.join(ROOT, 'scripts/pandoc-wasm/service-core.mjs');
+/* License texts are tracked in the repo (not fetched at build time) so the
+   shipped HAP always carries a copy of GPL-2.0 and the WASI shim's MIT text,
+   independent of network availability (licensing round, 2026-11-22). */
+const LICENSES = path.join(ROOT, 'scripts/licenses');
 
 const PANDOC_WASM = { name: 'pandoc-wasm', version: '1.1.0' };
 const WASI_SHIM = { name: '@bjorn3/browser_wasi_shim', version: '0.4.2' };
@@ -156,24 +162,82 @@ function checkWasmRaw(wasmGz, lock) {
   return raw.length;
 }
 
-function writeSourceNotice() {
+function writeSourceNotice(meta) {
+  const v = meta && meta.pandocVersion ? meta.pandocVersion : '3.10';
   return [
-    'Pandoc (WebAssembly build) - third-party component bundled with OHSidian',
+    'Pandoc (WebAssembly build) - third-party components bundled with OHSidian',
+    '=======================================================================',
     '',
-    'Pandoc source: https://github.com/jgm/pandoc',
-    'Version: ' + (fs.existsSync(path.join(RES, 'pandoc-version.txt'))
-      ? fs.readFileSync(path.join(RES, 'pandoc-version.txt'), 'utf8').trim() : '(see pandoc-version.txt)'),
-    'WASM wrapper: https://github.com/pandoc/pandoc-wasm (npm package pandoc-wasm@' + PANDOC_WASM.version + ')',
-    'WASI shim: @bjorn3/browser_wasi_shim@' + WASI_SHIM.version,
+    'OHSidian ships a built-in, fully offline Pandoc conversion engine. No part',
+    'of it is downloaded at runtime. This file is the licensing notice required',
+    'by the licenses of the components below; full license texts travel next to',
+    'it in the application resources (resources/resfile/pandoc/).',
     '',
-    'Pandoc is licensed under GPL-2.0-or-later. The npm package and the bundled',
-    'pandoc.wasm are distributed under GPL-2.0-or-later as well.',
-    'The complete corresponding source is available at the URLs above; the',
-    'OHSidian source (including the build script that produced these files) is',
-    'at the project repository.',
+    '1. Pandoc (conversion engine, compiled to WebAssembly)',
+    '   Version: ' + v,
+    '   Files: pandoc.wasm (shipped gzipped as pandoc.wasm.gz)',
+    '   License: GPL-2.0-or-later (GNU General Public License, version 2 or later)',
+    '   Copyright (C) 2006-2024 John MacFarlane <jgm at berkeley dot edu> and the',
+    '   Pandoc contributors. Pandoc embeds some third-party code under',
+    '   GPL-compatible licenses; see the COPYRIGHT file in the Pandoc source.',
+    '   License texts shipped with this application:',
+    '     resources/resfile/pandoc/LICENSE-GPL-2.0.txt',
+    '     resources/resfile/pandoc/LICENSE-pandoc-wasm.txt',
+    '   Corresponding source (preferred form for modification):',
+    '     https://hackage.haskell.org/package/pandoc-' + v + '/pandoc-' + v + '.tar.gz',
+    '     https://github.com/jgm/pandoc/tree/' + v,
     '',
-    'Offline conversion only: the WASM build cannot fetch URLs or execute',
-    'external programs, and cannot produce PDF (needs LaTeX/Typst).',
+    '2. pandoc-wasm (JavaScript WebAssembly loader; bundled into pandoc-service.cjs)',
+    '   Version: ' + PANDOC_WASM.version,
+    '   License: MIT License',
+    '   Copyright (c) Tweag I/O Limited, Johannes Wilm, and pandoc-wasm',
+    '   contributors.',
+    '   Source (npm tarball, contains src/):',
+    '     https://registry.npmjs.org/pandoc-wasm/-/pandoc-wasm-' + PANDOC_WASM.version + '.tgz',
+    '     sha256: ' + (meta && meta.pandocTgzSha ? meta.pandocTgzSha : '(see scripts/pandoc-wasm.lock.json)'),
+    '     https://github.com/pandoc/pandoc-wasm',
+    '',
+    '3. browser_wasi_shim (WASI runtime shim; bundled into pandoc-service.cjs)',
+    '   Version: ' + WASI_SHIM.version,
+    '   License: MIT OR Apache-2.0 (this application complies under the MIT option)',
+    '   Copyright (c) bjorn3 and browser_wasi_shim contributors.',
+    '   License text shipped:',
+    '     resources/resfile/pandoc/LICENSE-browser-wasi-shim.txt',
+    '   Source:',
+    '     https://registry.npmjs.org/@bjorn3/browser_wasi_shim/-/browser_wasi_shim-' + WASI_SHIM.version + '.tgz',
+    '     sha256: ' + (meta && meta.shimTgzSha ? meta.shimTgzSha : '(see scripts/pandoc-wasm.lock.json)'),
+    '     https://github.com/bjorn3/browser_wasi_shim',
+    '',
+    '4. OHSidian glue code (not third-party)',
+    '   scripts/build-pandoc-wasm.mjs, scripts/pandoc-wasm/service-core.mjs and',
+    '   scripts/pandoc-wasm/pandoc-host.cjs are part of OHSidian and are',
+    '   distributed under the project BSD 3-Clause license (see LICENSE).',
+    '   Project: https://github.com/PCFXPCFX/OHSidian',
+    '',
+    'GPL-2.0 source-availability statement',
+    '------------------------------------',
+    'The complete corresponding source code for the GPL-covered Pandoc engine is',
+    'available at the exact versions and URLs listed above. The build is',
+    'reproducible from those pinned sources with the public build script named',
+    'above; the tarballs are pinned by sha256 in scripts/pandoc-wasm.lock.json.',
+    'A written offer for a machine-readable copy of the corresponding source is',
+    'available through https://github.com/PCFXPCFX/OHSidian/issues and is valid',
+    'for at least three years from the release date. The GPL-covered engine is a',
+    'separate, self-contained component loaded from its own files and, where the',
+    'renderer has no WebAssembly, executed in a separate utility process (see',
+    'docs/PLATFORM-ADAPTATION.md section 6.11).',
+    '',
+    'Chinese summary / 中文摘要',
+    '---------------------------',
+    '本应用内置离线 Pandoc ' + v + ' 转换引擎（WebAssembly），不在运行时下载任何组件。',
+    '引擎本体为 GPL-2.0-or-later（Copyright (C) 2006-2024 John MacFarlane 及 Pandoc',
+    '贡献者）；pandoc-wasm 封装为 MIT；browser_wasi_shim 为 MIT OR Apache-2.0',
+    '（本应用按 MIT 履行）。上述许可证全文与精确源码地址随应用资源',
+    'resources/resfile/pandoc/ 一同提供；对应源码以上面锁定的上游版本提供，构建',
+    '脚本公开。详见项目 LICENSE 的「第三方组件」一节。',
+    '',
+    'Limitations of the built-in engine: no PDF output (needs LaTeX/Typst), no',
+    'network access, Lua filters only (executable filters are rejected).',
     '',
   ].join('\n');
 }
@@ -183,10 +247,26 @@ async function main() {
   const lock = loadLock();
 
   if (optCheck) {
-    const files = ['pandoc.wasm.gz', 'pandoc-service.cjs', 'pandoc-host.cjs', 'pandoc-version.txt'];
+    const files = ['pandoc.wasm.gz', 'pandoc-service.cjs', 'pandoc-host.cjs', 'pandoc-version.txt',
+      'LICENSE-pandoc-wasm.txt', 'LICENSE-GPL-2.0.txt', 'LICENSE-browser-wasi-shim.txt', 'PANDOC-SOURCE.txt'];
     for (const f of files) {
       const p = path.join(RES, f);
       if (!fs.existsSync(p)) fail('missing built asset ' + p + ' (run npm run build:pandoc-wasm)');
+    }
+    /* Licensing gate (2026-11-22): the shipped copy of the GPL text must be the
+       real license, and the notice must name the pinned upstream sources. */
+    const gpl = fs.readFileSync(path.join(RES, 'LICENSE-GPL-2.0.txt'), 'utf8');
+    if (!gpl.includes('GNU GENERAL PUBLIC LICENSE') || !gpl.includes('Version 2, June 1991')) {
+      fail('LICENSE-GPL-2.0.txt does not look like the GNU GPL version 2 text');
+    }
+    const shimLic = fs.readFileSync(path.join(RES, 'LICENSE-browser-wasi-shim.txt'), 'utf8');
+    if (!shimLic.includes('Permission is hereby granted, free of charge')) {
+      fail('LICENSE-browser-wasi-shim.txt does not contain the MIT license text');
+    }
+    const notice = fs.readFileSync(path.join(RES, 'PANDOC-SOURCE.txt'), 'utf8');
+    if (!notice.includes('GPL-2.0-or-later') || !notice.includes('pandoc-wasm') ||
+      !notice.includes('sha256:') || !notice.includes('browser_wasi_shim')) {
+      fail('PANDOC-SOURCE.txt is missing the pinned source/licensing statement');
     }
     const wasmGz = fs.readFileSync(path.join(RES, 'pandoc.wasm.gz'));
     const rawBytes = checkWasmRaw(wasmGz, lock);
@@ -197,7 +277,7 @@ async function main() {
     checkHash('outputs-host', host, lock);
     log('check OK: wasm ' + (rawBytes / 1048576).toFixed(1) + ' MB raw (' +
       (wasmGz.length / 1048576).toFixed(1) + ' MB gz), service ' +
-      (svc.length / 1024).toFixed(0) + ' KB');
+      (svc.length / 1024).toFixed(0) + ' KB, licenses present');
     return;
   }
 
@@ -248,7 +328,22 @@ async function main() {
   fs.writeFileSync(path.join(RES, 'pandoc-version.txt'), pandocVersion + '\n', 'utf8');
   const licenseSrc = path.join(nm, 'pandoc-wasm', 'LICENSE');
   if (fs.existsSync(licenseSrc)) fs.copyFileSync(licenseSrc, path.join(RES, 'LICENSE-pandoc-wasm.txt'));
-  fs.writeFileSync(path.join(RES, 'PANDOC-SOURCE.txt'), writeSourceNotice(), 'utf8');
+  /* Licensing round (2026-11-22): ship the FULL GPL-2.0 text (not just the
+     notice) and the WASI shim's MIT text, both tracked in scripts/licenses/ so
+     the build never depends on the network for licensing material. */
+  const trackedLicenses = [
+    [path.join(LICENSES, 'GPL-2.0.txt'), 'LICENSE-GPL-2.0.txt'],
+    [path.join(LICENSES, 'browser-wasi-shim-LICENSE-MIT.txt'), 'LICENSE-browser-wasi-shim.txt'],
+  ];
+  for (const [src, name] of trackedLicenses) {
+    if (!fs.existsSync(src)) fail('missing tracked license text ' + src);
+    fs.copyFileSync(src, path.join(RES, name));
+  }
+  fs.writeFileSync(path.join(RES, 'PANDOC-SOURCE.txt'), writeSourceNotice({
+    pandocVersion: pandocVersion,
+    pandocTgzSha: sha256(wasmTap),
+    shimTgzSha: sha256(shimTap),
+  }), 'utf8');
 
   const service = fs.readFileSync(path.join(RES, 'pandoc-service.cjs'));
   const host = fs.readFileSync(hostDst);

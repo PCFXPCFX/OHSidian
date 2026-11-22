@@ -76,6 +76,12 @@ Full index: [docs/README.md](docs/README.md) (Chinese).
 ## License
 
 The source code is released under BSD 3-Clause; see [LICENSE][license-file]. Obsidian itself (`obsidian.asar`) is proprietary software and is not covered by this license.
+The app **bundles** the official Pandoc 3.10 WebAssembly engine - the engine is GPL-2.0-or-later
+(Copyright © 2006-2024 John MacFarlane and the Pandoc contributors), the `pandoc-wasm` wrapper is MIT,
+and the `browser_wasi_shim` runtime is MIT OR Apache-2.0. Full license texts, exact upstream source
+URLs and the GPL-2.0 source-availability statement ship with the package (`resources/resfile/pandoc/`)
+and are recorded in the "Third-party components" section of [LICENSE](LICENSE). The bundled
+components are never downloaded by users.
 
 ## Acknowledgments
 

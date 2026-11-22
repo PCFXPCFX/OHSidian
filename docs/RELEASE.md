@@ -16,6 +16,9 @@
 - [ ] 门禁结论必须抄当次实际输出（`verify-*` / `check-docs` 的末行与失败项），
       不要凭印象写"全绿"——2026-11-22 审计发现 28 个提交都声称 check-docs 全绿，
       实际存在 1 条存量断链，已在本轮修掉并把这条写进模板。
+- [ ] 内置 Pandoc 的三份许可证与源码声明随包：`node scripts/build-pandoc-wasm.mjs --check`
+      输出 `licenses present`，`node scripts/verify-pandoc-wasm.cjs` 的许可断言（GPL 全文 /
+      shim MIT / 声明含 sha256 / 项目 LICENSE 已登记）全过。
 - [ ] [CHANGELOG](CHANGELOG.md) 已写本次发布内容；[STYLUS](STYLUS.md) 的 `ink rev`
       与 `scripts/patches/ohsidian-ink.js` 一致。
 - [ ] `git status` 干净，没有把 `artifacts/`、`config.local.json`、`scripts/patches/ohsidian-probe.js`

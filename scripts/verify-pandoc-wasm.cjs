@@ -25,7 +25,8 @@ function check(name, ok, detail) {
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 
 async function main() {
-  const required = ['pandoc.wasm.gz', 'pandoc-service.cjs', 'pandoc-host.cjs', 'pandoc-version.txt', 'PANDOC-SOURCE.txt'];
+  const required = ['pandoc.wasm.gz', 'pandoc-service.cjs', 'pandoc-host.cjs', 'pandoc-version.txt',
+    'PANDOC-SOURCE.txt', 'LICENSE-pandoc-wasm.txt', 'LICENSE-GPL-2.0.txt', 'LICENSE-browser-wasi-shim.txt'];
   const missing = required.filter((f) => !fs.existsSync(path.join(RES, f)));
   if (missing.length) {
     if (permitMissing) {
@@ -41,6 +42,23 @@ async function main() {
   let lock = null;
   try { lock = JSON.parse(fs.readFileSync(lockPath, 'utf8')); } catch (e) { lock = null; }
   check('lock file present', !!lock);
+
+  /* Licensing gate (2026-11-22): the HAP must carry the full GPL-2.0 text and
+     the WASI shim's MIT text, and the project LICENSE must document the
+     bundled components - not just a one-line "GPL" claim. */
+  const gplText = fs.readFileSync(path.join(RES, 'LICENSE-GPL-2.0.txt'), 'utf8');
+  check('shipped FULL GPL-2.0 text', gplText.includes('GNU GENERAL PUBLIC LICENSE') &&
+    gplText.includes('Version 2, June 1991') && gplText.includes('TERMS AND CONDITIONS'));
+  const shimText = fs.readFileSync(path.join(RES, 'LICENSE-browser-wasi-shim.txt'), 'utf8');
+  check('shipped WASI shim MIT text', shimText.includes('Permission is hereby granted, free of charge'));
+  const notice = fs.readFileSync(path.join(RES, 'PANDOC-SOURCE.txt'), 'utf8');
+  check('source notice pins versions + sha256', notice.includes('pandoc-3.10.tar.gz') &&
+    notice.includes('pandoc-wasm-1.1.0.tgz') && notice.includes('browser_wasi_shim-0.4.2.tgz') &&
+    notice.includes('sha256:'));
+  const repoLicense = fs.readFileSync(path.join(ROOT, 'LICENSE'), 'utf8');
+  check('project LICENSE documents bundled Pandoc components',
+    repoLicense.includes('Pandoc') && repoLicense.includes('GPL-2.0-or-later') &&
+    repoLicense.includes('John MacFarlane') && repoLicense.includes('browser_wasi_shim'));
 
   const wasmGz = fs.readFileSync(path.join(RES, 'pandoc.wasm.gz'));
   check('wasm.gz is plausible (10-40 MB)', wasmGz.length > 10 * 1048576 && wasmGz.length < 40 * 1048576,

@@ -500,8 +500,26 @@ HAP 增大 ≈16 MB（原始 120.5 MB → 137.7 MB）。
 4. **pandoc** 的 `execSync`/`spawnSync` 无法在异步 WASM 引擎上同步阻塞，明确报"只支持异步"（主流插件用异步 `exec`/`spawn`）；**非 pandoc** 的同步调用不受影响，照常执行（rev213 / NF-019）；
 5. 大文档在单线程 WASM 中较慢（≈3 s/300 KB），可接受；内存峰值 +100–200 MB。
 
-**合规**：pandoc-wasm/pandoc.wasm 为 GPL-2.0-or-later；HAP 内附 `LICENSE-pandoc-wasm.txt` 与
-`PANDOC-SOURCE.txt`（源码/构建来源）。项目源码本身公开，满足 GPL 的源码提供义务。
+**合规**（2026-11-22 补齐）：内置 Pandoc **随 HAP 打包，用户无需下载**。三个组件的许可与版权：
+
+| 组件 | 版本 | 许可 | 版权 |
+| --- | --- | --- | --- |
+| Pandoc 引擎（`pandoc.wasm`） | 3.10 | **GPL-2.0-or-later** | Copyright (C) 2006-2024 John MacFarlane 及 Pandoc 贡献者（另含 pandoc 收录的 GPL 兼容代码，见其 COPYRIGHT） |
+| `pandoc-wasm` 加载器（打进 `pandoc-service.cjs`） | 1.1.0 | **MIT** | Tweag I/O Limited、Johannes Wilm 及 pandoc-wasm 贡献者 |
+| `browser_wasi_shim` WASI 运行时（同上） | 0.4.2 | **MIT OR Apache-2.0**（本应用按 MIT 履行） | bjorn3 及 browser_wasi_shim 贡献者 |
+
+- HAP 内 `resources/resfile/pandoc/` 随包提供：`LICENSE-GPL-2.0.txt`（GPL **全文**）、
+  `LICENSE-pandoc-wasm.txt`（上游 MIT+GPL 声明）、`LICENSE-browser-wasi-shim.txt`（shim MIT 全文）、
+  `PANDOC-SOURCE.txt`（精确版本、npm tarball sha256、Hackage/GitHub 源码地址、GPL-2.0 §3 源码提供声明）；
+- 项目 `LICENSE` 新增「第三方组件」一节（中英双语），README/README_EN 的许可段同步说明；
+- 构建脚本 `scripts/build-pandoc-wasm.mjs` 把 `scripts/licenses/` 里**受版本管理**的两份许可证文本复制进
+  HAP（不依赖构建机网络），`--check`/`verify-pandoc-wasm` 对"GPL 全文存在、shim MIT 存在、声明含固定
+  sha256 与版本、项目 LICENSE 已登记"做门禁；
+- esbuild / @electron/asar 仅构建期使用（MIT），不随包分发；
+- 源码提供：GPL 组件以上游精确版本提供（Hackage `pandoc-3.10.tar.gz` / GitHub tag 3.10；npm tarball
+  带锁定 sha256），构建脚本公开可复现；书面源码提供声明写在 `PANDOC-SOURCE.txt` 与 `LICENSE` 中。
+  pandoc 引擎是独立组件（独立文件；渲染进程无 WebAssembly 时在独立 utility 进程执行），以降低"组合作品"
+  解释风险。
 
 **rev206 修正（真机第一次运行暴露）**：
 1. **`pandocDir` 未发布**：rev205 在 ArkTS 里直接拼 `resourceDir + '/resources/resfile/pandoc'`，设备上的实际

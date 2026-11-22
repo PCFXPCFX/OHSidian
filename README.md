@@ -88,6 +88,10 @@ hvigorw assembleHap --mode module -p product=default
 ## 许可
 
 源码以 BSD 3-Clause 发布，见 [LICENSE][license-file]。Obsidian 本体（`obsidian.asar`）为专有软件，不在本许可范围内。
+应用包**内置**官方 Pandoc 3.10（WebAssembly）转换引擎——引擎为 GPL-2.0-or-later（Copyright © 2006-2024
+John MacFarlane 及 Pandoc 贡献者），封装 `pandoc-wasm` 为 MIT，WASI shim `browser_wasi_shim` 为
+MIT OR Apache-2.0；许可证全文、精确源码地址与 GPL-2.0 源码提供声明随包提供（`resources/resfile/pandoc/`），
+并登记在 [LICENSE](LICENSE) 的「第三方组件」一节。内置组件无需用户下载。
 
 ## 致谢
 

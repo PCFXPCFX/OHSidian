@@ -57,3 +57,78 @@ OHsidian 原创始人 HanversionOvO（昵称 MikannQAQ），本仓库即基于�
 以 BSD 3-Clause 声明分发；obsidian.asar 为专有软件（其 package.json 声明为
 UNLICENSED），不受本许可覆盖。第三方组件保留各自许可，见 README.md 的
 “许可协议”一节。
+
+--------------------------------------------------------------------------
+
+Third-party components bundled in the application package
+应用包内置的第三方组件
+
+The BSD 3-Clause license above covers the OHSidian source code and this
+project's own glue code. It does NOT relicense the components below: each keeps
+its own copyright and license. Full license texts travel with the application
+under resources/resfile/pandoc/ together with PANDOC-SOURCE.txt, which pins the
+exact versions, npm tarball sha256 values and upstream source URLs.
+
+1. Pandoc (conversion engine, built to WebAssembly)
+   - Version: 3.10 (shipped as pandoc.wasm, gzipped as pandoc.wasm.gz)
+   - License: GPL-2.0-or-later (GNU General Public License, version 2 or later)
+   - Copyright (C) 2006-2024 John MacFarlane <jgm at berkeley dot edu> and the
+     Pandoc contributors. Pandoc embeds some third-party code under
+     GPL-compatible licenses; see the COPYRIGHT file of the Pandoc source.
+   - Full license text in the package:
+     resources/resfile/pandoc/LICENSE-GPL-2.0.txt
+     resources/resfile/pandoc/LICENSE-pandoc-wasm.txt
+   - Corresponding source (preferred form for modification):
+     https://hackage.haskell.org/package/pandoc-3.10/pandoc-3.10.tar.gz
+     https://github.com/jgm/pandoc/tree/3.10
+
+2. pandoc-wasm (JavaScript WebAssembly loader bundled into pandoc-service.cjs)
+   - Version: 1.1.0
+   - License: MIT
+   - Copyright (c) Tweag I/O Limited, Johannes Wilm, and pandoc-wasm
+     contributors.
+   - Source: https://registry.npmjs.org/pandoc-wasm/-/pandoc-wasm-1.1.0.tgz
+     (sha256 693bf76c2365254378500a2370a5995ebeb5f859248784ea827eb687878614a2)
+     https://github.com/pandoc/pandoc-wasm
+
+3. browser_wasi_shim (WASI runtime shim bundled into pandoc-service.cjs)
+   - Version: 0.4.2
+   - License: MIT OR Apache-2.0 (this application complies under the MIT option)
+   - Copyright (c) bjorn3 and browser_wasi_shim contributors.
+   - Full MIT text in the package:
+     resources/resfile/pandoc/LICENSE-browser-wasi-shim.txt
+   - Source: https://registry.npmjs.org/@bjorn3/browser_wasi_shim/-/browser_wasi_shim-0.4.2.tgz
+     (sha256 9c0281520d0e99f027ec7c1c79b4036c0f8168ed9bf98aba19db4737a1333782)
+     https://github.com/bjorn3/browser_wasi_shim
+
+4. Build-time-only tools (NOT distributed in the application package)
+   - esbuild (MIT), @electron/asar (MIT).
+
+Source-availability statement (GPL-2.0 section 3)
+The complete corresponding source code for the GPL-covered Pandoc engine is
+available at the exact versions and URLs listed above, and the package is
+reproducible from them with the public build script
+(scripts/build-pandoc-wasm.mjs) plus the sha256 values pinned in
+scripts/pandoc-wasm.lock.json. A written offer for a machine-readable copy of
+the corresponding source can be requested at
+https://github.com/PCFXPCFX/OHSidian/issues and remains valid for at least
+three years from the release date. The GPL-covered engine is a separate,
+self-contained component: it is loaded from its own files and, on devices where
+the renderer has no WebAssembly, executed in a separate utility process (see
+docs/PLATFORM-ADAPTATION.md section 6.11). The component is bundled inside the
+application package - users are never asked to download it.
+
+中文说明
+上述 BSD 3-Clause 只覆盖 OHSidian 源码与本项目胶水代码，不改变下列组件的许可：
+- 内置 Pandoc 3.10 引擎（WebAssembly，随 HAP 打包，用户无需下载）为
+  GPL-2.0-or-later，版权归 John MacFarlane 及 Pandoc 贡献者（2006-2024）；GPL-2.0
+  全文随包：resources/resfile/pandoc/LICENSE-GPL-2.0.txt；对应源码：
+  https://hackage.haskell.org/package/pandoc-3.10/pandoc-3.10.tar.gz 或 GitHub
+  tag 3.10；GPL-2.0 第 3 条的源码提供声明见上方英文段落。
+- pandoc-wasm 1.1.0 为 MIT（Tweag I/O Limited、Johannes Wilm 及贡献者），源码
+  tarball 与 sha256 见上方。
+- browser_wasi_shim 0.4.2 为 MIT OR Apache-2.0（本应用按 MIT 履行），MIT 全文随包：
+  resources/resfile/pandoc/LICENSE-browser-wasi-shim.txt。
+- esbuild / @electron/asar 仅构建期使用（MIT），不随包分发。
+完整声明文件：resources/resfile/pandoc/PANDOC-SOURCE.txt（精确版本、npm tarball
+sha256、上游源码地址与 GPL-2.0 §3 源码提供声明）。

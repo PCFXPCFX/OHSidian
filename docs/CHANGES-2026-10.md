@@ -5751,3 +5751,29 @@ gz 只记大小；顺带修掉 `checkHash('pandoc-wasm'/'wasi-shim')` 与锁键�
 check-docs 全绿。obsidian.asar 与 patch rev 不变（仍 rev213），本次只需重打 HAP。
 **发布动作（需人工）**：打 tag `v2.1.0`，由 CI 以 tag 重建对外包并生成 SHA256SUMS。
 
+
+### 二十六、许可合规补齐：内置 Pandoc 的许可证全文、第三方声明与源码提供（2026-11-22）
+
+内置 Pandoc 采用官方 `pandoc-wasm@1.1.0`（Pandoc 3.10）：引擎 GPL-2.0-or-later，
+`pandoc-wasm` 封装 MIT，`browser_wasi_shim` MIT OR Apache-2.0。原实现只附了许可证
+**声明**与来源 URL，复核发现三处缺口，本轮补齐（产品形态不变：组件仍随 HAP 内置，
+不做运行时下载，国内网络环境无需额外拉取）：
+
+1. **GPL-2.0 全文随包**：新增受版本管理的 `scripts/licenses/GPL-2.0.txt`（FSF 官方文本，
+   sha256 `edaef632…`），构建时复制为 `resources/resfile/pandoc/LICENSE-GPL-2.0.txt`；
+2. **WASI shim 许可文本随包**：`scripts/licenses/browser-wasi-shim-LICENSE-MIT.txt`
+   （补版权行 bjorn3/contributors）→ `LICENSE-browser-wasi-shim.txt`；
+3. **精确源码声明**：`PANDOC-SOURCE.txt` 重写为完整第三方声明——三个组件的版权/许可、
+   Hackage `pandoc-3.10.tar.gz` 与 GitHub tag 3.10、两个 npm tarball 的 sha256（取自 lock）、
+   项目胶水代码归属（BSD-3），以及 GPL-2.0 §3 源码提供声明（含书面 offer 渠道与三年有效期）；
+4. **项目 `LICENSE`** 新增中英双语「第三方组件」一节：逐组件版权/许可/随包许可证路径/源码
+   地址/源码提供声明，并明确「随包内置、用户无需下载」；
+5. `README` / `README_EN` 许可段与 `docs/PLATFORM-ADAPTATION.md` §6.11 合规段同步；
+6. **门禁**：`build-pandoc-wasm --check` 与 `verify-pandoc-wasm` 新增许可断言（GPL 全文、
+   shim MIT 全文、声明含版本与 sha256、项目 LICENSE 已登记），防止后续构建漏带许可证。
+
+**验证**：`build-pandoc-wasm` 重新生成 8 个 pandoc 资源文件、`--check` 输出
+"licenses present"、`verify-pandoc-wasm` 通过、`--repatch`/`verify-asar`、`verify-release`、
+`check-docs` 全绿；HAP 重建后在 `resources/resfile/pandoc/` 下可直接看到三份许可证与声明。
+**未改变**：引擎仍随包内置、离线可用；不新增运行时下载；patch rev 不变（仍 rev213）。
+
