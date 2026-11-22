@@ -232,6 +232,14 @@ try {
     'app status report carries console log':
       app.includes('function ohsidianLogTailLines(') &&
       app.includes('▍渲染层日志（console.log 末尾，最多 40 行；优先错误/插件行）'),
+    // rev204: the log tail is current-session only (older boot records look like
+    // live defects on a support screenshot) and the renderer log can be cleared.
+    'app log tail is session-only':
+      app.includes('window.__ohsidianBootAt=Date.now()') &&
+      app.includes('已折叠更早会话'),
+    'app clear renderer log':
+      app.includes('function ohsidianClearConsoleLog()') &&
+      app.includes('ohsidian-diag-log-clear'),
     'app sandbox diagnosis explains strong':
       app.includes('function ohsidianSandboxMeta()') &&
       app.includes('本包未声明 CUSTOM_SANDBOX') &&

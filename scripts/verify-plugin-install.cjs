@@ -409,6 +409,35 @@ if (helperSrc) {
       try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) {}
     })
     .then(() => {
+      /* ---- rev204: log tail keeps only the current session ---- */
+      const ltStart = app.indexOf('function ohsidianLogTailLines(max){');
+      const ltEnd = ltStart >= 0 ? app.indexOf('function ohsidianConsoleCaptureLabel(){', ltStart) : -1;
+      check('session log filter present in app.js', ltStart >= 0 && ltEnd > ltStart);
+      if (ltStart < 0 || ltEnd <= ltStart) return;
+      const ltSrc = app.slice(ltStart, ltEnd);
+      const os = require("os");
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ohsidian-logtail-"));
+      const logFile = path.join(dir, "console.log");
+      fs.writeFileSync(logFile, [
+        "[2026-11-22T03:00:00.000Z] [OHSidian:web][error] old failure",
+        "    at oldStack (plugin:old:1:2)",
+        "[2026-11-22T04:05:00.000Z] [OHSidian:web][error] new failure",
+        "    at newStack (plugin:new:3:4)",
+        "",
+      ].join("\n"), "utf8");
+      const getTail = new Function('require', 'window', 'ohsidianConsoleLogPath',
+        ltSrc + '\nreturn ohsidianLogTailLines;')(require,
+        { __ohsidianBootAt: Date.parse("2026-11-22T04:00:00Z") },
+        () => logFile);
+      const linesOut = getTail(40).join("\n");
+      check('session log filter drops earlier boots',
+        linesOut.includes("new failure") && linesOut.includes("newStack") &&
+        !linesOut.includes("old failure") && !linesOut.includes("oldStack"));
+      check('session log filter reports how many historical lines were folded',
+        linesOut.includes("已折叠更早会话"));
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
+    })
+    .then(() => {
       console.log(failures ? 'PLUGIN-INSTALL VERIFY: FAILURES' : 'PLUGIN-INSTALL VERIFY: OK');
       process.exit(failures ? 1 : 0);
     });

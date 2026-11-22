@@ -208,7 +208,7 @@ profile 再重签即可。离线改 profile 再自签**不可行**：profile 由
 
 > 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象
 > `main @ e528275`）。报告结论一句话：**两个插件不是同一种死法，也都不是 2.0 的代码改动
-> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **203**）；
+> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **204**）；
 > 报告里"2.0 无关"的增量考古（补丁层/引擎层 diff 与 eval/require/loadPlugin 零交集）不再
 > 赘述，见原报告第三部分。
 
@@ -373,7 +373,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 
 ### 6.7 真机定谳步骤（替代报告 §五的控制台探针）
 
-1. 装本版（rev 203）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
+1. 装本版（rev 204）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
 2. `secretStorage` 行：期望 `WARN adapter=有 · isEncryptionAvailable=false（明文模式）`，
    `引擎 safeStorage: undefined（引擎缺口；补丁已兜底为明文透传）`——若 remote 对象整体缺失则
    该行显示 `window.electron.remote 不可用`，同属引擎缺口，补丁同样兜底；
@@ -392,7 +392,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 - `node scripts/update-obsidian.mjs --repatch` → 内嵌 `verify-asar`（含
   `verify-plugin-install` 行为用例）全绿；
 - `assembleHap` **BUILD SUCCESSFUL**；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability`
-  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="203"`、
+  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="204"`、
   四条 NF 标记、console bridge 错误默认档；
 - `verify-release` / `check-docs` 全绿；
 - 独立只读审查（2026-11-22，对照冻结态代码 + 出货 asar 逐字）：NF-015/017/018 无 P1/P2；
@@ -438,9 +438,13 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 同一 tab，真机上表现为设置页出现两个同名条目；调度已推迟到 layout-ready 之后 3.5s，且 layout-ready 回调内
 不再补注册。
 
-**设置页即排查入口（rev203）**：设置 →「诊断」组现在包含全部诊断项——「插件排查（清单 / 错误 / 日志）」「补丁与
-设置状态」「运行日志捕获（当前档位 + 切换）」「清空插件错误记录」「支持文件（路径 + 复制路径）」；"补丁与设置状态"的
-报告也追加了 console.log 尾部（优先错误/插件行），一份报告即可作为支持附件。命令面板入口保留。
+**设置页即排查入口（rev203/204）**：设置 →「诊断」组现在包含全部诊断项——「插件排查（清单 / 错误 / 日志）」「补丁与
+设置状态」「运行日志捕获（当前档位 + 切换）」「清空渲染层日志」「清空插件错误记录」「支持文件（路径 + 复制路径）」；
+"补丁与设置状态"的报告也追加了 console.log 尾部（优先错误/插件行），一份报告即可作为支持附件。命令面板入口保留。
+
+**日志尾部只显示本会话（rev204）**：console.log 是跨启动追加的，早期版本报错会一直留在文件里，截图时看起来
+像"现在还在报"。报告现在按行首时间戳与本会话启动时间过滤，只显示本会话的行，并注明"已折叠更早会话 N 行"；
+本会话没有错误行时明确写"(本会话还没有日志行)"。要彻底重来，用设置里的「清空渲染层日志」。
 
 **已修的两个插件相关问题（rev202/203 真机日志驱动）**：
 - BRAT 设置页重复：补注册与插件自身注册撞车 → 按插件 id 幂等 + 去重（§6.10 上文）；

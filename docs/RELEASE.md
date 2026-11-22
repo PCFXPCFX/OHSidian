@@ -189,4 +189,5 @@ Get-FileHash .\OHSidian-v2.0.1-*-icon-unsigned.hap -Algorithm MD5
 - **需要渲染层日志**：error 级默认就落盘（`<Documents|userData>/OHSidian/console.log`，
   512 KB 轮转）；要 log/info 全量，用命令面板「OHSidian 诊断: 运行日志捕获」或 设置 →「诊断」组
   的「运行日志捕获 → 切换」切到「全量」并重启（重启生效）。「补丁与设置状态」报告现在自带
-  console.log 尾部，一份报告即可作为支持附件。
+  console.log 尾部，一份报告即可作为支持附件（**只列本会话**，更早启动的记录已折叠；要清零用设置「诊断」组的
+  「清空渲染层日志」）。

@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→203）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→204）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 203、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 204、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5515,3 +5515,16 @@ BUILD SUCCESSFUL；HAP 内 asar 复核 rev 202；`verify-release` / `check-docs`
 `assembleHap` BUILD SUCCESSFUL；HAP 内 asar 复核 rev 203；`verify-release` / `check-docs` 全绿。
 **真机待验**：① 设置「诊断」组各按钮可用；② 状态报告含日志尾部；③ 沙箱行显示"本包未声明…"（默认构建）；
 ④ 打开 Nutstore 设置不再出现 duplicate setting key 告警。
+
+### 十五、rev 204：日志尾部只显示本会话 + 新增「清空渲染层日志」
+
+- 现象：诊断报告（以及"补丁与设置状态"）的日志段把**跨启动追加**的 console.log 尾部原样列出，早期坏包/P0
+  构建时代的报错（`R is not a function`、`{}`、`Failed to load settings`）每次都出现，看起来像"现在还在报"。
+- 修法：`ohsidianLogTailLines()` 按行首时间戳与 `window.__ohsidianBootAt` 过滤，只保留本会话的行（栈续行跟随
+  其头部），并标注"已折叠更早会话 N 行"；本会话没有错误行时显示"(本会话还没有日志行)"。
+- 新增「清空渲染层日志」：设置「诊断」组一行 + 命令 `OHSidian 诊断: 清空渲染层日志`，直接清空 console.log，
+  便于"清空 → 复现 → 报告只含新证据"的排障流程。
+- 门禁：verify-asar 增两条标记；verify-plugin-install 增行为用例（旧启动的行必须被丢弃、折叠计数与格式正确）。
+
+**验证**：--repatch/verify-asar/verify-release/check-docs 全绿；assembleHap BUILD SUCCESSFUL；HAP 内 asar
+复核 rev204。**真机待验**：状态报告日志段只含本会话行；「清空渲染层日志」后报告显示空/本会话新行。

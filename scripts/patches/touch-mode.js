@@ -21,6 +21,9 @@ var consoleCaptureMode=(function(){
   }catch(e){return "error"}
 })();
 window.__ohsidianConsoleCaptureMode=consoleCaptureMode;
+/* rev204: every log line is timestamped; keeping the boot instant lets the
+   diagnostics show THIS session only instead of replaying older boots. */
+window.__ohsidianBootAt=Date.now();
 /* Renderer-side IPC handle. `@electron/remote` exports module getters only
    (app / BrowserWindow / dialog / ...) - it does NOT re-export ipcRenderer, so
    `require("@electron/remote").ipcRenderer` is undefined. The round-96b
@@ -4100,6 +4103,20 @@ function ohsidianSettingsRows(root){
       captureCtl.appendChild(capLabel);
       captureCtl.appendChild(capBtn);
     }
+    var clearLogCtl=itemEl(diag,"清空渲染层日志",
+      "把 console.log 清空（512KB 轮转之外的手动复位）。清空后重新复现问题，报告里就只剩新证据。");
+    if(clearLogCtl){
+      var clearLogBtn=document.createElement("button");
+      clearLogBtn.textContent="清空";
+      clearLogBtn.addEventListener("click",function(){
+        try{
+          ohsidianClearConsoleLog();
+          clearLogBtn.textContent="已清空";
+          setTimeout(function(){clearLogBtn.textContent="清空"},1500);
+        }catch(eCl2){}
+      });
+      clearLogCtl.appendChild(clearLogBtn);
+    }
     var clearErrCtl=itemEl(diag,"清空插件错误记录",
       "删除 plugin-errors.json 与本次会话的插件错误记录；console.log 本身按 512KB 轮转自动清理。");
     if(clearErrCtl){
@@ -4780,6 +4797,15 @@ function ohsidianRecordConsoleError(args){
     ohsidianPersistPluginErrors();
   }catch(eRec){}
 }
+function ohsidianClearConsoleLog(){
+  try{
+    var p=ohsidianConsoleLogPath();
+    if(p&&require("fs").existsSync(p))require("fs").writeFileSync(p,"","utf8");
+    try{new Notice("OHSidian: 渲染层日志已清空")}catch(eN){}
+  }catch(e){
+    try{new Notice("OHSidian: 清空渲染层日志失败 "+String((e&&e.message)||e))}catch(eN2){}
+  }
+}
 function ohsidianClearPluginErrors(){
   __ohsidianPluginErrors=[];
   try{
@@ -4814,12 +4840,42 @@ function ohsidianLogTailLines(max){
       return out;
     }
     var linesL=fsL.readFileSync(logPath,"utf8").split(/\r?\n/);
-    var errLines=linesL.filter(function(l){
+    /* rev204: keep only THIS session. The file is append-only across boots, so
+       a report used to replay old failures (fixed-build bugs, broken-bundle era)
+       and looked like live defects on device. Stack continuation lines (no
+       leading timestamp) follow the header they belong to. */
+    var bootAt=0;
+    try{bootAt=window.__ohsidianBootAt||0}catch(eB){}
+    var sessionLines=[];
+    var keepStack=false;
+    for(var si=0;si<linesL.length;si++){
+      var ln=linesL[si];
+      if(/^\[\d{4}-\d\d-\d\dT/.test(ln)){
+        keepStack=false;
+        if(bootAt){
+          var tm=Date.parse(ln.slice(1,ln.indexOf("]")));
+          keepStack=!isNaN(tm)&&tm>=bootAt-3000;
+        }else{
+          keepStack=true;
+        }
+        if(keepStack)sessionLines.push(ln);
+      }else if(keepStack&&ln.trim()!==""){
+        sessionLines.push(ln);
+      }
+    }
+    var errLines=sessionLines.filter(function(l){
       return /\[OHSidian:web\]\[error\]|Plugin failure|plugin:/.test(l);
     });
-    var tailL=(errLines.length?errLines:linesL).slice(-(max+1)).filter(function(l){return l.trim()!==""});
-    out.push("  源文件共 "+linesL.length+" 行"+(errLines.length?("，其中错误/插件相关 "+errLines.length+" 行"):"")+"; 下面最多 "+max+" 行");
-    if(!tailL.length)out.push("  (文件为空)");
+    var tailL=(errLines.length?errLines:sessionLines).slice(-(max+1)).filter(function(l){return l.trim()!==""});
+    var histCount=linesL.length-sessionLines.length;
+    out.push("  本会话日志 "+sessionLines.length+" 行"+(histCount>0?("（已折叠更早会话 "+histCount+" 行）"):"")+
+      (errLines.length?("，其中错误/插件相关 "+errLines.length+" 行"):"")+"; 下面最多 "+max+" 行");
+    if(!sessionLines.length){
+      out.push("  (本会话还没有日志行：刚启动或未触发错误)")
+      out.push("  日志文件: "+logPath);
+      return out;
+    }
+    if(!tailL.length)out.push("  (本会话没有错误/插件相关行，显示普通日志尾部)");
     for(var li=0;li<tailL.length;li++)out.push("  "+tailL[li]);
   }catch(e){out.push("  读取失败: "+String((e&&e.message)||e))}
   return out;
@@ -5165,7 +5221,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="203";
+var OHSIDIAN_PATCH_REV="204";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -5321,6 +5377,8 @@ var install=function(app){
       callback:function(){try{ohsidianRunPluginIntegrityProbe()}catch(e){}}});
     app.commands.addCommand({id:"ohsidian-diag-plugins-clear",name:"OHSidian 诊断: 清空插件错误记录",
       callback:function(){try{ohsidianClearPluginErrors()}catch(e){}}});
+    app.commands.addCommand({id:"ohsidian-diag-log-clear",name:"OHSidian 诊断: 清空渲染层日志",
+      callback:function(){try{ohsidianClearConsoleLog()}catch(e){}}});
     try{ohsidianScheduleSettingsTab()}catch(eTab){}
     /* The ink layer needs the loopback socket even when no native video was
        opened; retry until the ArkTS page has published its port file. */
