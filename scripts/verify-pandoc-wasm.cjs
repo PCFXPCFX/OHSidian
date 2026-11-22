@@ -25,7 +25,7 @@ function check(name, ok, detail) {
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 
 async function main() {
-  const required = ['pandoc.wasm.gz', 'pandoc-service.cjs', 'pandoc-version.txt', 'PANDOC-SOURCE.txt'];
+  const required = ['pandoc.wasm.gz', 'pandoc-service.cjs', 'pandoc-host.cjs', 'pandoc-version.txt', 'PANDOC-SOURCE.txt'];
   const missing = required.filter((f) => !fs.existsSync(path.join(RES, f)));
   if (missing.length) {
     if (permitMissing) {
@@ -49,6 +49,12 @@ async function main() {
     check('wasm.gz matches lock sha256', sha256(wasmGz) === lock['outputs-wasm-gz'].sha256);
   }
 
+  const hostSrc = fs.readFileSync(path.join(RES, 'pandoc-host.cjs'));
+  if (lock && lock['outputs-host'] && lock['outputs-host'].sha256) {
+    check('host.cjs matches lock sha256', sha256(hostSrc) === lock['outputs-host'].sha256);
+  }
+  check('host.cjs drives pandoc over parentPort', hostSrc.includes('pandoc-service.cjs') &&
+    hostSrc.includes('pandoc.wasm.gz'));
   const svcSrc = fs.readFileSync(path.join(RES, 'pandoc-service.cjs'));
   if (lock && lock['outputs-service'] && lock['outputs-service'].sha256) {
     check('service.cjs matches lock sha256', sha256(svcSrc) === lock['outputs-service'].sha256);

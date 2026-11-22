@@ -249,7 +249,7 @@ try {
     // rev205: built-in pandoc (WebAssembly) - renderer loader + child_process
     // shim + settings/status/command surface.
     'app built-in pandoc wasm patched in':
-      app.includes('window.__ohsidianPandocPatchRev = 207') &&
+      app.includes('window.__ohsidianPandocPatchRev = 208') &&
       app.includes('pandoc-service.cjs') &&
       app.includes('__ohsidianPandocWrapped') &&
       app.includes('Pandoc（内置 WASM）'),
@@ -271,6 +271,11 @@ try {
       app.includes('createMainService') &&
       app.includes('wasmRenderer') &&
       app.includes('ohsidianPandocShowFailure'),
+    // rev208: V8 is jitless on this engine, so pandoc runs in a utility
+    // process started with --no-jitless; diagnostics expose host capability.
+    'app pandoc host diagnostics':
+      app.includes('ohsidian-diag-pandoc-host') &&
+      app.includes('工具进程: wasm='),
     'app font scale follower': app.includes('applyFontScale'),
     'app style-font follower (OhosThemeFont)': app.includes('"OhosThemeFont","HarmonyOS Sans"'),
     'app documents-dir migration': app.includes('pickMigration') && app.includes('当前仓库在应用沙箱内'),
@@ -287,6 +292,10 @@ try {
     // rev207: pandoc service host in the main process (renderer has no WebAssembly).
     'main pandoc service host': main.includes('__ohsidianPandocService') &&
       main.includes('ohs-pandoc-call') && main.includes('ohs-pandoc-host'),
+    // rev208: dedicated utility process with --no-jitless + child_process fallback.
+    'main pandoc utility host': main.includes('--no-jitless') &&
+      main.includes('pandoc-host.cjs') && main.includes('utilityProcess') &&
+      main.includes('__ohPandocUtil'),
     'main updater disabled': main.includes('(at||(D.updateDisabled=!0))'),
     // The two most load-bearing textual patches: if upstream re-minifies and
     // these go silently unmatched, the app crashes at startup (version gate)

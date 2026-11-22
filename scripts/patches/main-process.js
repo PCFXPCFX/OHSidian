@@ -498,61 +498,171 @@ if(__ohApp&&__ohIpc&&typeof __ohIpc.on==="function"){
 }
 }catch(e){}})();/*OHSIDIAN-MAIN-PATCH-END*/
 ;(function(){try{
-/* rev207: pandoc-on-WebAssembly service host. The HarmonyOS engine's renderer
-   reports "WebAssembly is not defined" (the V8 build/context has no WASM), so
-   the renderer patch falls back to running pandoc here in the main process when
-   the renderer cannot. The renderer sends {servicePath, wasmGzPath, version}
-   + argv/stdin/cwd; conversions are serialized so two exports cannot fight over
-   the ~56 MB instance. If the main V8 also lacks WebAssembly the error is
-   returned verbatim and the settings self-test shows it (host diagnostics). */
+/* rev208: pandoc-on-WebAssembly service host.
+   The engine starts V8 with --jitless, so WebAssembly is undefined in both the
+   renderer and this main process (engine binary is built with
+   v8_enable_webassembly=1, so the feature exists and --no-jitless re-enables
+   it). Re-enabling JIT for the UI processes is risky on this platform, so the
+   WASM engine runs in a dedicated utility process started with --no-jitless;
+   a crash there cannot take down the app. If utilityProcess.fork is not
+   available we fall back to child_process.fork(ELECTRON_RUN_AS_NODE) with the
+   same flag, and finally to in-main execution when the main V8 has WASM. */
 var electronMain=require("electron");
 var ipcMainMain=electronMain&&electronMain.ipcMain;
 if(ipcMainMain&&!ipcMainMain.__ohsidianPandocService){
   ipcMainMain.__ohsidianPandocService=true;
-  var __ohPandocCache={key:"",api:null,service:null};
-  var __ohPandocChain=Promise.resolve();
-  function __ohPandocHostInfo(){
-    return {
-      wasm:(typeof WebAssembly),
-      wasmInstantiate:(typeof WebAssembly!=="undefined"&&typeof WebAssembly.instantiate),
-      node:String((process.versions&&process.versions.node)||""),
-      electron:String((process.versions&&process.versions.electron)||"")
-    };
+  var __ohPandocMainCache={key:"",api:null,service:null};
+  var __ohPandocMainChain=Promise.resolve();
+  var __ohPandocUtil={transport:null,child:null,ready:false,wasm:null,error:"",failed:false,bootWaiters:[],pending:{},seq:0};
+
+  function __ohPandocMainWasm(){
+    return typeof WebAssembly!=="undefined"&&WebAssembly&&typeof WebAssembly.instantiate==="function";
   }
-  function __ohPandocGet(req){
-    if(__ohPandocCache.key!==req.servicePath){
-      __ohPandocCache={key:req.servicePath,api:null,service:null};
+  function __ohPandocMainService(req){
+    if(__ohPandocMainCache.key!==req.servicePath){
+      __ohPandocMainCache={key:req.servicePath,api:null,service:null};
     }
-    if(!__ohPandocCache.api){
-      __ohPandocCache.api=require(req.servicePath);
+    if(!__ohPandocMainCache.api)__ohPandocMainCache.api=require(req.servicePath);
+    if(!__ohPandocMainCache.service){
+      var api=__ohPandocMainCache.api;
+      if(!api||typeof api.createService!=="function"||typeof api.createPandocInstance!=="function")throw new Error("pandoc-service.cjs 导出不完整（主进程）");
+      __ohPandocMainCache.service=api.createService(api.createPandocInstance,{wasmGzPath:req.wasmGzPath,version:req.version});
     }
-    if(!__ohPandocCache.service){
-      if(!__ohPandocCache.api||typeof __ohPandocCache.api.createService!=="function"||typeof __ohPandocCache.api.createPandocInstance!=="function"){
-        throw new Error("pandoc-service.cjs 导出不完整（主进程）");
-      }
-      __ohPandocCache.service=__ohPandocCache.api.createService(__ohPandocCache.api.createPandocInstance,{
-        wasmGzPath:req.wasmGzPath,version:req.version
-      });
-    }
-    return __ohPandocCache.service;
+    return __ohPandocMainCache.service;
   }
-  function __ohPandocRun(req){
-    return __ohPandocChain=__ohPandocChain.then(function(){
+  function __ohPandocMainRun(req){
+    return __ohPandocMainChain=__ohPandocMainChain.then(function(){
       try{
-        var svc=__ohPandocGet(req);
+        var svc=__ohPandocMainService(req);
         if(req.kind==="selfTest")return svc.selfTest();
         if(req.kind==="query")return svc.query(req.query);
         if(req.kind==="info")return svc.info();
         return svc.runCli({argv:req.argv,stdin:req.stdin,cwd:req.cwd});
-      }catch(e){
-        return {__ohsidianError:String((e&&e.message)||e)};
+      }catch(e){return {__ohsidianError:String((e&&e.message)||e)};}
+    }).then(function(out){return out;},function(e){return {__ohsidianError:String((e&&e.message)||e)};});
+  }
+
+  function __ohPandocUtilAttach(child,transport){
+    __ohPandocUtil.child=child;__ohPandocUtil.transport=transport;__ohPandocUtil.ready=false;__ohPandocUtil.wasm=null;__ohPandocUtil.error="";
+    function onMsg(msg){
+      if(!msg||typeof msg!=="object")return;
+      if(msg.boot){
+        __ohPandocUtil.ready=true;__ohPandocUtil.wasm=msg.wasm;
+        var ws=__ohPandocUtil.bootWaiters;__ohPandocUtil.bootWaiters=[];
+        for(var i=0;i<ws.length;i++){
+          if(msg.wasm==="undefined"){
+            __ohPandocUtil.failed=true;
+            __ohPandocUtil.error="pandoc 工具进程里 WebAssembly 仍不可用（--no-jitless 未生效或平台禁 JIT）";
+            try{child.kill()}catch(eK){}
+            ws[i].reject(new Error(__ohPandocUtil.error));
+          }else ws[i].resolve();
+        }
+        return;
       }
-    }).then(function(out){
-      return out;
-    },function(e){return {__ohsidianError:String((e&&e.message)||e)};});
+      var pend=__ohPandocUtil.pending[msg.id];if(!pend)return;delete __ohPandocUtil.pending[msg.id];
+      if(msg.ok)pend.resolve(msg.result);else pend.reject(new Error(msg.error||"pandoc utility error"));
+    }
+    if(transport==="utility"){
+      child.on("message",onMsg);
+    }else{
+      child.on("message",onMsg);
+    }
+    child.on("exit",function(code){
+      __ohPandocUtil.error="pandoc 工具进程退出 (code="+code+")";
+      __ohPandocUtil.child=null;__ohPandocUtil.ready=false;
+      var ps=__ohPandocUtil.pending;__ohPandocUtil.pending={};
+      for(var k in ps){try{ps[k].reject(new Error(__ohPandocUtil.error))}catch(e){}}
+    });
+  }
+  function __ohPandocUtilStart(req){
+    if(__ohPandocUtil.failed)return Promise.reject(new Error(__ohPandocUtil.error||"pandoc 工具进程不可用"));
+    if(__ohPandocUtil.child){
+      if(__ohPandocUtil.ready)return Promise.resolve();
+      return new Promise(function(resolve,reject){__ohPandocUtil.bootWaiters.push({resolve:resolve,reject:reject});});
+    }
+    var pathMod=require("path"),fsMod=require("fs");
+    var hostPath=pathMod.join(pathMod.dirname(req.servicePath),"pandoc-host.cjs");
+    if(!fsMod.existsSync(hostPath))return Promise.reject(new Error("pandoc-host.cjs 不存在: "+hostPath));
+    var forkErr="";
+    try{
+      var up=electronMain.utilityProcess;
+      if(up&&typeof up.fork==="function"){
+        var child=up.fork(hostPath,[],{execArgv:["--no-jitless"],serviceName:"ohsidian-pandoc"});
+        __ohPandocUtilAttach(child,"utility");
+      }else{
+        forkErr="utilityProcess 不可用";
+      }
+    }catch(eUp){forkErr=String((eUp&&eUp.message)||eUp);}
+    if(!__ohPandocUtil.child&&forkErr){
+      try{
+        var cp=require("child_process");
+        var env=Object.assign({},process.env,{ELECTRON_RUN_AS_NODE:"1"});
+        var child2=cp.fork(hostPath,[],{env:env,execArgv:["--no-jitless"],stdio:["ignore","inherit","inherit","ipc"]});
+        __ohPandocUtilAttach(child2,"child_process");
+      }catch(eCp){
+        __ohPandocUtil.error="工具进程启动失败: "+forkErr+" / "+String((eCp&&eCp.message)||eCp);
+        return Promise.reject(new Error(__ohPandocUtil.error));
+      }
+    }
+    return new Promise(function(resolve,reject){
+      var timer=setTimeout(function(){reject(new Error("pandoc 工具进程启动超时"));},10000);
+      __ohPandocUtil.bootWaiters.push({
+        resolve:function(){clearTimeout(timer);resolve();},
+        reject:function(e){clearTimeout(timer);reject(e);}
+      });
+    });
+  }
+  function __ohPandocUtilSend(req){
+    var id=++__ohPandocUtil.seq;
+    var payload={id:id,kind:req.kind,argv:req.argv,stdin:req.stdin,cwd:req.cwd,query:req.query,version:req.version};
+    return new Promise(function(resolve,reject){
+      __ohPandocUtil.pending[id]={resolve:resolve,reject:reject};
+      try{
+        if(__ohPandocUtil.transport==="utility")__ohPandocUtil.child.postMessage(payload);
+        else __ohPandocUtil.child.send(payload);
+      }catch(ePost){
+        delete __ohPandocUtil.pending[id];
+        reject(new Error("pandoc 工具进程通信失败: "+String((ePost&&ePost.message)||ePost)));
+      }
+    });
+  }
+  function __ohPandocUtilCall(req){
+    return __ohPandocUtilStart(req).then(function(){return __ohPandocUtilSend(req);});
+  }
+  function __ohPandocRun(req){
+    if(__ohPandocMainWasm())return __ohPandocMainRun(req);
+    return __ohPandocUtilCall(req).catch(function(e){
+      return {__ohsidianError:"pandoc 工具进程不可用: "+String((e&&e.message)||e)+"（主进程 WebAssembly="+(typeof WebAssembly)+"）"};
+    });
+  }
+  function __ohPandocHostInfo(){
+    var info={
+      wasm:(typeof WebAssembly),
+      wasmInstantiate:(typeof WebAssembly!=="undefined"&&typeof WebAssembly.instantiate),
+      node:String((process.versions&&process.versions.node)||""),
+      electron:String((process.versions&&process.versions.electron)||""),
+      execArgv:(process.execArgv||[]).join(" "),
+      jsFlags:(function(){try{return electronMain.app.commandLine.getSwitchValue("js-flags")||"";}catch(e){return "";}})(),
+      utility:{
+        available:!!(electronMain.utilityProcess&&typeof electronMain.utilityProcess.fork==="function"),
+        transport:__ohPandocUtil.transport||"",
+        wasm:__ohPandocUtil.wasm,
+        ready:__ohPandocUtil.ready,
+        error:__ohPandocUtil.error,
+        execArgv:["--no-jitless"]
+      }
+    };
+    return info;
   }
   try{
-    ipcMainMain.handle("ohs-pandoc-host",function(){return __ohPandocHostInfo();});
+    ipcMainMain.handle("ohs-pandoc-host",function(event,req){
+      try{
+        if(req&&typeof req.servicePath==="string"&&req.servicePath.indexOf("pandoc-service.cjs")>=0){
+          return __ohPandocUtilStart(req).catch(function(){}).then(function(){return __ohPandocHostInfo();});
+        }
+      }catch(eInfo){}
+      return __ohPandocHostInfo();
+    });
     ipcMainMain.handle("ohs-pandoc-call",function(event,req){
       try{
         if(!req||typeof req.servicePath!=="string"||req.servicePath.indexOf("pandoc-service.cjs")<0){

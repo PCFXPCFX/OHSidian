@@ -24,8 +24,8 @@
  * ========================================================================== */
 ;(function () {
   try {
-    if (window.__ohsidianPandocPatchRev === 207) return;
-    window.__ohsidianPandocPatchRev = 207;
+    if (window.__ohsidianPandocPatchRev === 208) return;
+    window.__ohsidianPandocPatchRev = 208;
     if (window.__ohsidianPandoc) return;
 
     var fs = require("fs");
@@ -534,7 +534,7 @@
     }
 
     window.__ohsidianPandoc = {
-      patchRev: 207,
+      patchRev: 208,
       dir: function () { return pandocDir(); },
       version: function () { return pandocVersion(); },
       status: function () {
@@ -567,8 +567,14 @@
       hostInfo: function () {
         var out = { renderer: { wasm: wasmAvailable() }, main: mainHostInfo };
         var ipc = ipcHandle();
-        if (!ipc || typeof ipc.invoke !== "function") return Promise.resolve(out);
-        return ipc.invoke("ohs-pandoc-host").then(function (info) {
+        var dir = pandocDir();
+        if (!ipc || typeof ipc.invoke !== "function" || !dir) return Promise.resolve(out);
+        var payload = {
+          servicePath: path.join(dir, SERVICE_FILE),
+          wasmGzPath: path.join(dir, WASM_FILE),
+          version: pandocVersion()
+        };
+        return ipc.invoke("ohs-pandoc-host", payload).then(function (info) {
           mainHostInfo = info || null;
           out.main = mainHostInfo;
           return out;

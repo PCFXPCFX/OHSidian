@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→207）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→208）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 207、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 208、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5596,3 +5596,23 @@ verify-pandoc-wasm/verify-release 全绿；assembleHap BUILD SUCCESSFUL；HAP �
 main.js 含主进程服务 host。
 **真机待验**：① 自检报告应显示「执行位置: 主进程」且 version/html/docx 通过；② 若宿主 WebAssembly 行显示
 主进程也是 undefined，把报告发我，下一步做预编译 JS 方案；③ 通过后运行 Enhancing Export 导出 docx/pptx/epub。
+
+### 十九、rev 208：引擎 V8 为 jitless → pandoc 改在独立工具进程（--no-jitless）执行
+
+rev207 真机结果：执行位置已显示「主进程」，但仍 `WebAssembly is not defined` → 主进程 V8 也没有 WASM。
+检查引擎 `libelectron.so`：存在 `"v8_enable_webassembly": 1`（功能已编译）与 `--jitless` 标志；Node 实测
+`--jitless --no-jitless` 可恢复 WebAssembly → 引擎以 jitless 启动 V8。
+
+修法：
+- 新增随包 `pandoc-host.cjs` 工具进程入口（支持 utilityProcess parentPort / child_process IPC 两种传输）；
+- 主进程优先 `utilityProcess.fork(..., {execArgv:["--no-jitless"]})`，失败退回 `child_process.fork` +
+  `ELECTRON_RUN_AS_NODE=1`；主进程自身有 WASM 时直接主进程执行；工具进程崩溃只影响导出；
+- 新增「OHSidian 诊断: Pandoc 宿主诊断」命令（renderer/main/utility 的 wasm 类型、js-flags、transport、错误）；
+  自检失败弹窗也显示工具进程状态；
+- 若工具进程仍 `wasm=undefined`，即平台禁 JIT，需转向纯 JS 转换方案（另立项）。
+
+**验证**：--repatch/verify-asar（新增「pandoc 宿主诊断」「main pandoc utility host」标记）/
+verify-pandoc-wasm（新增 host.cjs lock/内容检查）/verify-release 全绿；assembleHap BUILD SUCCESSFUL；
+HAP 内 resources/resfile/pandoc 含 `pandoc-host.cjs`，asar 复核 rev208。
+**真机待验**：① 自检通过且显示「工具进程 wasm=object」；② 若失败，运行「Pandoc 宿主诊断」把报告发回
+  （可据此判断是 utilityProcess 不可用、--no-jitless 未生效还是平台禁 JIT）。

@@ -149,7 +149,7 @@ async function main() {
   const lock = loadLock();
 
   if (optCheck) {
-    const files = ['pandoc.wasm.gz', 'pandoc-service.cjs', 'pandoc-version.txt'];
+    const files = ['pandoc.wasm.gz', 'pandoc-service.cjs', 'pandoc-host.cjs', 'pandoc-version.txt'];
     for (const f of files) {
       const p = path.join(RES, f);
       if (!fs.existsSync(p)) fail('missing built asset ' + p + ' (run npm run build:pandoc-wasm)');
@@ -158,6 +158,8 @@ async function main() {
     checkHash('outputs-wasm-gz', wasmGz, lock);
     const svc = fs.readFileSync(path.join(RES, 'pandoc-service.cjs'));
     checkHash('outputs-service', svc, lock);
+    const host = fs.readFileSync(path.join(RES, 'pandoc-host.cjs'));
+    checkHash('outputs-host', host, lock);
     log('check OK: wasm.gz ' + (wasmGz.length / 1048576).toFixed(1) + ' MB, service ' +
       (svc.length / 1024).toFixed(0) + ' KB');
     return;
@@ -204,16 +206,21 @@ async function main() {
   });
 
   fs.writeFileSync(path.join(RES, 'pandoc.wasm.gz'), wasmGz);
+  const hostSrc = path.join(ROOT, 'scripts/pandoc-wasm/pandoc-host.cjs');
+  const hostDst = path.join(RES, 'pandoc-host.cjs');
+  fs.copyFileSync(hostSrc, hostDst);
   fs.writeFileSync(path.join(RES, 'pandoc-version.txt'), pandocVersion + '\n', 'utf8');
   const licenseSrc = path.join(nm, 'pandoc-wasm', 'LICENSE');
   if (fs.existsSync(licenseSrc)) fs.copyFileSync(licenseSrc, path.join(RES, 'LICENSE-pandoc-wasm.txt'));
   fs.writeFileSync(path.join(RES, 'PANDOC-SOURCE.txt'), writeSourceNotice(), 'utf8');
 
   const service = fs.readFileSync(path.join(RES, 'pandoc-service.cjs'));
+  const host = fs.readFileSync(hostDst);
   log('pandoc ' + pandocVersion + ' (wasm)');
   log('pandoc.wasm: ' + (wasmRaw.length / 1048576).toFixed(1) + ' MB raw -> ' +
     (wasmGz.length / 1048576).toFixed(1) + ' MB gzip');
   log('pandoc-service.cjs: ' + (service.length / 1024).toFixed(0) + ' KB');
+  log('pandoc-host.cjs: ' + (host.length / 1024).toFixed(1) + ' KB (utility process host)');
   log('output: ' + path.relative(ROOT, RES));
 
   if (optUpdateLock || !lock) {
@@ -223,12 +230,14 @@ async function main() {
       wasiShim: { version: WASI_SHIM.version, sha256: sha256(shimTap) },
       'outputs-wasm-gz': { sha256: sha256(wasmGz), bytes: wasmGz.length },
       'outputs-service': { sha256: sha256(service), bytes: service.length },
+      'outputs-host': { sha256: sha256(host), bytes: host.length },
     };
     fs.writeFileSync(LOCK, JSON.stringify(next, null, 2) + '\n', 'utf8');
     log('lock written: ' + path.relative(ROOT, LOCK));
   } else {
     checkHash('outputs-wasm-gz', wasmGz, lock);
     checkHash('outputs-service', service, lock);
+    checkHash('outputs-host', host, lock);
     log('outputs match scripts/pandoc-wasm.lock.json');
   }
 }

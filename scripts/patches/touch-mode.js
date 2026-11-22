@@ -278,7 +278,11 @@ function ohsidianPandocShowFailure(err){
         try{
           var rWasm=((hi&&hi.renderer)||{}).wasm;
           var mWasm=((hi&&hi.main)||{}).wasm;
+          var util=((hi&&hi.main)||{}).utility||{};
           base.push("  宿主 WebAssembly: 渲染进程="+(rWasm||"undefined")+", 主进程="+(mWasm||"undefined"));
+          base.push("  工具进程: wasm="+(util.wasm||"未启动")+", transport="+(util.transport||"-")+
+            ", ready="+(util.ready?"是":"否")+(util.error?(" · "+util.error):""));
+          if(hi&&hi.main&&hi.main.jsFlags)base.push("  js-flags: "+hi.main.jsFlags);
         }catch(eA){}
         show();
       }).catch(show);
@@ -5339,7 +5343,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="207";
+var OHSIDIAN_PATCH_REV="208";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -5527,6 +5531,34 @@ var install=function(app){
           L.push("  若全部 [无]，把本报告发给维护者（ArkTS 发布路径需要按实际布局调整）。");
           ohsidianShowReportModal("OHSidian 诊断: Pandoc 路径探针",L);
         }catch(ePaths){}
+      }});
+    app.commands.addCommand({id:"ohsidian-diag-pandoc-host",name:"OHSidian 诊断: Pandoc 宿主诊断",
+      callback:function(){
+        try{
+          var p=window.__ohsidianPandoc;
+          var L=["OHSidian 诊断: Pandoc 宿主诊断",""];
+          L=L.concat(ohsidianPandocProbeLines());
+          if(p&&p.hostInfo){
+            p.hostInfo().then(function(hi){
+              try{
+                var main=hi.main||{};var util=main.utility||{};
+                L.push("");
+                L.push("  渲染进程 WebAssembly: "+(hi.renderer&&hi.renderer.wasm||"undefined"));
+                L.push("  主进程 WebAssembly: "+(main.wasm||"undefined"));
+                L.push("  主进程 execArgv: "+(main.execArgv||"(空)"));
+                L.push("  主进程 js-flags: "+(main.jsFlags||"(空)"));
+                L.push("  utilityProcess 可用: "+(util.available?"是":"否"));
+                L.push("  工具进程 wasm: "+(util.wasm||"未启动")+", ready="+(util.ready?"是":"否")+", transport="+(util.transport||"-"));
+                if(util.error)L.push("  工具进程错误: "+util.error);
+              }catch(eH){}
+              try{ohsidianShowReportModal("OHSidian 诊断: Pandoc 宿主诊断",L)}catch(eM){}
+            }).catch(function(eQ){
+              try{ohsidianShowReportModal("OHSidian 诊断: Pandoc 宿主诊断",L)}catch(eM2){}
+            });
+          }else{
+            try{ohsidianShowReportModal("OHSidian 诊断: Pandoc 宿主诊断",L)}catch(eM3){}
+          }
+        }catch(eHost){}
       }});
     try{ohsidianScheduleSettingsTab()}catch(eTab){}
     /* The ink layer needs the loopback socket even when no native video was
