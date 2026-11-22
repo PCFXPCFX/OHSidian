@@ -218,7 +218,7 @@ profile 再重签即可。离线改 profile 再自签**不可行**：profile 由
 
 > 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象
 > `main @ e528275`）。报告结论一句话：**两个插件不是同一种死法，也都不是 2.0 的代码改动
-> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **210**）；
+> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **211**）；
 > 报告里"2.0 无关"的增量考古（补丁层/引擎层 diff 与 eval/require/loadPlugin 零交集）不再
 > 赘述，见原报告第三部分。
 
@@ -383,7 +383,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 
 ### 6.7 真机定谳步骤（替代报告 §五的控制台探针）
 
-1. 装本版（rev 210）HAP；设置 →「诊断」→「插件诊断」→ 运行；
+1. 装本版（rev 211）HAP；设置 →「诊断」→「插件诊断」→ 运行；
 2. `secretStorage` 行：期望 `WARN adapter=有 · isEncryptionAvailable=false（明文模式）`，
    `引擎 safeStorage: undefined（引擎缺口；补丁已兜底为明文透传）`——若 remote 对象整体缺失则
    该行显示 `window.electron.remote 不可用`，同属引擎缺口，补丁同样兜底；
@@ -402,7 +402,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 - `node scripts/update-obsidian.mjs --repatch` → 内嵌 `verify-asar`（含
   `verify-plugin-install` 行为用例）全绿；
 - `assembleHap` **BUILD SUCCESSFUL**；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability`
-  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="210"`、
+  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="211"`、
   四条 NF 标记、console bridge 错误默认档；
 - `verify-release` / `check-docs` 全绿；
 - 独立只读审查（2026-11-22，对照冻结态代码 + 出货 asar 逐字）：NF-015/017/018 无 P1/P2；
@@ -448,12 +448,13 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 同一 tab，真机上表现为设置页出现两个同名条目；调度已推迟到 layout-ready 之后 3.5s，且 layout-ready 回调内
 不再补注册。
 
-**设置页即排查入口（rev210 最终形态）**：设置 →「诊断」组只有三张卡片，版式与报告格式完全统一：
-1. **通用诊断**：补丁/内核/窗口/布局/沙箱/日志路径与行数/插件数量；按钮「运行」「清空日志」；
-2. **Pandoc**：外部路径环境检查（卡片内提供 Pandoc 路径输入框）+ 内置 pandoc 3.10 (WASM) 状态/宿主/自检；按钮「运行」；
-3. **插件诊断**：插件清单（版本/大小/解析/启用/加载/设置页）、错误记录、BRAT 指纹、日志路径；按钮「运行」「清空错误记录」。
-报告一律为「补丁/内核」头 + ▍小节 + "键: 值" 行，不含分析/建议语句；设置页是唯一入口（命令面板诊断命令已移除）。
-日志档位切换属于普通设置，移到「常规」组的「运行日志捕获」。
+**设置页即排查入口（rev211 最终形态）**：全部使用原生设置行（与页面其它设置同一 markup/间距），自下而上分三个独立分区：
+1. **Pandoc**（信息区，方便他人理解内置引擎）：版本 / 状态 / 位置 / 宿主 四行只读信息；「外部路径」输入行（默认值即内置
+   引擎位置，仅用于环境检查）；「自检」行单独一个运行按钮；
+2. **诊断**（页面底部）：通用诊断 / Pandoc 诊断 / 插件诊断 / 清空插件错误记录，**每个功能单独一行、单独一个按钮**，
+   不复用行；同一时刻只允许一个诊断运行（报告未关闭前其它诊断按钮提示"已有诊断在运行"）；
+3. **日志**（最底部，独立分区）：日志档位（切换）、清空渲染层日志、日志文件路径、插件错误记录路径。
+报告统一为「补丁/内核」头 + ▍小节 + "键: 值" 行，不含分析/建议语句；设置页是唯一入口（命令面板诊断命令已移除）。
 
 **日志尾部只显示本会话（rev204）**：console.log 是跨启动追加的，早期版本报错会一直留在文件里，截图时看起来
 像"现在还在报"。报告现在按行首时间戳与本会话启动时间过滤，只显示本会话的行，并注明"已折叠更早会话 N 行"；
@@ -484,7 +485,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 | `scripts/pandoc-wasm/service-core.mjs` | CLI 适配层：`shellSplit`/`parseArgs`、输入与资源读取、`--reference-doc`/`--template`/`--bibliography`/`--csl`/Lua filter/image 收集、`--version` 快速应答、PDF/可执行 filter 的明确拒绝；`createService(createPandocInstance,{wasmGzPath})` 懒加载 wasm。 |
 | `scripts/patches/pandoc-wasm.js` | 渲染层补丁：`Module._load` hook，把插件的 `require("child_process")` 换成 shim（`exec`/`execFile`/`spawn` 接管 pandoc；`execSync`/`spawnSync` 明确报错）、`lookpath`/`which` 返回占位路径；定位 `pandocDir`（ArkTS 发布）并暴露 `window.__ohsidianPandoc`。 |
 | `WebAbility.publishPandocDir()` | 把 `resourceDir + '/resources/resfile/pandoc'` 写入模式文件，渲染层据此读资源。 |
-| 设置/诊断 | 设置「诊断」→「Pandoc」卡片：路径输入（环境检查用）+ 一键报告（环境 + 内置 WASM 状态/宿主/自检）。 |
+| 设置/诊断 | 设置「Pandoc」分区：版本/状态/位置/宿主 只读信息 + 外部路径输入（默认内置路径）+ 自检按钮；诊断分区另有「Pandoc 诊断」行。 |
 
 **实测（本机 Node，pandoc-wasm@1.1.0）**：gunzip+实例化 ≈0.3 s；md→docx 80–300 ms（首次 ≈1 s）；
 md→html/pptx/odt/epub 毫秒级；285 KB md→html ≈2.8 s；`--version` 不加载 wasm（1 ms）。
@@ -508,7 +509,7 @@ HAP 增大 ≈16 MB（原始 120.5 MB → 137.7 MB）。
    （ArkTS 晚发布也能自愈），并额外尝试 `execPath` / `resourcesPath` / `appPath` / 固定绝对路径。
 2. **自检点下去没有弹窗**：资源缺失时 `getService()` 同步抛错，被点击处理器的 try/catch 吞掉。现在
    `selfTest()`/`run()` 一律返回 Promise（错误走 `.catch`），失败时**总是**打开报告弹窗，内容包含错误 + 路径探针
-   （模式字段、引擎路径、每个候选目录是否存在），随「Pandoc」报告一起输出。
+   （模式字段、引擎路径、每个候选目录是否存在），随「Pandoc 诊断」一起输出；默认路径是内置引擎位置，报告中标注「类型: 内置(WASM)」。
 
 **rev207 修正（真机 rev206 暴露）**：设备渲染进程里 `WebAssembly is not defined`（该鸿蒙引擎的 V8 构建/上下文
 没有 WebAssembly），因此 wasm 引擎不能在渲染进程初始化。修法：

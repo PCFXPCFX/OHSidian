@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→210）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→211）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 210、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 211、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5649,3 +5649,20 @@ verify-release 全绿；assembleHap BUILD SUCCESSFUL；HAP 内 pandoc-host.cjs �
 verify-plugin-install/verify-release 全绿；assembleHap BUILD SUCCESSFUL；HAP 内 asar 复核 rev210。
 **真机待验**：设置→诊断只有三张卡片、样式一致；Pandoc 卡片能输入路径；三份报告只有「键: 值」行；
 命令面板无诊断命令。
+
+### 二十二、rev 211：设置诊断改为原生行 + Pandoc 信息分区 + 独立日志分区（一次只跑一个诊断）
+
+按反馈重排设置页底部：
+
+- **原生行**：不再用自定义卡片，全部使用与页面其它设置相同的 setting-item 行（标题 + 说明 + 右侧控件）；
+- **Pandoc 分区**（新增，位于诊断上方）：版本 / 状态 / 位置 / 宿主 四行只读信息，便于他人了解内置引擎；
+  「外部路径」输入默认值改为**内置引擎位置**（不再默认 harmonybrew 路径），仅用于环境检查；「自检」单独一行一个按钮；
+- **诊断分区**：通用诊断 / Pandoc 诊断 / 插件诊断 / 清空插件错误记录——每个功能单独一行、单独按钮，不复用；
+  `ohsidianDiagRunWithLock()` 保证同一时刻只跑一个诊断：报告关闭（关闭按钮/点遮罩）后才释放，期间其它按钮提示；
+- **日志分区**（最底部，独立）：日志档位、清空渲染层日志、日志文件路径、插件错误记录路径；
+- 报告格式保持纯事实格式（补丁/内核头 + ▍小节 + 键: 值）。
+
+**验证**：--repatch/verify-asar（新增「原生分区行 / 日志独立分区 / Pandoc 默认内置 / 单诊断锁」标记）/
+verify-plugin-install/verify-release 全绿；assembleHap BUILD SUCCESSFUL；HAP 内 asar 复核 rev211。
+**真机待验**：页面底部依次为 Pandoc / 诊断 / 日志 三个分区，样式与其它设置一致；诊断每次只能运行一个；
+Pandoc 外部路径默认显示内置位置；自检按钮单独一行。

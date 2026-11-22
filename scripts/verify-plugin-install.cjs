@@ -139,8 +139,8 @@ check('console bridge uses a real ipcRenderer handle',
   !app.includes('var __ohIpc=require("@electron/remote").ipcRenderer;'));
 check('vault-open migration uses the same IPC handle',
   app.includes('var vaultIpc=ohsidianIpcRenderer();'));
-check('log capture cycle exposed in general settings',
-  app.includes('ohsidianCycleConsoleCapture') && app.includes('运行日志捕获'));
+check('log capture cycle exposed in logs section',
+  app.includes('ohsidianCycleConsoleCapture') && app.includes('日志档位'));
 check('renderer safeStorage fallback block present',
   app.includes('window.__ohsidianSafeStorageFallback=') &&
   app.includes('getSelectedStorageBackend:function(){return "basic_text"}'));
@@ -316,7 +316,7 @@ if (helperSrc) {
     })
     .then(async () => {
       /* ---- on-device integrity diagnostic (shipped function) ----------- */
-      const diagStart = app.indexOf('function ohsidianRunPluginIntegrityProbe(){');
+      const diagStart = app.indexOf('function ohsidianRunPluginIntegrityProbe(');
       const diagEnd = diagStart >= 0 ? app.indexOf('/* One-glance answer', diagStart) : -1;
       check('integrity diagnostic present in app.js', diagStart >= 0 && diagEnd > diagStart);
       if (diagStart < 0 || diagEnd <= diagStart) return;

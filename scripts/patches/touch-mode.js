@@ -3456,12 +3456,27 @@ function restoreSystemFonts(){
    directory target always fails with EACCES). Keep the verdict table in sync
    with docs/PLATFORM-ADAPTATION.md A6. */
 /* Pandoc environment check - a FEATURE, not a throwaway probe.
-   Product shape: the path is a setting (OHSidian → 诊断), the check only runs
-   when asked, results are shown in place, and nothing here fires at startup -
-   a user who never opens diagnostics never notices this exists.
-   Default is the harmonybrew location seen on device; anything typed in the
-   settings row wins and is remembered in ohsidian-ui-prefs.json. */
-var OHSIDIAN_PANDOC_DEFAULT="/storage/Users/currentUser/.harmonybrew/bin/pandoc";
+   Product shape: the path is a setting (OHSidian → Pandoc), the check only runs
+   when asked, results are shown in place, and nothing here fires at startup.
+   rev211: the DEFAULT path is the built-in pandoc engine location (published
+   as pandocDir by ArkTS); a user-typed path wins and is remembered in
+   ohsidian-ui-prefs.json. */
+function ohsidianBuiltinPandocDir(){
+  try{
+    var p=window.__ohsidianPandoc;
+    if(p&&typeof p.dir==="function"){var d=p.dir();if(d)return d}
+  }catch(e0){}
+  try{var m=readMode();if(m&&m.pandocDir)return m.pandocDir}catch(e1){}
+  return "";
+}
+var OHSIDIAN_PANDOC_DEFAULT=(function(){
+  try{
+    var p=window.__ohsidianPandoc;
+    if(p&&typeof p.dir==="function"){var d=p.dir();if(d)return d}
+  }catch(e0){}
+  try{var m=readMode();if(m&&m.pandocDir)return m.pandocDir}catch(e1){}
+  return "/storage/Users/currentUser/.harmonybrew/bin/pandoc";
+})();
 function ohsidianPandocPath(){
   try{
     var p=ohsidianReadUiPrefs().pandocPath;
@@ -3473,7 +3488,8 @@ function ohsidianSetPandocPath(v){
   try{
     var prefs=ohsidianReadUiPrefs();
     var s=String(v||"").trim();
-    if(!s||s===OHSIDIAN_PANDOC_DEFAULT)delete prefs.pandocPath;
+    var builtin=ohsidianBuiltinPandocDir();
+    if(!s||s===OHSIDIAN_PANDOC_DEFAULT||(builtin&&s===builtin))delete prefs.pandocPath;
     else prefs.pandocPath=s;
     return ohsidianWriteUiPrefs(prefs);
   }catch(e){return false}
@@ -3680,7 +3696,7 @@ function ohsidianCopyText(text,cb){
   }catch(e){}
   legacyCopy();
 }
-function ohsidianShowReportModal(title,lines){
+function ohsidianShowReportModal(title,lines,onClose){
   try{
     var d=document,body=d.body;
     var back=d.createElement("div");
@@ -3709,18 +3725,44 @@ function ohsidianShowReportModal(title,lines){
     copy.addEventListener("click",function(){
       try{navigator.clipboard.writeText(title+"\n"+lines.join("\n"));copy.textContent="已复制"}catch(e){copy.textContent="复制失败"}
     });
+    var done=false;
+    var finish=function(){
+      if(done)return;done=true;
+      try{back.remove()}catch(e){}
+      try{if(typeof onClose==="function")onClose()}catch(e2){}
+    };
     var ok=d.createElement("button");
     ok.textContent="关闭";
     ok.style.cssText=btnCss+";background:var(--interactive-accent,#7b6cf6);color:var(--text-on-accent,#fff)";
-    ok.addEventListener("click",function(){try{back.remove()}catch(e){}});
+    ok.addEventListener("click",finish);
     row.appendChild(copy);row.appendChild(ok);
     panel.appendChild(h);panel.appendChild(pre);panel.appendChild(row);
     back.appendChild(panel);
-    back.addEventListener("click",function(ev){if(ev.target===back){try{back.remove()}catch(e){}}});
+    back.addEventListener("click",function(ev){if(ev.target===back)finish()});
     body.appendChild(back);
+    return back;
   }catch(e){
     try{new Notice(title+"\n"+lines.join("\n"),20000)}catch(e2){}
   }
+}
+/* rev211: only one diagnostic may run/show at a time. The lock is released
+   when its report modal closes (or immediately on a synchronous failure). */
+var __ohsidianDiagBusy=false;
+function ohsidianDiagRunWithLock(btn,run){
+  if(__ohsidianDiagBusy){
+    try{new Notice("OHSidian: 已有诊断在运行，请先关闭当前报告")}catch(eN){}
+    return;
+  }
+  __ohsidianDiagBusy=true;
+  var label=btn?btn.textContent:"";
+  if(btn){btn.disabled=true;btn.textContent="运行中…"}
+  var released=false;
+  var release=function(){
+    if(released)return;released=true;
+    __ohsidianDiagBusy=false;
+    if(btn){btn.disabled=false;btn.textContent=label||"运行"}
+  };
+  try{run(release)}catch(e){release();try{new Notice("OHSidian: 诊断失败 "+String((e&&e.message)||e))}catch(e2){}}
 }
 /* Where the two pandoc plugins actually keep their configured binary.
    obsidian-pandoc (OliverBalfour): settings.pandoc, data.json key "pandoc".
@@ -3816,9 +3858,16 @@ function ohsidianBuildPandocReport(){
   lines.push("候选: "+cands.length);
   for(var i=0;i<cands.length;i++){
     var c=cands[i],d=null;
-    try{d=ohsidianProbeExecutable(c.path,{timeout:2000,sandbox:sandbox})}catch(eP){d=null}
-    if(!d){lines.push("候选"+(i+1)+": "+c.path+" / probe-error");continue}
+    var builtinDir=ohsidianBuiltinPandocDir();
     lines.push("候选"+(i+1)+": "+c.path);
+    if(builtinDir&&c.path===builtinDir){
+      lines.push("  来源: "+c.source);
+      lines.push("  类型: 内置(WASM)");
+      report.candidates.push({source:c.source,builtin:true});
+      continue;
+    }
+    try{d=ohsidianProbeExecutable(c.path,{timeout:2000,sandbox:sandbox})}catch(eP){d=null}
+    if(!d){lines.push("  来源: "+c.source);lines.push("  类型: probe-error");continue}
     lines.push("  来源: "+c.source);
     lines.push("  类型: "+(d.verdict||"?"));
     if(d.size!==undefined)lines.push("  大小: "+d.size);
@@ -3864,7 +3913,7 @@ function ohsidianRunPandocProbe(){
 /* rev210: one Pandoc report for the settings card. Environment probe (uses
    the path saved by the input below) + built-in WASM status/host/path probe
    + async self-test (version/html/docx), all in one modal. */
-function ohsidianRunPandocDiag(){
+function ohsidianRunPandocDiag(onClose){
   var L=[];
   try{
     var env=ohsidianBuildPandocReport();
@@ -3878,7 +3927,7 @@ function ohsidianRunPandocDiag(){
   var p=window.__ohsidianPandoc;
   if(!p){
     L.push("  pandoc 补丁未加载（无法自检）");
-    try{ohsidianShowReportModal("OHSidian 诊断",ohsidianCompactLines(L))}catch(eM0){}
+    try{ohsidianShowReportModal("OHSidian 诊断",ohsidianCompactLines(L),onClose)}catch(eM0){}
     return;
   }
   try{L=L.concat(ohsidianPandocProbeLines());}catch(eProbe){}
@@ -3891,15 +3940,15 @@ function ohsidianRunPandocDiag(){
         lines.push("  "+(r.checks[i].ok?"OK  ":"FAIL")+" "+r.checks[i].name+(r.checks[i].detail?(" · "+r.checks[i].detail):""));
       }
       lines.push("  限制: 无 PDF / 不联网 / 仅 Lua filter；插件 execFile/spawn 调用自动接管。");
-      try{ohsidianShowReportModal("OHSidian 诊断",ohsidianCompactLines(lines))}catch(eM){}
+      try{ohsidianShowReportModal("OHSidian 诊断",ohsidianCompactLines(lines),onClose)}catch(eM){}
     }).catch(function(eST){
       var lines=L.slice();
       lines.push("");
       lines.push("  内置 pandoc 自检失败: "+String((eST&&eST.message)||eST));
-      try{ohsidianShowReportModal("OHSidian 诊断",ohsidianCompactLines(lines))}catch(eM2){}
+      try{ohsidianShowReportModal("OHSidian 诊断",ohsidianCompactLines(lines),onClose)}catch(eM2){}
     });
   }catch(eStart){
-    try{ohsidianShowReportModal("OHSidian 诊断",ohsidianCompactLines(L))}catch(eM3){}
+    try{ohsidianShowReportModal("OHSidian 诊断",ohsidianCompactLines(L),onClose)}catch(eM3){}
   }
 }
 /* ===== end pandoc diagnostics ===== */
@@ -4080,134 +4129,128 @@ function ohsidianSettingsRows(root){
         var ok=ohsidianWriteUiPrefs(prefs);
         try{new Notice("OHSidian: 嵌入网页字体跟随 → "+(on?"开":"关")+(ok?"（重开该网页生效）":"（写入失败）"),5000)}catch(e){}
       });
-    /* rev210: log capture is a normal setting (not diagnostics); the three
-       diagnostic cards only report facts. */
-    var logCtl=itemEl(basic,"运行日志捕获","档位: 仅错误（默认）/ 全量 / 关闭；重启生效。");
-    if(logCtl){
-      var logLabel=mk("span","",("档位: "+ohsidianConsoleCaptureLabel()));
-      logLabel.style.cssText="margin-right:8px;color:var(--text-muted);font-size:12px";
-      var logBtn=mk("button","","切换");
-      logBtn.addEventListener("click",function(){
-        try{logLabel.textContent="档位: "+ohsidianCycleConsoleCapture()}catch(eLog){}
-      });
-      logCtl.appendChild(logLabel);
-      logCtl.appendChild(logBtn);
-    }
+    /* rev211: logging has its own section at the bottom of this page. */
     /* 手写笔设置现在是独立的“手写笔”选项卡，见 ohsidianBuildStylusTab(). */
-    /* --- 诊断 --- */
-    /* rev210: three clean cards, one per topic. Each card = title + one-line
-       status summary + a single primary action (plus one secondary link when
-       there is a related cleanup action). The Pandoc path input lives inside
-       the Pandoc card (environment check only). The palette no longer carries
-       diagnostic commands: this is the single entry point. */
-    var diag=newGroup("诊断");
-
-    var diagCard=function(title,desc){
-      var card=mk("div","ohsidian-diag-card");
-      card.style.cssText="border:1px solid var(--background-modifier-border);border-radius:10px;"+
-        "padding:12px 14px;margin:10px 0;background:var(--background-secondary);";
-      var head=mk("div","ohsidian-diag-head");
-      head.style.cssText="display:flex;align-items:center;gap:10px;";
-      var name=mk("div","ohsidian-diag-title",title);
-      name.style.cssText="font-weight:600;font-size:var(--font-ui-medium);flex-shrink:0;";
-      var status=mk("div","ohsidian-diag-status","");
-      status.style.cssText="flex:1;min-width:0;text-align:right;font-size:var(--font-ui-smaller);"+
-        "color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
-      var ctl=mk("div","ohsidian-diag-actions");
-      ctl.style.cssText="display:flex;gap:8px;flex-shrink:0;align-items:center;";
-      head.appendChild(name);
-      head.appendChild(status);
-      head.appendChild(ctl);
-      card.appendChild(head);
-      diag.appendChild(card);
-      return {card:card,ctl:ctl,status:status};
-    };
-    var diagBtn=function(label,primary,onClick){
-      var b=document.createElement("button");
-      b.textContent=label;
-      if(primary)b.className="mod-cta";
-      b.addEventListener("click",onClick);
-      return b;
-    };
-    var diagLink=function(label,onClick){
-      var a=mk("span","ohsidian-diag-link",label);
-      a.style.cssText="cursor:pointer;color:var(--text-accent);font-size:var(--font-ui-smaller);"+
-        "text-decoration:none;user-select:none;";
-      a.addEventListener("click",onClick);
-      return a;
-    };
-
-    /* 1) 通用诊断 */
-    var generalCard=diagCard("通用诊断");
-    var generalStatus=function(){
-      return "补丁 "+OHSIDIAN_PATCH_REV+" · 日志: "+ohsidianConsoleCaptureLabel();
-    };
-    generalCard.status.textContent=generalStatus();
-    generalCard.ctl.appendChild(diagBtn("运行",true,function(){
-      try{ohsidianShowStatusReport()}catch(eG){}
-    }));
-    generalCard.ctl.appendChild(diagLink("清空日志",function(){
-      try{ohsidianClearConsoleLog();generalCard.status.textContent="日志已清空"}catch(eL){}
-    }));
-
-    /* 2) Pandoc */
-    var pandocCard=diagCard("Pandoc");
-    var pandocStatus=function(){
+    /* --- Pandoc（内置引擎信息） --- */
+    /* rev211: a dedicated Pandoc section explains the EMBEDDED engine for
+       other users: version / status / location / host. One control per row.
+       The external path input stays here (environment check only). */
+    var pandocGroup=newGroup("Pandoc");
+    var pvInfo=function(){
       try{
         var p=window.__ohsidianPandoc;
-        if(!p)return "内置：未加载";
+        if(!p)return {version:"-",status:"未加载",dir:"-",host:"-"};
         var s=p.status();
-        if(s.ready)return "内置 "+s.version+" · 就绪";
-        if(s.error)return "内置 "+s.version+" · 不可用";
-        return "内置 "+s.version+" · 按需加载";
-      }catch(ePSt){return "内置：未知"}
+        return {
+          version:s.version||"-",
+          status:(s.ready?"已就绪":(s.error?"不可用":"按需加载")),
+          dir:s.dir||p.dir()||"-",
+          host:(s.host==="main"?"主进程 / 工具进程":(s.host==="renderer"?"渲染进程":"-"))
+        };
+      }catch(eV){return {version:"-",status:"未知",dir:"-",host:"-"}}
     };
-    pandocCard.status.textContent=pandocStatus();
-    pandocCard.ctl.appendChild(diagBtn("运行",true,function(){
-      try{ohsidianRunPandocDiag()}catch(ePD){}
-    }));
-    (function(){
-      var row=mk("div","ohsidian-diag-path");
-      row.style.cssText="display:flex;align-items:center;gap:8px;margin-top:10px;";
-      var lab=mk("div","ohsidian-diag-path-label","Pandoc 路径");
-      lab.style.cssText="flex-shrink:0;font-size:var(--font-ui-smaller);color:var(--text-muted);";
-      var inp=document.createElement("input");
-      inp.type="text";
-      inp.placeholder=OHSIDIAN_PANDOC_DEFAULT;
-      inp.value=ohsidianReadUiPrefs().pandocPath||"";
-      inp.style.cssText="flex:1;min-width:0;font-size:var(--font-ui-smaller);height:28px;";
-      var save=function(){
+    var addInfoValue=function(list,title,desc,value,mono){
+      var ctl=itemEl(list,title,desc);
+      var v=mk("span","",String(value));
+      v.style.cssText="font-size:var(--font-ui-smaller);color:var(--text-muted);"+(mono?"word-break:break-all;":"")+
+        "max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+      ctl.appendChild(v);
+      return v;
+    };
+    var pandocNow=pvInfo();
+    addInfoValue(pandocGroup,"版本","内置 WebAssembly 引擎版本",pandocNow.version);
+    addInfoValue(pandocGroup,"状态","引擎运行状态",pandocNow.status);
+    addInfoValue(pandocGroup,"位置","随 HAP 安装的资源目录",pandocNow.dir,true);
+    addInfoValue(pandocGroup,"宿主","执行进程",pandocNow.host);
+    var extPathCtl=itemEl(pandocGroup,"外部路径","仅用于环境检查，不参与导出");
+    if(extPathCtl){
+      var extInp=document.createElement("input");
+      extInp.type="text";
+      extInp.placeholder=OHSIDIAN_PANDOC_DEFAULT;
+      extInp.value=ohsidianPandocPath();
+      extInp.style.cssText="min-width:220px;font-size:var(--font-ui-smaller);height:28px;";
+      var extSave=function(){
         try{
-          var ok=ohsidianSetPandocPath(inp.value);
-          pandocCard.status.textContent=pandocStatus();
+          var ok=ohsidianSetPandocPath(extInp.value);
           if(!ok)new Notice("OHSidian: Pandoc 路径保存失败",4000);
-        }catch(eS){}
+        }catch(eSave){}
       };
-      inp.addEventListener("change",save);
-      inp.addEventListener("blur",save);
-      row.appendChild(lab);
-      row.appendChild(inp);
-      pandocCard.card.appendChild(row);
-    })();
+      extInp.addEventListener("change",extSave);
+      extInp.addEventListener("blur",extSave);
+      extPathCtl.appendChild(extInp);
+    }
+    var selfTestCtl=itemEl(pandocGroup,"自检","运行内置引擎的 version / html / docx 转换");
+    if(selfTestCtl){
+      var selfTestBtn=mk("button","","运行");
+      selfTestBtn.addEventListener("click",function(){
+        ohsidianDiagRunWithLock(selfTestBtn,function(release){
+          var p=window.__ohsidianPandoc;
+          if(!p){try{new Notice("OHSidian: pandoc 补丁未加载")}catch(eN){};release();return}
+          try{
+            var box=["补丁: "+OHSIDIAN_PATCH_REV,"","▍自检"];
+            p.selfTest().then(function(r){
+              box.push("版本: "+r.version);
+              for(var i=0;i<r.checks.length;i++){
+                box.push(r.checks[i].name+": "+(r.checks[i].ok?"OK":"FAIL")+(r.checks[i].detail?(" ("+r.checks[i].detail+")"):""));
+              }
+              ohsidianShowReportModal("OHSidian 诊断",ohsidianCompactLines(box),release);
+            }).catch(function(eS){
+              box.push("自检: FAIL ("+String((eS&&eS.message)||eS)+")");
+              ohsidianShowReportModal("OHSidian 诊断",ohsidianCompactLines(box),release);
+            });
+          }catch(eST){release()}
+        });
+      });
+      selfTestCtl.appendChild(selfTestBtn);
+    }
 
-    /* 3) 插件诊断 */
-    var pluginCard=diagCard("插件诊断");
-    var pluginStatus=function(){
-      try{
-        var pl=window.app&&window.app.plugins;
-        var man=(pl&&pl.manifests)||{};
-        var n=Object.keys(man).length;
-        var tabs=(window.app.setting&&window.app.setting.pluginTabs||[]).length;
-        return "已安装 "+n+" · 设置页 "+tabs;
-      }catch(ePl){return "插件状态未知"}
+    /* --- 诊断（页面最底部） --- */
+    /* rev211: one native row per action, one button per row; only one report
+       may run at a time (locked until its modal closes). */
+    var diag=newGroup("诊断");
+    var diagRunRow=function(list,title,desc,run){
+      var ctl=itemEl(list,title,desc);
+      if(!ctl)return;
+      var btn=mk("button","","运行");
+      btn.addEventListener("click",function(){
+        ohsidianDiagRunWithLock(btn,function(release){run(release)});
+      });
+      ctl.appendChild(btn);
+      return ctl;
     };
-    pluginCard.status.textContent=pluginStatus();
-    pluginCard.ctl.appendChild(diagBtn("运行",true,function(){
-      try{ohsidianRunPluginIntegrityProbe()}catch(eG2){}
-    }));
-    pluginCard.ctl.appendChild(diagLink("清空错误记录",function(){
-      try{ohsidianClearPluginErrors();pluginCard.status.textContent=pluginStatus()}catch(eH){}
-    }));
+    diagRunRow(diag,"通用诊断","窗口 / 环境 / 插件概况",function(r){ohsidianShowStatusReport(r)});
+    diagRunRow(diag,"Pandoc 诊断","外部路径环境检查 + 内置引擎自检",function(r){ohsidianRunPandocDiag(r)});
+    diagRunRow(diag,"插件诊断","插件清单 / 加载状态 / 错误记录",function(r){ohsidianRunPluginIntegrityProbe(r)});
+    var clearPluginCtl=itemEl(diag,"清空插件错误记录","删除 plugin-errors.json");
+    if(clearPluginCtl){
+      var clearPluginBtn=mk("button","","清空");
+      clearPluginBtn.addEventListener("click",function(){try{ohsidianClearPluginErrors()}catch(eC){} });
+      clearPluginCtl.appendChild(clearPluginBtn);
+    }
+
+    /* --- 日志（诊断之后，页面最底部） --- */
+    var logGroup=newGroup("日志");
+    var logLevelCtl=itemEl(logGroup,"日志档位","仅错误 / 全量 / 关闭；重启生效");
+    if(logLevelCtl){
+      var logLevelVal=mk("span","",ohsidianConsoleCaptureLabel());
+      logLevelVal.style.cssText="margin-right:8px;font-size:var(--font-ui-smaller);color:var(--text-muted);";
+      var logLevelBtn=mk("button","","切换");
+      logLevelBtn.addEventListener("click",function(){
+        try{logLevelVal.textContent=ohsidianCycleConsoleCapture()}catch(eL){}
+      });
+      logLevelCtl.appendChild(logLevelVal);
+      logLevelCtl.appendChild(logLevelBtn);
+    }
+    var clearLogCtl=itemEl(logGroup,"清空渲染层日志","清空 console.log");
+    if(clearLogCtl){
+      var clearLogBtn=mk("button","","清空");
+      clearLogBtn.addEventListener("click",function(){try{ohsidianClearConsoleLog()}catch(eCL){} });
+      clearLogCtl.appendChild(clearLogBtn);
+    }
+    addInfoValue(logGroup,"日志文件","console.log 路径",ohsidianConsoleLogPath()||"-",true);
+    var errPath="-";
+    try{errPath=ohsidianPluginErrorsPath()||"-"}catch(eEP){}
+    addInfoValue(logGroup,"错误记录","plugin-errors.json 路径",errPath,true);
   }catch(e){
     window.__ohsidianSettingsError="渲染设置页失败: "+String((e&&e.message)||e);
     try{console.warn("[OHSidian] settings rows failed:",window.__ohsidianSettingsError)}catch(e2){}
@@ -4954,7 +4997,7 @@ function ohsidianCycleConsoleCapture(){
 }
 /* rev203: the status report (command palette AND settings) also carries the
    console.log tail, so "补丁与设置状态" is a single support attachment too. */
-function ohsidianShowStatusReport(){
+function ohsidianShowStatusReport(onClose){
   var L=ohsidianBuildStatusLines();
   try{
     L.push("");
@@ -4967,7 +5010,7 @@ function ohsidianShowStatusReport(){
   }catch(e){
     L.push("  日志读取失败: "+String((e&&e.message)||e));
   }
-  try{ohsidianShowReportModal("OHSidian 诊断: 补丁与设置状态",L)}catch(e2){}
+  try{ohsidianShowReportModal("OHSidian 诊断: 补丁与设置状态",L,onClose)}catch(e2){}
 }
 /* NF-015 / NF-018 on-device adjudication (report 2026-11-22 §五). The console
    probes in that report are impossible to type on a tablet, so the two decisive
@@ -4983,11 +5026,11 @@ function ohsidianShowStatusReport(){
    Read-only. Plugin bodies are parsed one at a time (never all at once: a vault
    with 20 multi-MB plugins would otherwise hold ~100 MB of text) and the list
    is capped, so the command cannot stall the renderer on a big vault. */
-function ohsidianRunPluginIntegrityProbe(){
+function ohsidianRunPluginIntegrityProbe(onClose){
   var L=[];
   var add=function(s){L.push(s)};
   var show=function(){
-    try{ohsidianShowReportModal("OHSidian 诊断",typeof ohsidianCompactLines==="function"?ohsidianCompactLines(L):L)}catch(eShow){}
+    try{ohsidianShowReportModal("OHSidian 诊断",typeof ohsidianCompactLines==="function"?ohsidianCompactLines(L):L,onClose)}catch(eShow){}
   };
   /* rev198: the renderer error itself lives in <Documents|userData>/OHSidian/
      console.log (NF-016 writes error lines by default). Reading its tail here
@@ -5273,7 +5316,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="210";
+var OHSIDIAN_PATCH_REV="211";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the

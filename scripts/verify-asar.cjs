@@ -150,7 +150,7 @@ try {
     'app pandoc report index': app.includes('"▍外部"') && app.includes('"候选: "+cands.length'),
     'app pandoc shell probe passes path as argv': app.includes('"$0" --version'),
     'app pandoc probe absolute paths only': app.includes('execve: skipped (relative)'),
-    'app pandoc path input restored': app.includes('ohsidian-diag-path') &&
+    'app pandoc path input restored': app.includes('itemEl(pandocGroup,"外部路径"') &&
       app.includes('ohsidianSetPandocPath'),
     // Weak-sandbox decision (HB-1 ④, 2026-11-18): ArkTS publishes the measured
     // sandbox type into the shared mode file, the probe reads it, and EPERM in a
@@ -227,10 +227,17 @@ try {
     // rev203: settings-page diagnostics hub, console.log in the status report,
     // sandbox diagnosis (declared / ACL / API) and the kernel settings-key fix.
     // rev210: three fact-only cards with one layout; diagnostics live only here.
-    'app settings diagnostics hub':
-      app.includes('ohsidian-diag-card') &&
-      app.includes('function ohsidianDiagHead') &&
-      app.includes('"通用诊断"') && app.includes('"Pandoc"') && app.includes('"插件诊断"'),
+    // rev211: native setting rows only; dedicated Pandoc section + Logs section
+    // at the bottom; one action per row; single diagnostic at a time.
+    'app settings sections are native rows':
+      app.includes('newGroup("Pandoc")') &&
+      app.includes('newGroup("诊断")') &&
+      app.includes('newGroup("日志")') &&
+      app.includes('diagRunRow(diag,"通用诊断"') &&
+      app.includes('diagRunRow(diag,"Pandoc 诊断"') &&
+      app.includes('diagRunRow(diag,"插件诊断"'),
+    'app single diagnostic at a time':
+      app.includes('__ohsidianDiagBusy') && app.includes('ohsidianDiagRunWithLock'),
     'app diagnostics commands removed':
       !app.includes('id:"ohsidian-diag-') &&
       !app.includes('id:"ohsidian-console-capture"'),
@@ -238,8 +245,8 @@ try {
       app.includes('function ohsidianCompactLines') &&
       app.includes('补丁: "+OHSIDIAN_PATCH_REV') &&
       app.includes('内核: "+kernel'),
-    'app log capture moved to general settings':
-      app.includes('运行日志捕获') && app.includes('ohsidianCycleConsoleCapture'),
+    'app logs have their own section':
+      app.includes('itemEl(logGroup,"日志档位"') && app.includes('ohsidianCycleConsoleCapture'),
     'app status report carries console log':
       app.includes('function ohsidianLogTailLines(') &&
       app.includes('▍渲染层日志（console.log 末尾，最多 40 行；优先错误/插件行）'),
@@ -250,7 +257,7 @@ try {
       app.includes('已折叠更早会话'),
     'app clear renderer log':
       app.includes('function ohsidianClearConsoleLog()') &&
-      app.includes('"清空日志"'),
+      app.includes('itemEl(logGroup,"清空渲染层日志"'),
     'app sandbox diagnosis explains strong':
       app.includes('function ohsidianSandboxMeta()') &&
       app.includes('本包未声明 CUSTOM_SANDBOX') &&
@@ -266,7 +273,9 @@ try {
     'app built-in pandoc wired to diagnostics':
       app.includes('ohsidianBuiltinPandocLabel') &&
       app.includes('function ohsidianRunPandocDiag') &&
-      app.includes('row("Pandoc内置"'),
+      app.includes('addInfoValue(pandocGroup,"版本"'),
+    'app pandoc default is the builtin engine':
+      app.includes('ohsidianBuiltinPandocDir') && app.includes('类型: 内置(WASM)'),
     // rev206: device first run could not locate the assets, so the loader now
     // probes candidate layouts and the self-test/probe surfaces the tried dirs.
     'app pandoc asset path probe':
