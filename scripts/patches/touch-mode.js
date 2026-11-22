@@ -169,9 +169,37 @@ function ohsidianSandboxMode(){
     return (s==="weak"||s==="strong")?s:"";
   }catch(e){return ""}
 }
+/* rev203: the ArkTS side now also publishes sandboxDeclared / sandboxApi, so a
+   strong sandbox can be explained instead of just reported: is the permission
+   missing from the PACKAGE (default build) or present in the package but not
+   granted by the SIGNING PROFILE ACL, or is the device API too old? */
+function ohsidianSandboxMeta(){
+  try{
+    var cfg=readMode()||{};
+    return {
+      mode:(cfg.sandbox==="weak"||cfg.sandbox==="strong")?cfg.sandbox:"",
+      declared:cfg.sandboxDeclared==="true",
+      declaredKnown:(cfg.sandboxDeclared==="true"||cfg.sandboxDeclared==="false"),
+      api:(parseInt(cfg.sandboxApi,10)||0)
+    };
+  }catch(e){return {mode:"",declared:false,declaredKnown:false,api:0}}
+}
 function ohsidianSandboxLabel(v){
   if(v==="weak")return "弱沙箱（CUSTOM_SANDBOX 已授予，可执行外部二进制）";
-  if(v==="strong")return "强沙箱（CUSTOM_SANDBOX 未授予，外部二进制必然 EPERM）";
+  if(v==="strong"){
+    var m=ohsidianSandboxMeta();
+    var why="";
+    if(m.declaredKnown&&!m.declared){
+      why="本包未声明 CUSTOM_SANDBOX（默认构建不带该权限）：先 node scripts/weak-sandbox.mjs apply，再重新构建并用带 ACL 的 profile 重签";
+    }else if(m.declaredKnown&&m.declared&&m.api>0&&m.api<18){
+      why="权限已声明，但设备 API "+m.api+" < 18，弱沙箱不受支持";
+    }else if(m.declaredKnown&&m.declared){
+      why="权限已在包内声明但未被授予：签名 profile 缺 CUSTOM_SANDBOX ACL，需用带 ACL 的 profile 重签（诊断见 weak-sandbox.mjs status）";
+    }else{
+      why="模式文件没有声明状态字段（旧版本）：无法区分「未声明」与「profile 缺 ACL」";
+    }
+    return "强沙箱（外部二进制必然 EPERM）· "+why;
+  }
   return "未知（旧版本，或模式文件里没有 sandbox 字段）";
 }
 /* Atomic mode-file publish (H1): writeFileSync truncates first, so a crash
@@ -4048,6 +4076,65 @@ function ohsidianSettingsRows(root){
       });
       pluginCtl.appendChild(pluginBtn);
     }
+    /* rev203: every diagnostic is reachable from this settings group (the
+       command palette stays the power-user path). */
+    var statusCtl=itemEl(diag,"补丁与设置状态",
+      "补丁号、窗口/布局、输入与手写笔状态、沙箱形态（含原因）、插件与日志路径，外加 console.log 尾部。只读，报告可复制。");
+    if(statusCtl){
+      var statusBtn=document.createElement("button");
+      statusBtn.textContent="检查";
+      statusBtn.addEventListener("click",function(){try{ohsidianShowStatusReport()}catch(eS){}});
+      statusCtl.appendChild(statusBtn);
+    }
+    var captureCtl=itemEl(diag,"运行日志捕获",
+      "当前档位决定 console.log 记录哪些渲染层日志。循环：仅错误(默认) → 全量 → 关闭；重启应用后生效。");
+    if(captureCtl){
+      var capLabel=document.createElement("span");
+      capLabel.textContent=ohsidianConsoleCaptureLabel();
+      capLabel.style.cssText="margin-right:8px;color:var(--text-muted);font-size:12px";
+      var capBtn=document.createElement("button");
+      capBtn.textContent="切换";
+      capBtn.addEventListener("click",function(){
+        try{capLabel.textContent=ohsidianCycleConsoleCapture()}catch(eC){}
+      });
+      captureCtl.appendChild(capLabel);
+      captureCtl.appendChild(capBtn);
+    }
+    var clearErrCtl=itemEl(diag,"清空插件错误记录",
+      "删除 plugin-errors.json 与本次会话的插件错误记录；console.log 本身按 512KB 轮转自动清理。");
+    if(clearErrCtl){
+      var clearErrBtn=document.createElement("button");
+      clearErrBtn.textContent="清空";
+      clearErrBtn.addEventListener("click",function(){
+        try{
+          ohsidianClearPluginErrors();
+          clearErrBtn.textContent="已清空";
+          setTimeout(function(){clearErrBtn.textContent="清空"},1500);
+        }catch(eCl){}
+      });
+      clearErrCtl.appendChild(clearErrBtn);
+    }
+    var filesCtl=itemEl(diag,"支持文件",
+      "console.log 与 plugin-errors.json 的路径；复制后可在文件管理里找到（Documents/OHSidian）。");
+    if(filesCtl){
+      var filesInfo=document.createElement("div");
+      filesInfo.style.cssText="font-size:11px;color:var(--text-faint);max-width:340px;"+
+        "word-break:break-all;white-space:pre-wrap;margin-right:8px";
+      filesInfo.textContent=(ohsidianConsoleLogPath()||"console.log 不可用")+"\n"+
+        (ohsidianPluginErrorsPath()||"plugin-errors.json 不可用");
+      var copyPathBtn=document.createElement("button");
+      copyPathBtn.textContent="复制路径";
+      copyPathBtn.addEventListener("click",function(){
+        try{
+          ohsidianCopyText(filesInfo.textContent||"",function(ok){
+            copyPathBtn.textContent=ok?"已复制":"复制失败";
+            setTimeout(function(){copyPathBtn.textContent="复制路径"},1500);
+          });
+        }catch(eCP){}
+      });
+      filesCtl.appendChild(filesInfo);
+      filesCtl.appendChild(copyPathBtn);
+    }
   }catch(e){
     window.__ohsidianSettingsError="渲染设置页失败: "+String((e&&e.message)||e);
     try{console.warn("[OHSidian] settings rows failed:",window.__ohsidianSettingsError)}catch(e2){}
@@ -4702,6 +4789,74 @@ function ohsidianClearPluginErrors(){
   try{new Notice("OHSidian: 插件错误记录已清空")}catch(eN){}
 }
 
+/* rev203: console.log surface shared by every report. The path resolution was
+   duplicated in the plugin probe; it lives here now so the status report, the
+   settings rows and the plugin report all agree on the same file. */
+function ohsidianConsoleLogPath(){
+  try{
+    var np=require("path");
+    var cfg=readMode()||{};
+    var base=null;
+    if(typeof cfg.documentsDir==="string"&&cfg.documentsDir&&cfg.documentsDirGranted!==false){
+      base=np.join(cfg.documentsDir,"OHSidian");
+    }
+    if(!base){var ud=dataDir();base=ud||null}
+    return base?np.join(base,"console.log"):null;
+  }catch(e){return null}
+}
+function ohsidianLogTailLines(max){
+  var out=[];
+  try{
+    var fsL=require("fs"),logPath=ohsidianConsoleLogPath();
+    if(!logPath||!fsL.existsSync(logPath)){
+      out.push("  (没有 console.log：本次会话没有 error 级输出，或路径不可达)");
+      out.push("  期望路径: "+(logPath||"(未知)"));
+      return out;
+    }
+    var linesL=fsL.readFileSync(logPath,"utf8").split(/\r?\n/);
+    var errLines=linesL.filter(function(l){
+      return /\[OHSidian:web\]\[error\]|Plugin failure|plugin:/.test(l);
+    });
+    var tailL=(errLines.length?errLines:linesL).slice(-(max+1)).filter(function(l){return l.trim()!==""});
+    out.push("  源文件共 "+linesL.length+" 行"+(errLines.length?("，其中错误/插件相关 "+errLines.length+" 行"):"")+"; 下面最多 "+max+" 行");
+    if(!tailL.length)out.push("  (文件为空)");
+    for(var li=0;li<tailL.length;li++)out.push("  "+tailL[li]);
+  }catch(e){out.push("  读取失败: "+String((e&&e.message)||e))}
+  return out;
+}
+function ohsidianConsoleCaptureLabel(){
+  try{
+    var v=localStorage.getItem("ohsidianConsoleCapture");
+    return v==="1"?"全量":(v==="0"?"关闭":"仅错误(默认)");
+  }catch(e){return "?"}
+}
+function ohsidianCycleConsoleCapture(){
+  var label="";
+  try{
+    var cur=localStorage.getItem("ohsidianConsoleCapture");
+    if(cur==="1"){localStorage.setItem("ohsidianConsoleCapture","0");label="关闭"}
+    else if(cur==="0"){localStorage.removeItem("ohsidianConsoleCapture");label="仅错误 (默认)"}
+    else{localStorage.setItem("ohsidianConsoleCapture","1");label="全量"}
+  }catch(e){}
+  return label;
+}
+/* rev203: the status report (command palette AND settings) also carries the
+   console.log tail, so "补丁与设置状态" is a single support attachment too. */
+function ohsidianShowStatusReport(){
+  var L=ohsidianBuildStatusLines();
+  try{
+    L.push("");
+    L.push("▍渲染层日志（console.log 末尾，最多 40 行；优先错误/插件行）");
+    var tail=ohsidianLogTailLines(40);
+    for(var i=0;i<tail.length;i++)L.push(tail[i]);
+    L.push("");
+    L.push("  日志文件: "+(ohsidianConsoleLogPath()||"(不可用)"));
+    L.push("  插件错误记录: "+((typeof ohsidianPluginErrorsPath==="function"&&ohsidianPluginErrorsPath())||"(不可用)"));
+  }catch(e){
+    L.push("  日志读取失败: "+String((e&&e.message)||e));
+  }
+  try{ohsidianShowReportModal("OHSidian 诊断: 补丁与设置状态",L)}catch(e2){}
+}
 /* NF-015 / NF-018 on-device adjudication (report 2026-11-22 §五). The console
    probes in that report are impossible to type on a tablet, so the two decisive
    checks run here and land in the copyable report modal:
@@ -4727,42 +4882,19 @@ function ohsidianRunPluginIntegrityProbe(){
      is what turns "插件在加载时遇到错误" into an actual stack without a PC. */
   var appendLogTail=function(){
     add("");
-    add("▍渲染层日志（console.log 末尾，最多 40 行）");
+    add("▍渲染层日志（console.log 末尾，最多 40 行；优先错误/插件行）");
+    var tailL=[];
     try{
-      var npL=require("path"),fsL=require("fs");
-      var cfgL=readMode()||{};
-      var baseL=null;
-      if(typeof cfgL.documentsDir==="string"&&cfgL.documentsDir&&cfgL.documentsDirGranted!==false){
-        baseL=npL.join(cfgL.documentsDir,"OHSidian");
-      }
-      if(!baseL){var udL=dataDir();baseL=udL||null}
-      var logPath=baseL?npL.join(baseL,"console.log"):null;
-      if(!logPath||!fsL.existsSync(logPath)){
-        add("  (没有 console.log：本次会话没有 error 级输出，或路径不可达)");
-        add("  期望路径: "+(logPath||"(未知)"));
-        return;
-      }
-      var linesL=fsL.readFileSync(logPath,"utf8").split(/\r?\n/);
-      var errLines=linesL.filter(function(l){
-        return /\[OHSidian:web\]\[error\]|Plugin failure|plugin:/.test(l);
-      });
-      var tailL=(errLines.length?errLines:linesL).slice(-41).filter(function(l){return l.trim()!==""});
-      add("  源文件共 "+linesL.length+" 行"+(errLines.length?("，其中错误/插件相关 "+errLines.length+" 行"):"")+"; 下面最多 40 行");
-      if(!tailL.length)add("  (文件为空)");
-      for(var li=0;li<tailL.length;li++)add("  "+tailL[li]);
-    }catch(eLogTail){
-      add("  读取失败: "+String((eLogTail&&eLogTail.message)||eLogTail));
-    }
+      if(typeof ohsidianLogTailLines==="function")tailL=ohsidianLogTailLines(40);
+      else tailL=["  (日志读取器不可用)"];
+    }catch(eLT){tailL=["  读取失败: "+String((eLT&&eLT.message)||eLT)]}
+    for(var tli=0;tli<tailL.length;tli++)add(tailL[tli]);
     try{
       add("");
       add("▍支持文件");
-      var supportDir="(不可用)";
-      try{if(typeof ohsidianSupportDir==="function")supportDir=ohsidianSupportDir()||"(不可用)"}catch(eSD){}
-      var supportLog=supportDir;
-      try{if(supportDir!=="(不可用)")supportLog=require("path").join(supportDir,"console.log")}catch(eSL){}
+      add("  console.log: "+(ohsidianConsoleLogPath()||"(不可用)"));
       var errFilePath="(不可用)";
       try{if(typeof ohsidianPluginErrorsPath==="function")errFilePath=ohsidianPluginErrorsPath()||"(不可用)"}catch(eEP){}
-      add("  console.log: "+supportLog);
       add("  plugin-errors.json: "+errFilePath);
     }catch(eSupport){}
   };
@@ -5033,7 +5165,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="202";
+var OHSIDIAN_PATCH_REV="203";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -5182,10 +5314,7 @@ var install=function(app){
        troubleshooting starts with "OHSidian 诊断:" so it reads as a tool, and
        sits next to its siblings in the palette. */
     app.commands.addCommand({id:"ohsidian-diag-build",name:"OHSidian 诊断: 补丁与设置状态",
-      callback:function(){
-        var L=ohsidianBuildStatusLines();
-        try{ohsidianShowReportModal("OHSidian 诊断: 补丁与设置状态",L)}catch(e){}
-      }});
+      callback:function(){try{ohsidianShowStatusReport()}catch(e){}}});
     app.commands.addCommand({id:"ohsidian-diag-pandoc",name:"OHSidian 诊断: Pandoc 环境",
       callback:function(){ohsidianRunPandocProbe()}});
     app.commands.addCommand({id:"ohsidian-diag-plugins",name:"OHSidian 诊断: 插件排查（清单 / 错误 / 日志）",
@@ -5218,18 +5347,7 @@ var install=function(app){
     app.commands.addCommand({id:"ohsidian-console-capture",name:"OHSidian 诊断: 运行日志捕获 (仅错误/全量/关闭, 重启生效)",
       callback:function(){
         try{
-          var cur=localStorage.getItem("ohsidianConsoleCapture");
-          var nextLabel="";
-          if(cur==="1"){
-            localStorage.setItem("ohsidianConsoleCapture","0");
-            nextLabel="关闭";
-          }else if(cur==="0"){
-            localStorage.removeItem("ohsidianConsoleCapture");
-            nextLabel="仅错误 (默认)";
-          }else{
-            localStorage.setItem("ohsidianConsoleCapture","1");
-            nextLabel="全量";
-          }
+          var nextLabel=ohsidianCycleConsoleCapture();
           try{new Notice("OHSidian 运行日志捕获 → "+nextLabel+" (重启应用后生效)")}catch(e){}
         }catch(e){}
       }});

@@ -509,6 +509,15 @@ async function main() {
      prefer it when the engine value is missing or incomplete. */
   const secretStorageAdapterSrc = 'n.safeStorage=window.electron.remote.safeStorage,n}';
   const secretStorageAdapterDst = 'n.safeStorage=(function(){var s=null;try{s=window.electron&&window.electron.remote&&window.electron.remote.safeStorage}catch(e){s=null}if(s&&typeof s.isEncryptionAvailable==="function"&&typeof s.encryptString==="function"&&typeof s.decryptString==="function"&&typeof s.getSelectedStorageBackend==="function")return s;try{console.warn("[OHSidian] engine has no remote.safeStorage - secretStorage uses plaintext passthrough (NF-018)")}catch(eW){}return window.__ohsidianSafeStorageFallback||{isEncryptionAvailable:function(){return false},getSelectedStorageBackend:function(){return "basic_text"},encryptString:function(v){return String(v)},decryptString:function(v){return String(v)}}})(),n}';
+  /* rev203: settings-definition keys. The kernel derives a definition key as
+     `type:heading` (or `type#index` without a heading). A plugin that emits
+     two groups with the SAME heading (nutstore-sync 1.6.2 has two 模块开关:
+     groups) produces colliding keys: the kernel logs 'duplicate setting key' and
+     the keyed re-render diff may reuse one group's DOM for the other. Append the
+     position index so every key is unique and still stable across re-renders
+     (re-renders keep the definition order). */
+  const settingsDefKeySrc = 'function $2(e,t){return e.heading?e.type+":"+e.heading:e.type+"#"+t}';
+  const settingsDefKeyDst = 'function $2(e,t){return(e.heading?e.type+":"+e.heading:e.type)+"#"+t}';
   const APP_BODY_PATCHES = [
     [drawerSwitchSrc, drawerSwitchDst, 'vault drawer switch routed to openVaultChooser',
       'vault drawer switch site not found (app.js layout changed?); ' +
@@ -541,6 +550,10 @@ async function main() {
     // NF-018: secretStorage on a desktop-form package without engine safeStorage.
     [secretStorageAdapterSrc, secretStorageAdapterDst, 'secretStorage desktop adapter falls back to plaintext (engine has no safeStorage)',
       'k6 safeStorage site not found (app.js layout changed?); BRAT-style secretStorage plugins will keep failing silently'],
+    // rev203: plugins with duplicate settings-group headings (nutstore-sync) must
+    // not collide in the definition-key diff.
+    [settingsDefKeySrc, settingsDefKeyDst, 'settings definition keys unique by position',
+      'settings keying site not found (app.js layout changed?); plugins with duplicate group headings keep logging duplicate-setting-key warnings'],
   ];
   for (const [src, dst, okMsg, warnMsg] of APP_BODY_PATCHES) {
     // src FIRST: the drawer dst token ("i.app.openVaultChooser()") also exists

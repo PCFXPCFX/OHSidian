@@ -223,6 +223,21 @@ try {
       app.includes('插件排查（清单 / 错误 / 日志）') &&
       app.includes('ohsidian-diag-plugins-clear') &&
       app.includes('插件错误（最近 12 条）'),
+    // rev203: settings-page diagnostics hub, console.log in the status report,
+    // sandbox diagnosis (declared / ACL / API) and the kernel settings-key fix.
+    'app settings diagnostics hub':
+      app.includes('itemEl(diag,"补丁与设置状态"') &&
+      app.includes('itemEl(diag,"支持文件"') &&
+      app.includes('function ohsidianShowStatusReport()'),
+    'app status report carries console log':
+      app.includes('function ohsidianLogTailLines(') &&
+      app.includes('▍渲染层日志（console.log 末尾，最多 40 行；优先错误/插件行）'),
+    'app sandbox diagnosis explains strong':
+      app.includes('function ohsidianSandboxMeta()') &&
+      app.includes('本包未声明 CUSTOM_SANDBOX') &&
+      app.includes('签名 profile 缺 CUSTOM_SANDBOX ACL'),
+    'kernel settings definition keys unique':
+      app.includes('function $2(e,t){return(e.heading?e.type+":"+e.heading:e.type)+"#"+t}'),
     'app font scale follower': app.includes('applyFontScale'),
     'app style-font follower (OhosThemeFont)': app.includes('"OhosThemeFont","HarmonyOS Sans"'),
     'app documents-dir migration': app.includes('pickMigration') && app.includes('当前仓库在应用沙箱内'),

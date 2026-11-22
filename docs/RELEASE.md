@@ -187,5 +187,6 @@ Get-FileHash .\OHSidian-v2.0.1-*-icon-unsigned.hap -Algorithm MD5
   `secretStorage` 吞错型（看 `secretStorage` 行，`WARN … false（明文模式）` 属正常）。完整
   排查链路见 `docs/PLATFORM-ADAPTATION.md` §六。
 - **需要渲染层日志**：error 级默认就落盘（`<Documents|userData>/OHSidian/console.log`，
-  512 KB 轮转）；要 log/info 全量，用命令面板「OHSidian 诊断: 运行日志捕获」切到「全量」
-  并重启（重启生效）。
+  512 KB 轮转）；要 log/info 全量，用命令面板「OHSidian 诊断: 运行日志捕获」或 设置 →「诊断」组
+  的「运行日志捕获 → 切换」切到「全量」并重启（重启生效）。「补丁与设置状态」报告现在自带
+  console.log 尾部，一份报告即可作为支持附件。

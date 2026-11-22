@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→202）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→203）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 202、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 203、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5479,3 +5479,39 @@ BRAT settingsTab 的 `update()/display()` 在本端口抛错、或 `registerObsi
 BUILD SUCCESSFUL；HAP 内 asar 复核 rev 202；`verify-release` / `check-docs` 全绿。
 **真机待验**：① 打开文件列表/大纲 → 工具条消失、点不到，关闭后 0.5s 内恢复；② 设置导航里每个插件
   只有一个设置页（诊断「已注册插件设置页」列表无重复）；③ 设置/命令面板等原有浮层行为不变。
+
+### 十四、rev 203：设置页诊断中心 + console.log 进状态报告 + 沙箱原因诊断 + Nutstore 设置键修复
+
+**设置页 = 诊断中心（任务要求）**
+
+- 设置 →「诊断」组现在包含：插件排查（清单/错误/日志）、补丁与设置状态、运行日志捕获（显示当前档位，
+  按钮循环切换）、清空插件错误记录、支持文件（console.log / plugin-errors.json 路径 + 复制路径）；
+  Pandoc 环境检查保留。命令面板入口全部保留。
+- 「补丁与设置状态」报告（命令与设置入口共用）追加 `▍渲染层日志`：console.log 尾部（优先错误/插件行）
+  与日志文件路径 —— 与插件排查报告共用同一套 `ohsidianLogTailLines()`，不再各写一份。
+
+**沙箱为什么失败：诊断直接给原因**
+
+- ArkTS 新增发布 `sandboxDeclared`（本包是否在 requestPermissions 声明 CUSTOM_SANDBOX）与
+  `sandboxApi`（设备 API），渲染层据此把「强沙箱」细化为：
+  ①本包未声明（默认构建不带该权限）→ 先 `weak-sandbox.mjs apply` 再重签；
+  ②已声明但未授予 → 签名 profile 缺 ACL，用带 ACL 的 profile 重签；③设备 API < 18。
+- 本机实测状态：`module.json5` 未声明、签名 profile 的 7 条 ACL 里也没有 `CUSTOM_SANDBOX`/
+  `READ_WRITE_USER_FILE` → 当前 HAP 必然是 strong；两条都要补（声明 + profile ACL）后才能弱沙箱。
+
+**插件还有什么要修：真机日志审计结论**
+
+- `Nutstore Sync: duplicate setting key "group:模块开关"`（3 次，当前版本仍复现）：内核设置项 key 由
+  `type:heading` 生成，插件有两个同名 heading 的 group 必冲突（日志由内核打印，会误导为重渲染异常）。
+  修复：内核 `$2()` 的 key 增加位置后缀（`(type:heading)#index`）——唯一且跨重渲染稳定，告警消失，
+  也避免 keyed diff 把两组 DOM 复用到一起。
+- BRAT 设置页重复 / 抽屉守卫漏检：已在 rev202 修（见 §十三）。
+- 日志中的 `r.plugins.isEnabled is not a function`、`{}`、`Failed to load settings: {}` 均为
+  rev196 P0 构建或坏包时代的旧会话记录（`app.plugins` 曾变成 Promise / 旧 console bridge 把 Error 记成
+  `{}`），当前构建不存在。
+- 结论：当前已知插件侧缺陷只剩上面已修的 Nutstore 键冲突；未见其它插件异常。
+
+**验证**：`--repatch` 全绿（新增 4 条门禁：设置诊断中心、状态报告带日志、沙箱原因诊断、内核设置键唯一）；
+`assembleHap` BUILD SUCCESSFUL；HAP 内 asar 复核 rev 203；`verify-release` / `check-docs` 全绿。
+**真机待验**：① 设置「诊断」组各按钮可用；② 状态报告含日志尾部；③ 沙箱行显示"本包未声明…"（默认构建）；
+④ 打开 Nutstore 设置不再出现 duplicate setting key 告警。

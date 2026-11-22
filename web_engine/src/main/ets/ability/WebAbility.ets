@@ -3810,11 +3810,40 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
+  // rev203: WHY the grant is missing. Two very different failures produce the
+  // same sandbox=strong:
+  //   declared=false -> this build never requested the permission (the default
+  //     build strips it; run weak-sandbox.mjs apply and rebuild);
+  //   declared=true  -> the package asks for it but the signing profile has no
+  //     ACL entry (re-sign with a profile that carries the ACL).
+  // Publishing the bit lets the diagnostics say which one it is (B-WS-5).
+  private sandboxDeclared(): boolean {
+    try {
+      const info = bundleManager.getBundleInfoForSelfSync(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_REQUESTED_PERMISSION);
+      const details = info.reqPermissionDetails;
+      if (!details) {
+        return false;
+      }
+      for (let i = 0; i < details.length; i++) {
+        if (details[i].name === 'ohos.permission.CUSTOM_SANDBOX') {
+          return true;
+        }
+      }
+      return false;
+    } catch (eDecl) {
+      LogUtil.warn(TAG, 'sandbox declared probe failed: ' + JSON.stringify(eDecl));
+      return false;
+    }
+  }
+
   // Publishes the sandbox type into the same field-owned mode file the renderer
   // already polls. Field-owned merge: only `sandbox` is touched, every other
   // field (systemMode/override/insets/...) survives exactly as it was.
   private publishSandboxField(): void {
     const sandbox: string = this.sandboxMode();
+    const declared: boolean = this.sandboxDeclared();
+    const api: number = deviceInfo.sdkApiVersion;
     try {
       const filesDir: string = this.context.getApplicationContext().filesDir;
       const filePath: string = filesDir + '/ohsidian-mode.json';
@@ -3829,12 +3858,17 @@ export class WebAbility extends WebBaseAbility {
       } catch (e) {
         cfg = {};
       }
-      if (cfg['sandbox'] === sandbox) {
+      const declaredStr: string = declared ? 'true' : 'false';
+      if (cfg['sandbox'] === sandbox && cfg['sandboxDeclared'] === declaredStr &&
+        cfg['sandboxApi'] === String(api)) {
         return;
       }
       cfg['sandbox'] = sandbox;
+      cfg['sandboxDeclared'] = declaredStr;
+      cfg['sandboxApi'] = String(api);
       this.publishModeFileAtomic(filePath, cfg);
-      LogUtil.info(TAG, 'sandbox mode published: ' + sandbox);
+      LogUtil.info(TAG, 'sandbox mode published: ' + sandbox + ', declared=' + declaredStr +
+        ', api=' + api);
     } catch (err) {
       LogUtil.warn(TAG, 'failed to publish sandbox mode: ' + JSON.stringify(err));
     }

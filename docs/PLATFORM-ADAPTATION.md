@@ -152,6 +152,11 @@
 4. 设备 API ≥ 18；
 5. 验证（§5.5）通过。
 
+**rev203 起诊断能直接指出缺哪一步**：ArkTS 额外把 `sandboxDeclared`（该 HAP 是否在
+`requestPermissions` 声明了 `CUSTOM_SANDBOX`）和 `sandboxApi`（设备 API 级）写进模式文件，
+渲染层拼成「强沙箱（…）· 本包未声明… / 签名 profile 缺 ACL… / 设备 API <18…」——不用再靠猜。
+默认构建**不带**这两条权限，所以拿默认构建实测必然看到"本包未声明"，这是预期。
+
 默认构建**不带**这两条权限（`weak-sandbox.mjs revert` 回到原样）：声明了却拿不到
 ACL 的包不能当发行包用。
 
@@ -203,7 +208,7 @@ profile 再重签即可。离线改 profile 再自签**不可行**：profile 由
 
 > 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象
 > `main @ e528275`）。报告结论一句话：**两个插件不是同一种死法，也都不是 2.0 的代码改动
-> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **202**）；
+> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **203**）；
 > 报告里"2.0 无关"的增量考古（补丁层/引擎层 diff 与 eval/require/loadPlugin 零交集）不再
 > 赘述，见原报告第三部分。
 
@@ -368,7 +373,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 
 ### 6.7 真机定谳步骤（替代报告 §五的控制台探针）
 
-1. 装本版（rev 202）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
+1. 装本版（rev 203）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
 2. `secretStorage` 行：期望 `WARN adapter=有 · isEncryptionAvailable=false（明文模式）`，
    `引擎 safeStorage: undefined（引擎缺口；补丁已兜底为明文透传）`——若 remote 对象整体缺失则
    该行显示 `window.electron.remote 不可用`，同属引擎缺口，补丁同样兜底；
@@ -387,7 +392,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 - `node scripts/update-obsidian.mjs --repatch` → 内嵌 `verify-asar`（含
   `verify-plugin-install` 行为用例）全绿；
 - `assembleHap` **BUILD SUCCESSFUL**；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability`
-  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="202"`、
+  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="203"`、
   四条 NF 标记、console bridge 错误默认档；
 - `verify-release` / `check-docs` 全绿；
 - 独立只读审查（2026-11-22，对照冻结态代码 + 出货 asar 逐字）：NF-015/017/018 无 P1/P2；
@@ -432,6 +437,18 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 （保留第一个），并刷新设置页导航。背景：补注册若早于插件自己的 `onLayoutReady` 回调执行，双方各注册一次
 同一 tab，真机上表现为设置页出现两个同名条目；调度已推迟到 layout-ready 之后 3.5s，且 layout-ready 回调内
 不再补注册。
+
+**设置页即排查入口（rev203）**：设置 →「诊断」组现在包含全部诊断项——「插件排查（清单 / 错误 / 日志）」「补丁与
+设置状态」「运行日志捕获（当前档位 + 切换）」「清空插件错误记录」「支持文件（路径 + 复制路径）」；"补丁与设置状态"的
+报告也追加了 console.log 尾部（优先错误/插件行），一份报告即可作为支持附件。命令面板入口保留。
+
+**已修的两个插件相关问题（rev202/203 真机日志驱动）**：
+- BRAT 设置页重复：补注册与插件自身注册撞车 → 按插件 id 幂等 + 去重（§6.10 上文）；
+- Nutstore Sync 反复报 `duplicate setting key "group:模块开关"`：内核按 `type:heading` 生成设置项 key，
+  插件里两个同名 heading 的 group 必冲突；rev203 给 key 加位置后缀（唯一且跨重渲染稳定），
+  告警消失、也避免 keyed diff 把两组的 DOM 复用到一起。
+- 历史上日志里的 `R is not a function`/`{}`/`Failed to load settings` 均来自坏包或 P0 构建时代的旧会话，
+  不是当前缺陷。
 
 **排查顺序建议**：先看「插件清单」的 `!` 尾注定位是哪个插件、再看「插件错误」拿栈、
 最后看「渲染层日志」补齐上下文；把整份报告复制给维护者即可。
