@@ -5683,3 +5683,51 @@ Pandoc 外部路径默认显示内置位置；自检按钮单独一行。
 verify-plugin-install/verify-release 全绿；assembleHap BUILD SUCCESSFUL；HAP 内 asar 复核 rev212。
 **真机待验**：改动后三个分区默认不可见；「显示高级信息」打开后出现；Pandoc/日志路径行只有复制按钮；
 日志开关与两个选项卡可用。
+
+### 二十四、rev 213：新增更改审计的 5 项缺陷修复（NF-019~NF-023）
+
+输入：外部审计《OHSidian-新增更改审计报告 e528275→c40f584》（2026-11-22，2 个 P2 + 3 个 P3）。
+四条前案建议（NF-015~018）经该审计独立复现判定"已落地"，本轮只修新发现缺陷，不改已通过项；
+版本号建议（NF-024）留到发布决策。
+
+**F-1 → NF-019（P2）：pandoc hook 不再杀死非 pandoc 的同步 child_process**
+rev205 的 `Module._load` hook 对**所有**命令伪造了 `execSync`/`spawnSync`：非 pandoc 的 `execSync`
+抛 "unavailable in this sandbox"、`spawnSync` 返回 `{status:127}`。这与 2574d04"还给插件完整 Node"
+的方向直接冲突（HB-2/3/8/11 的探针全靠真实 errno）。现在非 pandoc 调用一律透传原始 API，
+只有 pandoc 的同步调用保留"只支持异步"的明确错误。
+
+**F-2 → NF-019（P2）：外部路径探针拿回真实 child_process**
+pandoc hook 先于 touch-mode.js 安装，设置页「Pandoc 环境检查」的两个探针
+（`ohsidianProbeExecutable` / `ohsidianProbeExecModes`）过去拿到的是伪造 shim，于是对**从未执行过**
+的路径输出「能启动，但退出码 127 —— 路径没问题，问题在这个程序内部」（正是 HB-2 消灭过的反向诊断）。
+现在 hook 暴露 `window.__ohsidianPandoc.realChildProcess`，探针优先使用它；报告新增
+「执行面: 原始 child_process（直测 execve）/ 内置引擎已接管」，拿不到原始模块时判 `probe-taken-over`。
+
+**NF-020：门禁补「补丁交互」维度**
+`verify-asar` 新增 vm 内的 hook 行为门禁（7 项）：非 pandoc 的 execSync/spawnSync 透传、非 pandoc 的
+exec/spawn 委托、pandoc 同步调用仍是明确错误、原始模块可从两处取到。每个门禁只测自己那半、单点全绿
+而交互回归不可见，正是 rev196 P0 的同类盲区。
+
+**NF-021（P3）：pandoc wasm 锁改钉原始 wasm**
+gzip 压缩流跨 Node/zlib 版本不可复现（同一输入、同一长度、不同 sha256），旧锁钉 `.gz` 导致 Node 24
+环境本地构建必红。现在锁记录 `outputs-wasm-raw`（解压后 sha256 + 字节数），门禁由 gunzip 后比对，
+gz 只记大小；顺带修掉 `checkHash('pandoc-wasm'/'wasi-shim')` 与锁键名（`pandocWasm`/`wasiShim`）
+不匹配、下载 tgz 实际从未被校验的老问题。
+
+**NF-022（P3）：BRAT 指纹文案去罪化**
+未收录哈希不再判"非官方/重打包"，改为"未收录的构建（可能是较新的官方版、镜像站重打包或开发版）"；
+只有注册失败信息含 "is not a function" 时才指向 bundle 内部函数缺失。防止 BRAT 发新版后所有正常
+用户被批量误判（rev200 同型事故的预防）。
+
+**NF-023（P3）：docs/README 断链 + 门禁口径**
+`docs/README.md` 指向从未入库的 `BUG-BACKLOG.md`（452bfe8 引入的存量断链）已移除该行；
+`docs/RELEASE.md` 检查清单新增"门禁结论必须抄当次实际输出"，不再凭印象写"全绿"。
+
+**验证**：`build-pandoc-wasm --check`（新锁，解压后 wasm 55.9 MB 校验通过）/`--repatch`（verify-asar
+含新交互门禁 7/7）/`verify-plugin-install`/`verify-pandoc-wasm`（新锁 gunzip 校验 + 行为全过）/
+`verify-release`/`check-docs`（0 broken）全部通过；`assembleHap` BUILD SUCCESSFUL；HAP 内 asar
+复核 rev213 与新标记。
+**真机待验**：①「Pandoc 环境检查」报告首行出现「执行面: …」，外部路径给出真实 errno/exit；
+② 非 pandoc 的 `execSync`/`spawnSync` 插件（git 类、同步格式化类）行为恢复；③ Enhancing Export
+导出 docx/pptx/epub（同时判别 pandoc hook 对插件是否生效，审计 §4.1 的判别项）。
+

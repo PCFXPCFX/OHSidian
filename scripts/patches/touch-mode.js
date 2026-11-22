@@ -3494,6 +3494,29 @@ function ohsidianSetPandocPath(v){
     return ohsidianWriteUiPrefs(prefs);
   }catch(e){return false}
 }
+/* NF-019/F-2 (audit 2026-11-22): scripts/patches/pandoc-wasm.js hooks
+   Module._load, so ANY require("child_process") in this renderer - including the
+   two probes below - gets the pandoc shim. Until rev213 that shim answered every
+   sync call with a fabricated result, so an external path that was never
+   executed was reported as "能启动，但退出码 127 —— 路径没问题，问题在这个程序内部"
+   (the exact reverse diagnosis the HB-2 fix had removed). The shim now passes
+   non-pandoc calls through AND exposes the original module; the probes use it.
+   The report prints which execution surface it measured, so "built-in engine
+   took over" can never masquerade as a platform verdict. */
+function ohsidianRealChildProcess(){
+  try{
+    var p=window.__ohsidianPandoc;
+    if(p&&p.realChildProcess&&typeof p.realChildProcess.spawnSync==="function")return p.realChildProcess;
+  }catch(e0){}
+  try{
+    var cp=require("child_process");
+    if(cp&&cp.__ohsidianPandocReal&&typeof cp.__ohsidianPandocReal.spawnSync==="function")return cp.__ohsidianPandocReal;
+  }catch(e1){}
+  return null;
+}
+function ohsidianPandocExecSurface(){
+  return ohsidianRealChildProcess()?"原始 child_process（直测 execve）":"内置引擎已接管（无原始 child_process）";
+}
 function ohsidianProbeExecutable(exePath,opt){
   opt=opt||{};
   var out={path:exePath,isLink:false,target:"",exists:false,size:0,mode:"",execBits:false,
@@ -3547,7 +3570,10 @@ function ohsidianProbeExecutable(exePath,opt){
     return out;
   }
   var cp;
-  try{cp=require("child_process")}catch(e){out.verdict="no-child_process";out.human="引擎没有提供 child_process，无法做 execve 探测";return out}
+  var realCp=ohsidianRealChildProcess();
+  cp=realCp;
+  out.execSurface=realCp?"real":"wrapped";
+  if(!cp){try{cp=require("child_process")}catch(e){out.verdict="no-child_process";out.human="引擎没有提供 child_process，无法做 execve 探测";return out}}
   var r=null;
   try{
     r=cp.spawnSync(probePath,["--version"],{timeout:opt.timeout||2500,encoding:"utf8"});
@@ -3557,6 +3583,14 @@ function ohsidianProbeExecutable(exePath,opt){
     return out;
   }
   if(!r){out.verdict="spawn-null";out.human="探测没有返回结果";return out}
+  /* Defense in depth: if the shim (an older rev or a platform-variant hook)
+     answers with its fabricated "unavailable" payload, say "taken over" instead
+     of interpreting status=127 as "the program ran and failed internally". */
+  if(!realCp&&r.error&&/OHSidian:\s*child_process|内置 pandoc/.test(String(r.error.message||""))){
+    out.verdict="probe-taken-over";
+    out.human="拿不到原始 child_process（内置 pandoc 引擎已接管执行面），无法直测 execve —— 不是路径或程序的问题";
+    return out;
+  }
   out.status=(typeof r.status==="number")?r.status:null;
   out.signal=r.signal||null;
   out.errno=(r.error&&(r.error.code||String(r.error.errno)))?r.error.code||String(r.error.errno):"";
@@ -3805,7 +3839,10 @@ function ohsidianProbeExecModes(exePath,timeout){
   var res={direct:{errno:"",status:null,out:"",err:""},
     shell:{errno:"",status:null,out:"",err:""}};
   var cp;
-  try{cp=require("child_process")}catch(e){res.direct.errno="no-child_process";res.shell.errno="no-child_process";return res}
+  var realCp=ohsidianRealChildProcess();
+  cp=realCp;
+  res.surface=realCp?"real":"wrapped";
+  if(!cp){try{cp=require("child_process")}catch(e){res.direct.errno="no-child_process";res.shell.errno="no-child_process";return res}}
   try{
     var r=cp.spawnSync(exePath,["--version"],{timeout:timeout||2000,encoding:"utf8"});
     res.direct.errno=(r&&r.error&&(r.error.code||String(r.error.errno)))||"";
@@ -3837,7 +3874,7 @@ function ohsidianVerdictLabel(v){
     "exec-noexec":"架构或格式不符", "exec-txtbusy":"文件被占用", "timeout":"执行超时（再点一次检查）",
     "fs-ok":"文件层通过（未实测执行）", "fs-suspect":"文件层可疑", "stat-eacces":"连 stat 都被拒",
     "stat-error":"文件预检失败", "no-node":"渲染进程没有 fs", "no-child_process":"引擎没有 child_process",
-    "spawn-threw":"探测调用抛错", "spawn-null":"探测无结果"};
+    "spawn-threw":"探测调用抛错", "spawn-null":"探测无结果", "probe-taken-over":"内置引擎已接管执行面（无法直测）"};
   return m[v]||v||"?";
 }
 function ohsidianBuildPandocReport(){
@@ -3854,6 +3891,7 @@ function ohsidianBuildPandocReport(){
     }
   }catch(eC){}
   lines.push("");lines.push("▍外部");
+  lines.push("执行面: "+ohsidianPandocExecSurface());
   lines.push("配置: "+report.configured);
   lines.push("候选: "+cands.length);
   for(var i=0;i<cands.length;i++){
@@ -5340,9 +5378,9 @@ function ohsidianRunPluginIntegrityProbe(onClose){
           }else if(BRAT_KNOWN[bratSha]){
             add("  判定: "+BRAT_KNOWN[bratSha]);
           }else{
-            add("  判定: 非官方/未知构建（镜像站、重打包或开发版常见）。");
-            add("        若注册失败信息含 \"is not a function\"，说明这份 bundle 内部函数缺失，");
-            add("        请卸载插件后从官方市场或 GitHub Release 重装（官方 2.2.0 = 138873 B）。");
+            add("  判定: 未收录的构建（可能是较新的官方版、镜像站重打包或开发版）。");
+            add("        只有注册失败信息含 \"is not a function\" 时才指向 bundle 内部函数缺失；");
+            add("        若只是版本较新，先用即可，不必重装；确认函数缺失再从官方市场或 GitHub Release 重装（官方 2.2.0 = 138873 B）。");
           }
           add("  i18n 函数名: "+(bratTxt.indexOf("function R(")>=0?"含 function R(（官方同构）":(bratTxt.indexOf("getTranslations")>=0?"含 getTranslations 标识":"两者都没有 —— bundle 不完整")));
         }
@@ -5409,7 +5447,7 @@ function ohsidianRunPluginIntegrityProbe(onClose){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="212";
+var OHSIDIAN_PATCH_REV="213";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the

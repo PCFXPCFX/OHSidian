@@ -13,7 +13,10 @@
  *   - locates and lazily loads pandoc-service.cjs (bundled core.js + WASI shim);
  *   - hooks Module._load so every plugin's require("child_process") gets a
  *     shim that routes pandoc commands to the WASM engine (exec/execFile/spawn
- *     are supported; the sync variants fail with a clear message);
+ *     are supported; the sync variants answer only a pandoc command with a
+ *     clear "async only" error). Non-pandoc commands always fall through to the
+ *     real platform API - sync variants included (audit NF-019) - and the
+ *     original module is exposed as window.__ohsidianPandoc.realChildProcess;
  *   - patches lookpath/which so plugin preflight checks see a pandoc path;
  *   - exposes window.__ohsidianPandoc for the settings diagnostics row and the
  *     status report.
@@ -24,8 +27,8 @@
  * ========================================================================== */
 ;(function () {
   try {
-    if (window.__ohsidianPandocPatchRev === 209) return;
-    window.__ohsidianPandocPatchRev = 209;
+    if (window.__ohsidianPandocPatchRev === 213) return;
+    window.__ohsidianPandocPatchRev = 213;
     if (window.__ohsidianPandoc) return;
 
     var fs = require("fs");
@@ -419,6 +422,8 @@
       var origExec = cp.exec;
       var origExecFile = cp.execFile;
       var origSpawn = cp.spawn;
+      var origExecSync = cp.execSync;
+      var origSpawnSync = cp.spawnSync;
 
       wrapped.exec = function (command, options, callback) {
         if (typeof options === "function") { callback = options; options = {}; }
@@ -442,19 +447,31 @@
         child.__begin([file].concat(args || []), (options || {}).cwd);
         return child;
       };
-      wrapped.execSync = function (command, options) {
-        if (!isPandocCommand((shellSplit(String(command)) || [])[0])) {
-          throw new Error("OHSidian: child_process.execSync is unavailable in this sandbox");
+      /* NF-019 (audit 2026-11-22, F-1): the sync halves must NOT swallow
+         non-pandoc commands. Before this fix every plugin's execSync threw
+         "unavailable in this sandbox" and every spawnSync returned a fabricated
+         {status:127, error} - including commands that are not pandoc. The
+         renderer has full Node (the 2574d04 fix restored exactly that), so a
+         non-pandoc call has to reach the real platform API and surface the real
+         errno (EPERM/EACCES/...). Only a pandoc command is handled by the WASM
+         engine, whose async-only HTTP surface cannot answer a sync call. */
+      wrapped.execSync = function (command) {
+        var argv = [];
+        try { argv = shellSplit(String(command)); } catch (e) { argv = []; }
+        if (!isPandocCommand((argv || [])[0])) {
+          if (typeof origExecSync === "function") return origExecSync.apply(cp, arguments);
+          throw new Error("OHSidian: this engine has no child_process.execSync");
         }
         throw new Error("OHSidian 内置 pandoc（WebAssembly）只支持异步调用：请用 execFile/spawn，" +
-          "execSync 被平台异步引擎限制。");
+          "execSync 无法等待 WASM 引擎。");
       };
       wrapped.spawnSync = function (file, args, options) {
         if (!isPandocCommand(file)) {
+          if (typeof origSpawnSync === "function") return origSpawnSync.apply(cp, arguments);
           return {
             pid: 0, status: 127, signal: null,
-            error: new Error("OHSidian: child_process.spawnSync is unavailable in this sandbox"),
-            stdout: Buffer.alloc(0), stderr: Buffer.from("spawnSync unavailable\n"), output: [null, Buffer.alloc(0), Buffer.from("")]
+            error: new Error("OHSidian: this engine has no child_process.spawnSync"),
+            stdout: Buffer.alloc(0), stderr: Buffer.from(""), output: [null, Buffer.alloc(0), Buffer.from("")]
           };
         }
         var msg = "OHSidian 内置 pandoc（WebAssembly）只支持异步调用：请用 execFile/spawn，spawnSync 被平台异步引擎限制。\n";
@@ -464,6 +481,12 @@
           stdout: Buffer.alloc(0), stderr: Buffer.from(msg), output: [null, Buffer.alloc(0), Buffer.from(msg)]
         };
       };
+      /* NF-019/F-2: the original module object. The external-executable probes
+         (touch-mode.js ohsidianProbeExecutable / ohsidianProbeExecModes) must
+         measure the REAL platform verdict instead of the fake sync result;
+         without this handle they reported "能启动，但退出码 127 —— 路径没问题，
+         问题在这个程序内部" about a binary that was never executed. */
+      wrapped.__ohsidianPandocReal = cp;
       return wrapped;
     }
 
@@ -502,13 +525,14 @@
       if (!Module.__ohsidianPandocHooked) {
         Module.__ohsidianPandocHooked = true;
         var cpWrapped = null;
+        var cpReal = null;
         var lpWrapped = null;
         var whichWrapped = null;
         Module._load = function (request, parent, isMain) {
           var mod = origLoad.apply(this, arguments);
           try {
             if (request === "child_process" || request === "node:child_process") {
-              if (!cpWrapped) cpWrapped = wrapChildProcess(mod);
+              if (!cpWrapped) { cpWrapped = wrapChildProcess(mod); cpReal = mod; }
               return cpWrapped;
             }
             if (request === "lookpath") {
@@ -534,7 +558,7 @@
     }
 
     window.__ohsidianPandoc = {
-      patchRev: 209,
+      patchRev: 213,
       dir: function () { return pandocDir(); },
       version: function () { return pandocVersion(); },
       status: function () {
@@ -581,6 +605,10 @@
         }).catch(function () { return out; });
       },
       reset: function () { service = null; serviceError = null; },
+      /* NF-019/F-2: original (unwrapped) child_process module, so probes can
+         measure the real platform verdict. Null until a plugin/module first
+         required child_process through the hook. */
+      get realChildProcess() { return cpReal; },
       _wrapChildProcess: wrapChildProcess,
       _shellSplit: shellSplit,
       _isPandocCommand: isPandocCommand

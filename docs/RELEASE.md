@@ -13,6 +13,9 @@
       （2.0.1 → `2000001`）。
 - [ ] `README.md` / `README_EN.md` 的版本号、系统要求、构建命令与当前实现一致。
 - [ ] `node scripts/check-docs.cjs` 通过（相对链接无失效）。
+- [ ] 门禁结论必须抄当次实际输出（`verify-*` / `check-docs` 的末行与失败项），
+      不要凭印象写"全绿"——2026-11-22 审计发现 28 个提交都声称 check-docs 全绿，
+      实际存在 1 条存量断链，已在本轮修掉并把这条写进模板。
 - [ ] [CHANGELOG](CHANGELOG.md) 已写本次发布内容；[STYLUS](STYLUS.md) 的 `ink rev`
       与 `scripts/patches/ohsidian-ink.js` 一致。
 - [ ] `git status` 干净，没有把 `artifacts/`、`config.local.json`、`scripts/patches/ohsidian-probe.js`

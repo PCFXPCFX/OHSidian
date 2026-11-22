@@ -271,9 +271,33 @@ try {
     // rev205: built-in pandoc (WebAssembly) - renderer loader + child_process
     // shim + settings/status/command surface.
     'app built-in pandoc wasm patched in':
-      app.includes('window.__ohsidianPandocPatchRev = 209') &&
+      app.includes('window.__ohsidianPandocPatchRev = 213') &&
       app.includes('pandoc-service.cjs') &&
       app.includes('__ohsidianPandocWrapped'),
+    // rev213 / audit NF-019 (F-1): the hook used to fabricate a result for
+    // EVERY sync child_process call, so plugins lost real execSync/spawnSync
+    // (direction of the 2574d04 "restore full Node" fix) and the external-path
+    // probe reported "能启动，但退出码 127 —— 路径没问题，问题在这个程序内部"
+    // about a binary that never ran. Non-pandoc calls must reach the real API;
+    // only a pandoc sync call answers the explicit async-only error.
+    'app pandoc hook passes non-pandoc sync through':
+      app.includes('origExecSync.apply(cp, arguments)') &&
+      app.includes('origSpawnSync.apply(cp, arguments)') &&
+      !app.includes('execSync is unavailable in this sandbox'),
+    // rev213 / audit NF-019 (F-2): the probes need the unwrapped module, and
+    // the report must name the execution surface it measured.
+    'app pandoc hook exposes real child_process':
+      app.includes('cpReal = mod') && app.includes('get realChildProcess()') &&
+      app.includes('__ohsidianPandocReal'),
+    'app pandoc probes measure the real execution surface':
+      app.includes('function ohsidianRealChildProcess') &&
+      app.includes('ohsidianPandocExecSurface') &&
+      app.includes('执行面: ') &&
+      app.includes('probe-taken-over'),
+    // rev213 / audit NF-022 (F-5): an unlisted BRAT build is not evidence of a
+    // repackaged bundle - only the "is not a function" failure is.
+    'app brat fingerprint wording is non-accusatory':
+      app.includes('未收录的构建') && !app.includes('判定: 非官方/未知构建'),
     'app built-in pandoc wired to diagnostics':
       app.includes('ohsidianBuiltinPandocLabel') &&
       app.includes('function ohsidianRunPandocDiag') &&
@@ -373,6 +397,80 @@ try {
      plugin body before writing it, recover a truncated body through the
      release proxy, fall back to plaintext secretStorage). Fixtures are
      synthetic, so it needs no network and no plugin files. */
+  /* NF-020 (audit 2026-11-22 §6.2): interaction gate for the pandoc hook.
+     Each gate used to test only its own half (WASM service behaviour, marker
+     presence), so a hook that broke its NEIGHBOURS stayed green. This harness
+     evaluates the shipped patch source with a fake module system and asserts
+     the two contracts the probes depend on: non-pandoc sync calls reach the
+     real platform API, and the original module is reachable. */
+  {
+    const patchPath = path.join(__dirname, 'patches/pandoc-wasm.js');
+    const hookChecks = {};
+    let harnessError = '';
+    try {
+      const patchSrc = fs.readFileSync(patchPath, 'utf8');
+      const calls = [];
+      const realCp = {
+        exec: function () { calls.push('exec'); return 'orig-exec'; },
+        execFile: function () { calls.push('execFile'); return 'orig-execFile'; },
+        spawn: function () { calls.push('spawn'); return 'orig-spawn'; },
+        execSync: function (cmd) { calls.push('execSync:' + cmd); return 'orig-execSync:' + cmd; },
+        spawnSync: function (file) {
+          calls.push('spawnSync:' + file);
+          return { pid: 1, status: 0, signal: null, stdout: 'orig-spawnSync', stderr: '', output: [null, '', ''] };
+        },
+      };
+      const fakeModule = {
+        _load: function (request) { return request === 'child_process' ? realCp : {}; },
+      };
+      const fakeWindow = {};
+      const sandbox = {
+        window: fakeWindow,
+        Buffer,
+        console: { log() { }, warn() { }, error() { } },
+        setTimeout,
+        clearTimeout,
+        process: { platform: 'linux', execPath: '/usr/bin/node', cwd: () => '/tmp', versions: {} },
+        WebAssembly: undefined,
+        require: (name) => {
+          if (name === 'fs') return { readFileSync() { throw new Error('no fs in harness'); }, existsSync() { return false; } };
+          if (name === 'path') return path;
+          if (name === 'events') return require('events');
+          if (name === 'module') return fakeModule;
+          return {};
+        },
+      };
+      vm.runInNewContext(patchSrc, sandbox, { filename: 'pandoc-wasm.js' });
+      const wrapped = fakeModule._load('child_process');
+      hookChecks['hook wraps child_process'] = wrapped !== realCp && wrapped.__ohsidianPandocWrapped === true;
+      hookChecks['hook exposes the real module'] = wrapped.__ohsidianPandocReal === realCp &&
+        !!fakeWindow.__ohsidianPandoc && fakeWindow.__ohsidianPandoc.realChildProcess === realCp;
+      hookChecks['non-pandoc execSync passes through'] =
+        wrapped.execSync('git status') === 'orig-execSync:git status';
+      hookChecks['non-pandoc spawnSync passes through'] = (() => {
+        const r = wrapped.spawnSync('git', ['status']);
+        return !!r && r.stdout === 'orig-spawnSync';
+      })();
+      hookChecks['non-pandoc exec/spawn still delegate'] =
+        wrapped.exec('/bin/ls') === 'orig-exec' && wrapped.spawn('/bin/ls') === 'orig-spawn';
+      const syncErr = (() => { try { wrapped.execSync('pandoc --version'); return ''; } catch (e) { return String((e && e.message) || e); } })();
+      hookChecks['pandoc execSync stays async-only'] = /只支持异步/.test(syncErr);
+      const ps = (() => { try { return wrapped.spawnSync('pandoc', ['--version']); } catch (e) { return null; } })();
+      hookChecks['pandoc spawnSync is a clear async-only result'] =
+        !!ps && ps.status === 127 && /只支持异步/.test(String((ps.error && ps.error.message) || ''));
+    } catch (e) {
+      harnessError = String((e && e.stack) || e);
+    }
+    if (harnessError) { ok = false; console.log('  FAIL pandoc hook harness threw: ' + harnessError); }
+    for (const [k, v] of Object.entries(hookChecks)) {
+      if (!v) ok = false;
+      console.log((v ? '  OK  ' : '  FAIL') + ' ' + k);
+    }
+    if (Object.keys(hookChecks).length < 7) {
+      ok = false;
+      console.log('  FAIL pandoc hook harness did not run every assertion (' + Object.keys(hookChecks).length + '/7)');
+    }
+  }
   const installGate = spawnSync(process.execPath, [path.join(__dirname, 'verify-plugin-install.cjs')], {
     stdio: 'inherit', cwd: __dirname, env: { ...process.env, OHSIDIAN_ASAR_PATH: asarPath },
   });

@@ -45,8 +45,18 @@ async function main() {
   const wasmGz = fs.readFileSync(path.join(RES, 'pandoc.wasm.gz'));
   check('wasm.gz is plausible (10-40 MB)', wasmGz.length > 10 * 1048576 && wasmGz.length < 40 * 1048576,
     (wasmGz.length / 1048576).toFixed(1) + ' MB');
-  if (lock && lock['outputs-wasm-gz'] && lock['outputs-wasm-gz'].sha256) {
-    check('wasm.gz matches lock sha256', sha256(wasmGz) === lock['outputs-wasm-gz'].sha256);
+  /* NF-021 (audit 2026-11-22 §4.3): the deflate stream is not reproducible
+     across zlib builds, so the gate pins the GUNZIPPED wasm (what the lock is
+     really protecting) instead of the .gz bytes. */
+  if (lock && lock['outputs-wasm-raw'] && lock['outputs-wasm-raw'].sha256) {
+    let raw = null;
+    try { raw = require('zlib').gunzipSync(wasmGz); } catch (e) { raw = null; }
+    check('wasm.gz gunzips', !!raw);
+    if (raw) {
+      check('pandoc.wasm (gunzipped) matches lock sha256',
+        sha256(raw) === lock['outputs-wasm-raw'].sha256,
+        (raw.length / 1048576).toFixed(1) + ' MB');
+    }
   }
 
   const hostSrc = fs.readFileSync(path.join(RES, 'pandoc-host.cjs'));

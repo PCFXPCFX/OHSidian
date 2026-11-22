@@ -1,5 +1,5 @@
 {
-  "serviceSchema": 1,
+  "serviceSchema": 2,
   "pandocWasm": {
     "version": "1.1.0",
     "sha256": "693bf76c2365254378500a2370a5995ebeb5f859248784ea827eb687878614a2"
@@ -8,8 +8,11 @@
     "version": "0.4.2",
     "sha256": "9c0281520d0e99f027ec7c1c79b4036c0f8168ed9bf98aba19db4737a1333782"
   },
+  "outputs-wasm-raw": {
+    "sha256": "b47c9de52b5b45f103c2dac6fea52591aeafe3dd6cafed13331b67575233a2ff",
+    "bytes": 58580800
+  },
   "outputs-wasm-gz": {
-    "sha256": "8b64845e91ec0620965997ba88cb62647e6a1b15174f13ff01587c346b304956",
     "bytes": 16273254
   },
   "outputs-service": {

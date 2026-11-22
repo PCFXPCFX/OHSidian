@@ -483,9 +483,9 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 
 | 部件 | 说明 |
 | --- | --- |
-| `scripts/build-pandoc-wasm.mjs` | 按 `scripts/pandoc-wasm.lock.json` 下载 npm 包并校验 sha256；生成 `pandoc.wasm.gz`（55.9 MB → 15.5 MB）+ 打包后的 `pandoc-service.cjs`（core.js + WASI shim + CLI 适配，≈83 KB）；同时写出 GPL/来源说明。 |
+| `scripts/build-pandoc-wasm.mjs` | 按 `scripts/pandoc-wasm.lock.json` 校验下载包与产物 sha256；生成 `pandoc.wasm.gz`（55.9 MB → 15.5 MB）+ 打包后的 `pandoc-service.cjs`（core.js + WASI shim + CLI 适配，≈83 KB）；同时写出 GPL/来源说明。wasm 产物以**解压后**的 sha256 为准（gz 压缩流跨 zlib 版本不可复现，见 rev213）。 |
 | `scripts/pandoc-wasm/service-core.mjs` | CLI 适配层：`shellSplit`/`parseArgs`、输入与资源读取、`--reference-doc`/`--template`/`--bibliography`/`--csl`/Lua filter/image 收集、`--version` 快速应答、PDF/可执行 filter 的明确拒绝；`createService(createPandocInstance,{wasmGzPath})` 懒加载 wasm。 |
-| `scripts/patches/pandoc-wasm.js` | 渲染层补丁：`Module._load` hook，把插件的 `require("child_process")` 换成 shim（`exec`/`execFile`/`spawn` 接管 pandoc；`execSync`/`spawnSync` 明确报错）、`lookpath`/`which` 返回占位路径；定位 `pandocDir`（ArkTS 发布）并暴露 `window.__ohsidianPandoc`。 |
+| `scripts/patches/pandoc-wasm.js` | 渲染层补丁：`Module._load` hook，把插件的 `require("child_process")` 换成 shim（`exec`/`execFile`/`spawn` 接管 pandoc；pandoc 的 `execSync`/`spawnSync` 明确报"只支持异步"，**非 pandoc 的同步调用一律透传真实 API**）、`lookpath`/`which` 返回占位路径；暴露 `window.__ohsidianPandoc.realChildProcess`（原始模块）；定位 `pandocDir`（ArkTS 发布）。 |
 | `WebAbility.publishPandocDir()` | 把 `resourceDir + '/resources/resfile/pandoc'` 写入模式文件，渲染层据此读资源。 |
 | 设置/诊断 | 设置「Pandoc」分区：版本/状态/位置/宿主 只读信息 + 外部路径输入（默认内置路径）+ 自检按钮；诊断分区另有「Pandoc 诊断」行。 |
 
@@ -497,7 +497,7 @@ HAP 增大 ≈16 MB（原始 120.5 MB → 137.7 MB）。
 1. **不能输出 PDF**（Pandoc 的 PDF 需要外部 LaTeX/Typst/xelatex；拦截层返回明确错误并指向内置 PDF 导出）；
 2. 沙箱内不联网：远程图片/URL 资源需由调用方先本地化（本地图片会被自动收集传入）；
 3. 只支持 Lua filter，可执行 filter（`--filter` 指向脚本/程序）会被拒绝；
-4. `execSync`/`spawnSync` 无法在异步 WASM 引擎上同步阻塞，明确报错（主流插件用异步 `exec`/`spawn`）；
+4. **pandoc** 的 `execSync`/`spawnSync` 无法在异步 WASM 引擎上同步阻塞，明确报"只支持异步"（主流插件用异步 `exec`/`spawn`）；**非 pandoc** 的同步调用不受影响，照常执行（rev213 / NF-019）；
 5. 大文档在单线程 WASM 中较慢（≈3 s/300 KB），可接受；内存峰值 +100–200 MB。
 
 **合规**：pandoc-wasm/pandoc.wasm 为 GPL-2.0-or-later；HAP 内附 `LICENSE-pandoc-wasm.txt` 与
@@ -539,6 +539,25 @@ HAP 增大 ≈16 MB（原始 120.5 MB → 137.7 MB）。
 **rev209**：utility 进程 cwd 为 `/`，自检写临时文件 EACCES → 主进程随请求传 `tmpDir=app.getPath("temp")`，
 host 用该目录创建服务，自检文件名带 pid；成功后自检三项应全 OK。
 
-**门禁**：`node scripts/build-pandoc-wasm.mjs --check`（lock sha256）与 `node scripts/verify-pandoc-wasm.cjs`
-（真实转换：md→html/docx、reference-doc、Lua filter、本地图片、PDF/exec-filter 拒绝、`--version` 延迟）；
-`verify-asar` 另有 2 条标记（patch 已内置、诊断已接线）。
+**rev213 修正（新增更改审计 NF-019/NF-020/NF-021）**：
+1. **非 pandoc 的同步 child_process 不再被伪造**：rev205 的 hook 曾对所有命令伪造 `execSync`/`spawnSync`
+   结果（`execSync` 抛"unavailable in this sandbox"，`spawnSync` 返回 `status:127`），与 2574d04"还给插件
+   完整 Node"的方向冲突（HB-2/3/8/11 的探针全靠真实 errno）。现在只有 pandoc 走 WASM，其余（含同步）一律
+   透传真实模块，平台语义（EPERM/EACCES/…）照常透出。
+2. **外部路径探针拿回真实 child_process**：hook 先于 touch-mode.js 安装，设置页两个探针过去拿到的是伪造
+   shim，于是对**从未执行过**的路径输出"能启动，但退出码 127 —— 路径没问题，问题在这个程序内部"（正是 HB-2
+   消灭过的反向诊断）。现在 hook 暴露 `window.__ohsidianPandoc.realChildProcess`，探针优先使用；报告首行写
+   「执行面: 原始 child_process（直测 execve）/ 内置引擎已接管」，拿不到原始模块时判 `probe-taken-over`，
+   不再把"没测到"说成"程序内部问题"。
+3. **门禁补"补丁交互"维度**：`verify-asar` 增加 vm 内的 hook 行为门禁（非 pandoc 的 execSync/spawnSync/exec/
+   spawn 透传、pandoc 同步调用的明确错误、原始模块两处可达，共 7 项）。单点门禁全绿、交互回归不可见正是
+   rev196 P0 的同类盲区。
+4. **锁改钉原始 wasm**：gzip 输出跨 Node/zlib 版本不可复现（同长度不同 sha256），旧锁钉 `.gz` 会让 Node 24
+   本地构建必红。现在锁记 `outputs-wasm-raw`（解压后 sha256 + 字节数），门禁 gunzip 后比对，gz 只记大小；
+   顺带修掉下载包校验键名不匹配（`pandoc-wasm`/`wasi-shim` vs 锁里的 `pandocWasm`/`wasiShim`）导致 tgz
+   从未被真正校验的问题。
+
+**门禁**：`node scripts/build-pandoc-wasm.mjs --check`（lock：下载包 sha256 + **解压后 wasm** sha256）与
+`node scripts/verify-pandoc-wasm.cjs`（真实转换：md→html/docx、reference-doc、Lua filter、本地图片、
+PDF/exec-filter 拒绝、`--version` 延迟；wasm 锁校验走 gunzip）；`verify-asar` 另有内置标记与 7 项 hook
+交互行为门禁（rev213）。

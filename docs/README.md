@@ -37,7 +37,6 @@
 | 文档 | 说明 |
 |---|---|
 | [CHANGES-2026-09](CHANGES-2026-09.md) / [CHANGES-2026-10](CHANGES-2026-10.md) | 逐轮开发日志，含真机取证；只用于追溯 |
-| [BUG-BACKLOG](BUG-BACKLOG.md) | 使用中撞到的 bug 登记与状态 |
 | [archive/](archive/README.md) | 审计、性能、体积等已完成的历史报告 |
 
 ## 维护约定

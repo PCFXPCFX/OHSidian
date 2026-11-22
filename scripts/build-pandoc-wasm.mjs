@@ -16,6 +16,12 @@
  * - versions and hashes are pinned in scripts/pandoc-wasm.lock.json, and the
  *   script refuses to build if a tarball or output does not match the lock
  *   (use --update-lock after an intentional upgrade).
+ * - the wasm output is pinned by the hash of the UNCOMPRESSED wasm plus its
+ *   byte count, checked by gunzipping the shipped asset (audit NF-021): zlib's
+ *   deflate stream is not reproducible across Node/zlib builds, so pinning the
+ *   .gz bytes made a Node 24 build fail on a perfectly good asset. The gz size
+ *   is still recorded (it has been stable in practice) but its sha256 is not a
+ *   gate.
  *
  * Usage:
  *   node scripts/build-pandoc-wasm.mjs            # build + verify against lock
@@ -122,6 +128,34 @@ function checkHash(kind, buf, lock) {
   }
 }
 
+/* NF-021 (audit 2026-11-22 §4.3): the compressed wasm is NOT reproducible
+   across zlib builds (same input, same length, different deflate bytes), so the
+   gate compares the gunzipped wasm instead - that is the actual third-party
+   content the lock is there to protect. */
+function checkWasmRaw(wasmGz, lock) {
+  const entry = lock && lock['outputs-wasm-raw'];
+  if (!entry || !entry.sha256) return 0;
+  let raw;
+  try {
+    raw = zlib.gunzipSync(wasmGz);
+  } catch (e) {
+    fail('pandoc.wasm.gz cannot be gunzipped: ' + (e && e.message ? e.message : e));
+  }
+  const actual = sha256(raw);
+  if (actual !== entry.sha256) {
+    fail('pandoc.wasm (gunzipped) sha256 mismatch: expected ' + entry.sha256 + ', got ' + actual);
+  }
+  if (entry.bytes && raw.length !== entry.bytes) {
+    fail('pandoc.wasm (gunzipped) size mismatch: expected ' + entry.bytes + ', got ' + raw.length);
+  }
+  const gzEntry = lock && lock['outputs-wasm-gz'];
+  if (gzEntry && gzEntry.bytes && wasmGz.length !== gzEntry.bytes) {
+    log('note: pandoc.wasm.gz size differs from the recorded ' + gzEntry.bytes + ' B ' +
+      '(zlib output varies; the gunzipped wasm matches the lock)');
+  }
+  return raw.length;
+}
+
 function writeSourceNotice() {
   return [
     'Pandoc (WebAssembly build) - third-party component bundled with OHSidian',
@@ -155,20 +189,22 @@ async function main() {
       if (!fs.existsSync(p)) fail('missing built asset ' + p + ' (run npm run build:pandoc-wasm)');
     }
     const wasmGz = fs.readFileSync(path.join(RES, 'pandoc.wasm.gz'));
-    checkHash('outputs-wasm-gz', wasmGz, lock);
+    const rawBytes = checkWasmRaw(wasmGz, lock);
+    if (!rawBytes) fail('lock has no outputs-wasm-raw entry (run --update-lock after upgrading)');
     const svc = fs.readFileSync(path.join(RES, 'pandoc-service.cjs'));
     checkHash('outputs-service', svc, lock);
     const host = fs.readFileSync(path.join(RES, 'pandoc-host.cjs'));
     checkHash('outputs-host', host, lock);
-    log('check OK: wasm.gz ' + (wasmGz.length / 1048576).toFixed(1) + ' MB, service ' +
+    log('check OK: wasm ' + (rawBytes / 1048576).toFixed(1) + ' MB raw (' +
+      (wasmGz.length / 1048576).toFixed(1) + ' MB gz), service ' +
       (svc.length / 1024).toFixed(0) + ' KB');
     return;
   }
 
   const wasmTap = await download(PANDOC_WASM);
   const shimTap = await download(WASI_SHIM);
-  checkHash('pandoc-wasm', wasmTap, lock);
-  checkHash('wasi-shim', shimTap, lock);
+  checkHash('pandocWasm', wasmTap, lock);
+  checkHash('wasiShim', shimTap, lock);
 
   const wasmEntry = untar(zlib.gunzipSync(wasmTap)).find((f) => f.name === 'package/src/pandoc.wasm');
   if (!wasmEntry) fail('pandoc.wasm not found inside the pandoc-wasm tarball');
@@ -225,17 +261,19 @@ async function main() {
 
   if (optUpdateLock || !lock) {
     const next = {
-      serviceSchema: 1,
+      serviceSchema: 2,
       pandocWasm: { version: PANDOC_WASM.version, sha256: sha256(wasmTap) },
       wasiShim: { version: WASI_SHIM.version, sha256: sha256(shimTap) },
-      'outputs-wasm-gz': { sha256: sha256(wasmGz), bytes: wasmGz.length },
+      'outputs-wasm-raw': { sha256: sha256(wasmRaw), bytes: wasmRaw.length },
+      /* size only: the gzip stream itself is not reproducible (NF-021) */
+      'outputs-wasm-gz': { bytes: wasmGz.length },
       'outputs-service': { sha256: sha256(service), bytes: service.length },
       'outputs-host': { sha256: sha256(host), bytes: host.length },
     };
     fs.writeFileSync(LOCK, JSON.stringify(next, null, 2) + '\n', 'utf8');
     log('lock written: ' + path.relative(ROOT, LOCK));
   } else {
-    checkHash('outputs-wasm-gz', wasmGz, lock);
+    checkWasmRaw(wasmGz, lock);
     checkHash('outputs-service', service, lock);
     checkHash('outputs-host', host, lock);
     log('outputs match scripts/pandoc-wasm.lock.json');
