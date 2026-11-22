@@ -137,6 +137,9 @@ function status() {
     if (!hasSandbox || !hasUserFile) {
       console.log('  => 该 profile 重签出的包只会是 sandbox=strong：先用 IDE/AGC 把缺的 ACL 加进');
       console.log('     profile 再重新下载，然后重签，否则清单改了也不生效。');
+      console.log('     注意：CUSTOM_SANDBOX 不在 DevEco 自动签名支持的 ACL 清单里');
+      console.log('     （READ_WRITE_USER_FILE 在），自动签名会报 Unsupported restricted ACL');
+      console.log('     permission；需手动签名 + 在 AGC 申请受限 ACL（按特殊场景审核，可能被拒）。');
     }
   }
 

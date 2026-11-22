@@ -145,9 +145,19 @@
 
 1. `electron/src/main/module.json5` 的 `requestPermissions` 声明两条权限 →
    `node scripts/weak-sandbox.mjs apply`；
-2. 签名 profile 的 `acls` 里含同两名（DevEco 26.0.0+ 在 IDE 里申请；
-   老工具链改 `sdk/default/openharmony/toolchains/lib/UnsgnedDebugProfileTemplate.json`
-   后重签）；
+2. 签名 profile 的 `acls` 里含同两名——**这两条的获取难度不同**（2026-11 实测 + 官方文档）：
+   - `READ_WRITE_USER_FILE`：在 DevEco **自动签名**支持的 ACL 清单里（5.0.3 起）。在
+     `module.json5` 声明后重新自动签名，DevEco 会向 AGC 换一个含它的 Profile；
+   - `CUSTOM_SANDBOX`：**不在自动签名支持的 ACL 清单里**，自动签名会报
+     `Unsupported restricted ACL permission exist in the configuration`。必须走**手动签名**：
+     `Build → Generate Key and CSR`（生成 .p12/.csr）→ 在 AGC 申请**调试证书**（.cer）与
+     **调试 Profile**（.p7b，申请 ACL 时勾 `CUSTOM_SANDBOX`）→ `File → Project Structure →
+     Signing Configs` 取消自动签名，填 p12/cer/p7b；且 `CUSTOM_SANDBOX` 属于**受限开放权限**，
+     AGC 要按“特殊场景”审核（申请入口：AGC → 证书、APP ID 和 Profile → ACL 权限申请），
+     **普通应用（例如仅为运行 pandoc）不保证能批**；
+   - 离线改 `.p7b` 再自签不可行：profile 由 AGC 签名，改一个字节验签即失败；
+   - 因此**没有内部受限权限渠道时，弱沙箱事实上不可得**——发行包只能保持强沙箱，
+     pandoc 执行需求应改走“随包 HNP / 服务端导出”路线（§五开头的备选）。
 3. 重新构建并**重签** HAP；
 4. 设备 API ≥ 18；
 5. 验证（§5.5）通过。
