@@ -366,6 +366,48 @@ if (helperSrc) {
       check("diagnostic: huge plugin size-only (no synchronous parse)", /只报大小/.test(text));
       check("diagnostic: verdict counts both failures", /发现 2 个无法解析/.test(text));
     })
+    .then(async () => {
+      /* ---- rev201: plugin error recorder (attribution + persistence) ---- */
+      const recStart = app.indexOf('var OHSIDIAN_PLUGIN_ERR_MAX=');
+      const recEnd = recStart >= 0 ? app.indexOf('/* NF-015 / NF-018 on-device adjudication', recStart) : -1;
+      check('plugin error recorder present in app.js', recStart >= 0 && recEnd > recStart);
+      if (recStart < 0 || recEnd <= recStart) return;
+      const recSrc = app.slice(recStart, recEnd);
+      const os = require("os");
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ohsidian-recerr-"));
+      const Notice = function () {};
+      const api = new Function("require", "readMode", "dataDir", "Notice", "console", "setTimeout", "clearTimeout",
+        recSrc + "\nreturn {rec:ohsidianRecordConsoleError, ensure:ohsidianEnsurePluginErrors, clear:ohsidianClearPluginErrors, path:ohsidianPluginErrorsPath, file:ohsidianPluginErrorsPath};")(
+        require,
+        () => ({}),
+        () => tmpDir,
+        Notice,
+        { error: () => {}, log: () => {}, warn: () => {} },
+        setTimeout,
+        clearTimeout);
+      const stackErr = new Error("Cannot read properties of undefined");
+      stackErr.stack = "TypeError: Cannot read properties of undefined\n    at je.getSettingDefinitions (plugin:obsidian42-brat:85:6305)";
+      api.rec([stackErr]);
+      api.rec([stackErr]); // consecutive duplicate must be collapsed
+      api.rec(["Plugin failure: nutstore-sync", new Error("SyntaxError: Unexpected token")]);
+      api.rec(["OHSidian diagnostic without attribution", { message: "x" }]);
+      const recList = api.ensure();
+      const bratEntry = recList.find((e) => e.plugin === 'obsidian42-brat');
+      check('recorder attributes plugin errors from the sourceURL stack',
+        !!bratEntry && bratEntry.source && bratEntry.source.line === 85 && bratEntry.source.col === 6305);
+      check('recorder attributes kernel "Plugin failure:" lines',
+        recList.some((e) => e.plugin === 'nutstore-sync'));
+      check('recorder ignores errors without plugin attribution',
+        !recList.some((e) => (e.line || '').indexOf('diagnostic without attribution') >= 0));
+      check('recorder dedupes consecutive identical errors',
+        !!bratEntry && bratEntry.count >= 2);
+      await new Promise((r) => setTimeout(r, 900));
+      check('recorder persists plugin-errors.json', fs.existsSync(api.path()) &&
+        JSON.parse(fs.readFileSync(api.path(), "utf8")).length >= 2);
+      api.clear();
+      check('clear command removes the records file', !fs.existsSync(api.path()) && api.ensure().length === 0);
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) {}
+    })
     .then(() => {
       console.log(failures ? 'PLUGIN-INSTALL VERIFY: FAILURES' : 'PLUGIN-INSTALL VERIFY: OK');
       process.exit(failures ? 1 : 0);

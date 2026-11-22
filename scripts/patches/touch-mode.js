@@ -78,6 +78,7 @@ if(consoleCaptureMode!=="off"){
     var orig=console[m];
     console[m]=function(){
       try{if(consoleForward&&(consoleCaptureMode==="all"||m==="error"))consoleForward(m,Array.prototype.slice.call(arguments))}catch(eF){}
+      if(m==="error"){try{ohsidianRecordConsoleError(Array.prototype.slice.call(arguments))}catch(eR){}}
       return orig.apply(console,arguments);
     };
   }catch(e){}
@@ -85,12 +86,14 @@ if(consoleCaptureMode!=="off"){
 try{
   window.addEventListener("error",function(ev){
     try{if(consoleForward)consoleForward("error",["window.onerror: "+(ev.message||"")+" @"+(ev.filename||"")+":"+(ev.lineno||0)])}catch(e){}
+    try{ohsidianRecordConsoleError([ev&&ev.error?ev.error:((ev&&ev.message)||"window.onerror")])}catch(eR){}
   },true);
   window.addEventListener("unhandledrejection",function(ev){
     try{
       var r=ev&&ev.reason;
       if(consoleForward)consoleForward("error",["unhandledrejection: "+((r&&(r.stack||r.message))||String(r))]);
     }catch(e){}
+    try{ohsidianRecordConsoleError([r||"unhandledrejection"])}catch(eR2){}
   },true);
 }catch(e){}
 /* Keep the renderer's view of the Electron major consistent with the main
@@ -4034,8 +4037,9 @@ function ohsidianSettingsRows(root){
     }
     /* NF-015 / NF-018 on-device adjudication: same copyable report the command
        palette opens (ohsidian-diag-plugins), also reachable from 设置 → 诊断. */
-    var pluginCtl=itemEl(diag,"插件完整性与安全存储",
-      "检查已安装插件的 main.js 是否完整（与内核加载时同一解析门槛）以及 secretStorage 是否可用（BRAT 类插件依赖），报告可一键复制。只读。");
+    var pluginCtl=itemEl(diag,"插件排查（清单 / 错误 / 日志）",
+      "一次性列出：每个插件的文件完整性、启用/加载状态、设置页是否注册、最近记录到的插件错误（含错误栈）、secretStorage 状态、渲染层日志尾部。只读，报告可一键复制。"+
+      "插件出问题时先跑这个，把报告复制出来即可发去排查。");
     if(pluginCtl){
       var pluginBtn=document.createElement("button");
       pluginBtn.textContent="检查";
@@ -4527,6 +4531,123 @@ function ohsidianScheduleSettingsTab(){
      after it; the settings-open hook retries again on every open */
   setTimeout(function(){try{ohsidianRepairPluginSettingTabs()}catch(e){}},1500);
 }
+/* ---------------------------------------------------------------------------
+   rev 201: generic plugin-troubleshooting data. Any renderer error that can be
+   attributed to a plugin is recorded here, deduped, and persisted next to the
+   console log (<Documents|userData>/OHSidian/plugin-errors.json) so the next
+   session can still show what happened. Attribution comes from the error stack
+   sourceURL (`plugin:<id>:<line>:<col>` in every evaluated plugin module), the
+   kernel's "Plugin failure: <id>" line, and our own settings-tab registration
+   diagnostics. Recording is independent of the console capture mode: it is a
+   small rolling list (60 entries), not a full transcript. */
+var OHSIDIAN_PLUGIN_ERR_MAX=60;
+var __ohsidianPluginErrors=null;
+var __ohsidianPluginErrSession=Date.now();
+var __ohsidianPluginErrTimer=0;
+var __ohsidianPluginErrSrcRe=/plugin:([^:\s()"]+):(\d+):(\d+)/;
+function ohsidianSupportDir(){
+  try{
+    var np=require("path");
+    if(typeof readMode==="function"){
+      var cfg=readMode()||{};
+      if(typeof cfg.documentsDir==="string"&&cfg.documentsDir&&cfg.documentsDirGranted!==false){
+        return np.join(cfg.documentsDir,"OHSidian");
+      }
+    }
+    if(typeof dataDir==="function"){var ud=dataDir();if(ud)return np.join(ud,"OHSidian")}
+  }catch(e){}
+  return null;
+}
+function ohsidianPluginErrorsPath(){
+  var base=ohsidianSupportDir();
+  if(!base)return null;
+  try{return require("path").join(base,"plugin-errors.json")}catch(e){return null}
+}
+function ohsidianEnsurePluginErrors(){
+  if(__ohsidianPluginErrors)return __ohsidianPluginErrors;
+  var arr=[];
+  try{
+    var p=ohsidianPluginErrorsPath();
+    if(p&&require("fs").existsSync(p)){
+      var j=JSON.parse(require("fs").readFileSync(p,"utf8"));
+      if(Array.isArray(j))arr=j.slice(-OHSIDIAN_PLUGIN_ERR_MAX);
+    }
+  }catch(eLoad){}
+  __ohsidianPluginErrors=arr;
+  return arr;
+}
+function ohsidianPersistPluginErrors(){
+  try{clearTimeout(__ohsidianPluginErrTimer)}catch(e){
+  }
+  __ohsidianPluginErrTimer=setTimeout(function(){
+    try{
+      var p=ohsidianPluginErrorsPath();if(!p)return;
+      var np=require("path"),fsP=require("fs");
+      try{fsP.mkdirSync(np.dirname(p),{recursive:true})}catch(eMk){}
+      fsP.writeFileSync(p,JSON.stringify(ohsidianEnsurePluginErrors().slice(-OHSIDIAN_PLUGIN_ERR_MAX)),"utf8");
+    }catch(eP){}
+  },800);
+}
+function ohsidianRecordConsoleError(args){
+  try{
+    var arr=ohsidianEnsurePluginErrors();
+    var plugin=null,source=null,stack="",msg="";
+    for(var i=0;i<args.length;i++){
+      var a=args[i];
+      if(a&&typeof a.stack==="string"&&a.stack&&!stack)stack=a.stack;
+      if(typeof a!=="string")continue;
+      if(!msg)msg=a;
+      var mFail=a.match(/Plugin failure: ([^\s]+)/);
+      if(mFail&&!plugin)plugin=mFail[1];
+      var mReg=a.match(/\[OHSidian\] plugin setting tab (?:re-)?registration failed: ([^\s]+)/);
+      if(mReg&&!plugin)plugin=mReg[1];
+      var mSrc=__ohsidianPluginErrSrcRe.exec(a);
+      if(mSrc&&!plugin){plugin=mSrc[1];source={line:+mSrc[2],col:+mSrc[3]}}
+    }
+    if(!plugin&&stack){
+      var mStack=__ohsidianPluginErrSrcRe.exec(stack);
+      if(mStack){plugin=mStack[1];source={line:+mStack[2],col:+mStack[3]}}
+    }
+    if(!plugin&&!stack)return;
+    if(plugin){try{plugin=decodeURIComponent(plugin)}catch(eDec){}}
+    if(!msg){
+      for(var k=0;k<args.length;k++){
+        var b=args[k];
+        if(b&&typeof b.message==="string"){msg=b.message;break}
+        if(typeof b==="string"){msg=b;break}
+      }
+    }
+    var firstLine=String(msg||"").split("\n")[0].slice(0,300);
+    var now=Date.now();
+    var last=arr.length?arr[arr.length-1]:null;
+    if(last&&last.plugin===plugin&&last.line===firstLine){
+      last.count=(last.count||1)+1;
+      last.t=now;
+      ohsidianPersistPluginErrors();
+      return;
+    }
+    arr.push({
+      t:now,
+      session:__ohsidianPluginErrSession,
+      plugin:plugin||"(unknown)",
+      line:firstLine,
+      msg:String(msg||"").slice(0,800),
+      stack:String(stack||"").split("\n").slice(0,8).join("\n").slice(0,3000),
+      source:source
+    });
+    while(arr.length>OHSIDIAN_PLUGIN_ERR_MAX)arr.shift();
+    ohsidianPersistPluginErrors();
+  }catch(eRec){}
+}
+function ohsidianClearPluginErrors(){
+  __ohsidianPluginErrors=[];
+  try{
+    var p=ohsidianPluginErrorsPath();
+    if(p)require("fs").unlinkSync(p);
+  }catch(eDel){}
+  try{new Notice("OHSidian: 插件错误记录已清空")}catch(eN){}
+}
+
 /* NF-015 / NF-018 on-device adjudication (report 2026-11-22 §五). The console
    probes in that report are impossible to type on a tablet, so the two decisive
    checks run here and land in the copyable report modal:
@@ -4545,7 +4666,7 @@ function ohsidianRunPluginIntegrityProbe(){
   var L=[];
   var add=function(s){L.push(s)};
   var show=function(){
-    try{ohsidianShowReportModal("OHSidian 诊断: 插件完整性与安全存储",L)}catch(eShow){}
+    try{ohsidianShowReportModal("OHSidian 诊断: 插件排查（清单 / 错误 / 日志）",L)}catch(eShow){}
   };
   /* rev198: the renderer error itself lives in <Documents|userData>/OHSidian/
      console.log (NF-016 writes error lines by default). Reading its tail here
@@ -4568,12 +4689,28 @@ function ohsidianRunPluginIntegrityProbe(){
         return;
       }
       var linesL=fsL.readFileSync(logPath,"utf8").split(/\r?\n/);
-      var tailL=linesL.slice(-41).filter(function(l){return l.trim()!==""});
+      var errLines=linesL.filter(function(l){
+        return /\[OHSidian:web\]\[error\]|Plugin failure|plugin:/.test(l);
+      });
+      var tailL=(errLines.length?errLines:linesL).slice(-41).filter(function(l){return l.trim()!==""});
+      add("  源文件共 "+linesL.length+" 行"+(errLines.length?("，其中错误/插件相关 "+errLines.length+" 行"):"")+"; 下面最多 40 行");
       if(!tailL.length)add("  (文件为空)");
       for(var li=0;li<tailL.length;li++)add("  "+tailL[li]);
     }catch(eLogTail){
       add("  读取失败: "+String((eLogTail&&eLogTail.message)||eLogTail));
     }
+    try{
+      add("");
+      add("▍支持文件");
+      var supportDir="(不可用)";
+      try{if(typeof ohsidianSupportDir==="function")supportDir=ohsidianSupportDir()||"(不可用)"}catch(eSD){}
+      var supportLog=supportDir;
+      try{if(supportDir!=="(不可用)")supportLog=require("path").join(supportDir,"console.log")}catch(eSL){}
+      var errFilePath="(不可用)";
+      try{if(typeof ohsidianPluginErrorsPath==="function")errFilePath=ohsidianPluginErrorsPath()||"(不可用)"}catch(eEP){}
+      add("  console.log: "+supportLog);
+      add("  plugin-errors.json: "+errFilePath);
+    }catch(eSupport){}
   };
   try{
     add("OHSidian 补丁 "+OHSIDIAN_PATCH_REV+" · "+new Date().toISOString());
@@ -4635,8 +4772,33 @@ function ohsidianRunPluginIntegrityProbe(){
     }else{
       add("  设置页自愈: 没有需要补注册的插件设置页");
     }
+    /* rev201: recorded plugin-attributed errors (current + previous session). */
     add("");
-    add("▍插件文件完整性（.obsidian/plugins/<id>/main.js）");
+    add("▍插件错误（最近 12 条）");
+    var errList=[];
+    try{errList=ohsidianEnsurePluginErrors().slice(-12)}catch(eErrList){}
+    if(!errList.length){
+      add("  (没有记录到插件错误)");
+    }else{
+      for(var eri=0;eri<errList.length;eri++){
+        var ent=errList[eri];
+        var when="?";
+        try{when=new Date(ent.t).toISOString().slice(11,19)}catch(eWhen){}
+        var prev=(ent.session!==__ohsidianPluginErrSession)?" (上次会话)":"";
+        add("  ["+when+"] "+ent.plugin+prev+" · "+(ent.line||"(无消息)")+
+          ((ent.count&&ent.count>1)?(" ×"+ent.count):"")+
+          (ent.source?(" · 第 "+ent.source.line+" 行 / 第 "+ent.source.col+" 列"):""));
+        if(ent.stack){
+          var stk=String(ent.stack).split("\n").slice(0,4);
+          for(var ski=0;ski<stk.length;ski++)add("      "+stk[ski]);
+        }
+      }
+    }
+    var recordFileTxt="(不可用)";
+    try{if(typeof ohsidianPluginErrorsPath==="function")recordFileTxt=ohsidianPluginErrorsPath()||"(不可用)"}catch(eRF){}
+    add("  记录文件: "+recordFileTxt);
+    add("");
+    add("▍插件清单（文件 / 加载 / 设置页）");
     if(!a||typeof a.read!=="function"){add("  仓库适配器不可用");show();return}
     /* Exactly the transform loadPlugin applies before evaluating the file
        (`d.replace(f4,"")+v4` in installPlugin), so the verdict here is the
@@ -4689,8 +4851,24 @@ function ohsidianRunPluginIntegrityProbe(){
         if(r.unchecked)unchecked++;
         var sizeTxt=r.size<0?"?":(r.size>=1048576?(Math.round(r.size/1048576*10)/10+" MB"):(Math.round(r.size/1024)+" KB"));
         var manVer=(man[r.id]&&man[r.id].version)||"";
-        add("  "+(r.unchecked?"SKIP":(r.ok?"OK  ":"BAD "))+r.id+(manVer?(" v"+manVer):"")+" · "+sizeTxt+
-          (r.ok?(r.why?(" · "+r.why):""):(" · 无法解析（文件可能被截断）："+r.why)));
+        var isLoaded=false,isEnabled=false;
+        try{isLoaded=!!(pl&&pl.plugins&&pl.plugins[r.id])}catch(eLd){}
+        try{isEnabled=!!(pl&&pl.enabledPlugins&&pl.enabledPlugins.has(r.id))}catch(eEn){}
+        var hasTab=false;
+        try{hasTab=pTabIds.indexOf(r.id)>=0}catch(eHt){}
+        var lastErr=null;
+        try{
+          var allErr=ohsidianEnsurePluginErrors();
+          for(var qe=allErr.length-1;qe>=0;qe--){
+            if(allErr[qe].plugin===r.id){lastErr=allErr[qe];break}
+          }
+        }catch(eLe){}
+        var statusTxt=(isEnabled?"已启用":"未启用")+" · "+(isLoaded?"运行中":"未加载")+
+          " · "+(hasTab?"设置页有":"设置页无");
+        add("  "+(r.unchecked?"SKIP":(r.ok?"OK  ":"BAD "))+r.id+(manVer?(" v"+manVer):"")+
+          " · "+sizeTxt+" · "+statusTxt+
+          (r.ok?(r.why?(" · "+r.why):""):(" · 无法解析（文件可能被截断）："+r.why))+
+          (lastErr?(" · ! "+(lastErr.line||"有错误记录")):""));
       }
       add("");
       /* rev199: identify WHICH build is on disk. A bundle can parse and still
@@ -4801,7 +4979,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="200";
+var OHSIDIAN_PATCH_REV="201";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -4956,8 +5134,10 @@ var install=function(app){
       }});
     app.commands.addCommand({id:"ohsidian-diag-pandoc",name:"OHSidian 诊断: Pandoc 环境",
       callback:function(){ohsidianRunPandocProbe()}});
-    app.commands.addCommand({id:"ohsidian-diag-plugins",name:"OHSidian 诊断: 插件完整性与安全存储",
+    app.commands.addCommand({id:"ohsidian-diag-plugins",name:"OHSidian 诊断: 插件排查（清单 / 错误 / 日志）",
       callback:function(){try{ohsidianRunPluginIntegrityProbe()}catch(e){}}});
+    app.commands.addCommand({id:"ohsidian-diag-plugins-clear",name:"OHSidian 诊断: 清空插件错误记录",
+      callback:function(){try{ohsidianClearPluginErrors()}catch(e){}}});
     try{ohsidianScheduleSettingsTab()}catch(eTab){}
     /* The ink layer needs the loopback socket even when no native video was
        opened; retry until the ArkTS page has published its port file. */

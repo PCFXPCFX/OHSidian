@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→200）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→201）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 200、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 201、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5426,3 +5426,32 @@ rev200 因此再加一段「BRAT 文件时效」：`main.js` 修改时间晚于�
 **仍未完成**（原记）：
 BRAT settingsTab 的 `update()/display()` 在本端口抛错、或 `registerObsidianProtocolHandler` 抛错；
 拿到栈后再决定是补平台 API 还是继续用补注册兜底。
+
+### 十二、rev 201：插件排查面泛化 + 手写笔浮层守卫
+
+**任务 1：插件诊断泛化**（保留并加强 console.log 能力）
+
+- 错误采集独立于日志档位：`console.error`、`window.onerror`、`unhandledrejection` 三类都进
+  `ohsidianRecordConsoleError()`；按内核 `Plugin failure: <id>`、我们的
+  `plugin setting tab registration failed: <id>`、以及 `Error.stack` 中的
+  `plugin:<id>:<line>:<col>` sourceURL 归属到插件，连续相同错误合并 `×N`；
+- 持久化 `<Documents|userData>/OHSidian/plugin-errors.json`（最多 60 条），重启/下次会话仍可见；
+- 报告改名「插件排查（清单 / 错误 / 日志）」，新增：插件清单状态列（版本/大小/解析/启用/加载/
+  设置页/最近错误）、插件错误段（含栈）、渲染层日志优先 error/插件行、支持文件绝对路径；
+- 新命令「OHSidian 诊断: 清空插件错误记录」；设置「诊断」组入口同步改名。
+
+**任务 2：手写笔控件在浮层打开时不可触**
+
+- 现象：设置界面弹出时，手写笔工具条仍浮在上面且可点（文件列表/大纲抽屉同理）。
+- 修法：`ohsidian-ink.js` 新增 `overlayOpenNow()` / `refreshOverlayGuard()`（350ms 轮询）：
+  检测 `.modal-container`/`.prompt`/`.suggestion-container`/`.menu`/`.workspace-drawer.is-open`
+  以及 `body.is-left-sidedock-open` / `is-right-sidedock-open`；命中时给 `<body>` 加
+  `ohsidian-overlay-open`，CSS 令 ink 工具条/菜单/清除面板/选区条 `pointer-events:none` 且透明；
+  浮层关闭自动恢复。我们自己的 ink 菜单被排除在检测外，不会自己把自己关掉。
+- 笔端同受保护：`isExcluded()` 已把浮层内目标排除在绘制路径外，浮层内笔触不会画到正文。
+
+**验证**（本机）：`--repatch` 内嵌 `verify-asar` 全绿（新增 ink 浮层守卫标记、插件错误记录器标记、
+记录器行为用例 7 条：sourceURL 归属、`Plugin failure:` 归属、无归属不入表、连续去重、持久化、清空）；
+`assembleHap` BUILD SUCCESSFUL；HAP 内 asar 复核 rev 201；`verify-release` / `check-docs` 全绿。
+**真机待验**：① 打开设置/文件列表/大纲 → 工具条不可见不可点，关闭后恢复；② 插件报错后
+  `plugin-errors.json` 出现且诊断「插件错误」段显示，重启后仍显示（标"上次会话"）。

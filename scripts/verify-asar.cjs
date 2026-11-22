@@ -199,6 +199,21 @@ try {
     // BUG-005 touch probe — TEMPORARY as well: logs what a bottom-of-screen
     // touch actually hits inside the page. Remove with the toolbar fix.
     'app touch probe (temporary)': app.includes('ohsidianInstallTouchProbe'),
+    // rev201 task 2: the ink toolbar/menu/clear/selection chrome must be
+    // non-interactive while any Obsidian overlay (settings modal, file/outline
+    // drawer, menu, suggestion) is open.
+    'app ink chrome blocked under overlays':
+      app.includes('ohsidian-overlay-open') && app.includes('function overlayOpenNow()') &&
+      app.includes('refreshOverlayGuard'),
+    // rev201 task 1: generic plugin troubleshooting surface (error recorder +
+    // persisted plugin-errors.json + generalised report + clear command).
+    'app plugin error recorder':
+      app.includes('ohsidianRecordConsoleError') && app.includes('plugin-errors.json') &&
+      app.includes('OHSIDIAN_PLUGIN_ERR_MAX'),
+    'app plugin troubleshooting report':
+      app.includes('插件排查（清单 / 错误 / 日志）') &&
+      app.includes('ohsidian-diag-plugins-clear') &&
+      app.includes('插件错误（最近 12 条）'),
     'app font scale follower': app.includes('applyFontScale'),
     'app style-font follower (OhosThemeFont)': app.includes('"OhosThemeFont","HarmonyOS Sans"'),
     'app documents-dir migration': app.includes('pickMigration') && app.includes('当前仓库在应用沙箱内'),

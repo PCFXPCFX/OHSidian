@@ -116,6 +116,8 @@ var OHSIDIAN_INK_REV = "61";
     selection: null,
     lassoPts: null,
     toolbarBuilt: false,
+    overlayOpen: false,
+    overlayTimer: 0,
     menuOpen: false,
     ipcReady: false,
     ipcTriedAt: 0,
@@ -7231,6 +7233,18 @@ var OHSIDIAN_INK_REV = "61";
         "color:var(--text-normal);font-size:12px;padding:5px 9px;min-width:38px;touch-action:manipulation}",
       "#" + SELBAR_ID + " button.is-danger{color:var(--text-error,#d33)}"
     ].join("\n");
+    // rev201 overlay guard: while an Obsidian overlay is open the ink chrome
+    // must be invisible AND non-interactive - it used to float above the
+    // settings modal / file drawer and swallow taps that belonged to them.
+    css += "\n" + [
+      "body.ohsidian-overlay-open #" + TOOLBAR_ID + "," +
+      "body.ohsidian-overlay-open #" + MENU_ID + "," +
+      "body.ohsidian-overlay-open #" + CLEAR_ID + "," +
+      "body.ohsidian-overlay-open #" + SELBAR_ID + "," +
+      "body.ohsidian-overlay-open #" + SEL_ID + "," +
+      "body.ohsidian-overlay-open #" + LASSO_ID +
+      "{pointer-events:none!important;opacity:0!important}"
+    ].join("\n");
     var el = document.createElement("style");
     el.id = CSS_ID;
     el.textContent = css;
@@ -7967,6 +7981,60 @@ var OHSIDIAN_INK_REV = "61";
     } else if (!state.barExpanded) {
       root.classList.add("is-collapsed");
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // Overlay guard (rev 201)
+  // ---------------------------------------------------------------------
+  // Any Obsidian overlay - settings/modal, command palette, context menu,
+  // suggestions, left drawer (file list / search), right drawer (outline,
+  // backlinks) - owns the screen while it is open. The ink chrome must not
+  // be tappable then: it is hidden and pointer-events:none via the body class
+  // below, and the pen capture path already treats those targets as excluded.
+  function overlayOpenNow() {
+    try {
+      var body = document.body;
+      if (!body) return false;
+      if (body.classList.contains("is-left-sidedock-open") ||
+        body.classList.contains("is-right-sidedock-open")) return true;
+      var sels = [".modal-container", ".modal-bg", ".prompt", ".suggestion-container",
+        ".menu", ".workspace-drawer.is-open", ".workspace-drawer.is-left.is-open",
+        ".workspace-drawer.is-right.is-open"];
+      for (var i = 0; i < sels.length; i++) {
+        var nodes;
+        try { nodes = document.querySelectorAll(sels[i]); } catch (eQ) { continue; }
+        for (var j = 0; j < nodes.length; j++) {
+          var el = nodes[j];
+          if (!el) continue;
+          // our own ink chrome (menu/clear/selbar live outside the toolbar) is
+          // not an Obsidian overlay; ignoring it keeps the toolbar usable
+          if (el.closest("#" + TOOLBAR_ID) || el.closest("#" + MENU_ID) ||
+            el.closest("#" + CLEAR_ID) || el.closest("#" + SELBAR_ID)) continue;
+          try {
+            var cs = getComputedStyle(el);
+            if (!cs || cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") continue;
+          } catch (eCs) {}
+          return true;
+        }
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function refreshOverlayGuard() {
+    var body = document.body;
+    if (!body) return;
+    var open = overlayOpenNow();
+    if (open === state.overlayOpen) return;
+    state.overlayOpen = open;
+    body.classList.toggle("ohsidian-overlay-open", open);
+    if (open) {
+      try { collapseToolbar(); } catch (eC) {}
+      try { updateToolbarVisibility(); } catch (eU0) {}
+    } else {
+      try { updateToolbarVisibility(); } catch (eU1) {}
+    }
+    inkTrace("overlayGuard", { open: open });
   }
 
   function clearBarTimer() {
@@ -9421,6 +9489,15 @@ var OHSIDIAN_INK_REV = "61";
     loadPrefs();
     injectCss();
     installPenObservers();
+    // rev201 overlay guard: settings/file-list/outline opens are DOM class or
+    // element changes the toolbar never sees an event for; poll cheaply.
+    try { refreshOverlayGuard(); } catch (eOG0) {}
+    try {
+      state.overlayTimer = setInterval(function () {
+        if (!state.installed) return;
+        try { refreshOverlayGuard(); } catch (eOG) {}
+      }, 350);
+    } catch (eOGT) {}
     window.addEventListener("ohsidian-native-message", onNativeMessageEvent);
     addCommands(app);
     installPerfProbes();

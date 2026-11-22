@@ -179,9 +179,11 @@ Get-FileHash .\OHSidian-v2.0.1-*-icon-unsigned.hap -Algorithm MD5
   再检查对应场景的探针；不要在 gate 未过时发版。
 - **构建成功但启动闪退**：确认 `buildMode` 为 `release` 时 ArkGuard 仍关闭；本仓库
   已在构建配置中关闭混淆，若手动改动过请恢复。
-- **插件加载失败 / 插件没有设置页**：先让用户跑 设置 →「诊断」组 →「插件完整性与安全存储」→
-  检查（或命令面板同名命令），报告可一键复制。有「加载失败」弹窗 = 文件可能被截断（看
-  `main.js` 字节数/解析结果：`BAD` = 不完整，卸载后换网络重装）；无弹窗、只是设置页缺失 =
+- **插件加载失败 / 插件没有设置页**：先让用户跑 设置 →「诊断」组 →「插件排查（清单 / 错误 / 日志）」
+  → 检查（或命令面板同名命令），整份报告可一键复制。报告里：`插件清单` 用 `BAD`/`!` 定位可疑插件，
+  `插件错误` 给出带 `plugin:<id>:行:列` 的错误栈（含上次会话，持久化在
+  `<Documents|userData>/OHSidian/plugin-errors.json`），`渲染层日志` 优先列 error/插件行。
+  有「加载失败」弹窗 = 文件可能被截断（`BAD`，卸载后换网络重装）；无弹窗、只是设置页缺失 =
   `secretStorage` 吞错型（看 `secretStorage` 行，`WARN … false（明文模式）` 属正常）。完整
   排查链路见 `docs/PLATFORM-ADAPTATION.md` §六。
 - **需要渲染层日志**：error 级默认就落盘（`<Documents|userData>/OHSidian/console.log`，

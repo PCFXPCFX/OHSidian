@@ -203,7 +203,7 @@ profile 再重签即可。离线改 profile 再自签**不可行**：profile 由
 
 > 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象
 > `main @ e528275`）。报告结论一句话：**两个插件不是同一种死法，也都不是 2.0 的代码改动
-> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **200**）；
+> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **201**）；
 > 报告里"2.0 无关"的增量考古（补丁层/引擎层 diff 与 eval/require/loadPlugin 零交集）不再
 > 赘述，见原报告第三部分。
 
@@ -340,7 +340,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 ### 6.6 支持话术（用户/同学侧，1 分钟判定）
 
 1. **有「插件加载失败」弹窗** → 同步链抛错（坚果云类）。**设置 → OHSidian 设置页 →「诊断」组
-   →「插件完整性与安全存储」→ 检查**（或命令面板「OHSidian 诊断: 插件完整性与安全存储」）：
+   →「插件排查（清单 / 错误 / 日志）」→ 检查**（或命令面板同名命令）：
    `BAD … main.js … 无法解析` = 文件被截断，卸载后换网络重装；字节数对但仍 BAD = 真损坏，
    重装同版本；`SKIP` = 超过 6 MB 未解析，需对照发行包大小人工确认。
 2. **无弹窗、只是设置页不出现** → 吞错型（BRAT 类）。同一诊断看 `secretStorage` 行：
@@ -366,7 +366,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 
 ### 6.7 真机定谳步骤（替代报告 §五的控制台探针）
 
-1. 装本版（rev 200）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
+1. 装本版（rev 201）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
 2. `secretStorage` 行：期望 `WARN adapter=有 · isEncryptionAvailable=false（明文模式）`，
    `引擎 safeStorage: undefined（引擎缺口；补丁已兜底为明文透传）`——若 remote 对象整体缺失则
    该行显示 `window.electron.remote 不可用`，同属引擎缺口，补丁同样兜底；
@@ -385,7 +385,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 - `node scripts/update-obsidian.mjs --repatch` → 内嵌 `verify-asar`（含
   `verify-plugin-install` 行为用例）全绿；
 - `assembleHap` **BUILD SUCCESSFUL**；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability`
-  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="200"`、
+  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="201"`、
   四条 NF 标记、console bridge 错误默认档；
 - `verify-release` / `check-docs` 全绿；
 - 独立只读审查（2026-11-22，对照冻结态代码 + 出货 asar 逐字）：NF-015/017/018 无 P1/P2；
@@ -403,3 +403,28 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 - BRAT 2.3.0-beta 与旧版 2.0.8 回退话术待真机确认；
 - `secretStorage` 的**真加密**（引擎补齐 `safeStorage`）仍是 NF-018 的长期项；
 - NF-017 只覆盖 decor family；`GetTitleButtonVisible` 等**引擎内部**调用由引擎发起，应用层管不到。
+
+### 6.10 插件排查面（rev 201，泛化）
+
+`OHSidian 诊断: 插件排查（清单 / 错误 / 日志）`（设置「诊断」组与命令面板两个入口）从"BRAT 专用检查"
+泛化为通用插件排查面，报告一次性给出：
+
+1. **环境**：补丁 rev、内核版本、布局/沙箱、`secretStorage` 状态（明文/可用/断链）；
+2. **插件清单**：每个已安装插件的版本、`main.js` 字节/行数/解析结论（与 `loadPlugin` 同一语法门槛）、
+   已启用/未启用、运行中/未加载、设置页已注册/未注册，以及该插件**最近一次记录到的错误**；
+3. **插件错误（最近 12 条）**：本会话 + 上次会话，含时间、插件 id、错误首行、`plugin:<id>:行:列`、
+   前 4 行错误栈；记录去重（连续相同错误合并为 `×N`）并持久化到
+   `<Documents|userData>/OHSidian/plugin-errors.json`（最多 60 条），重启后仍能看到；
+4. **BRAT 专项**（安装时）：文件指纹（字节/行数/sha256，含内核安装标记归一化）、最近注册失败的源码位置、
+   文件修改时间 vs 本会话启动时间（重装后未重启会被判"当前运行的是旧代码"）；
+5. **渲染层日志**：`console.log` 优先列出 `[error]` 与插件相关行（最多 40 行）；
+6. **支持文件**：`console.log` 与 `plugin-errors.json` 的绝对路径，报告可一键复制。
+
+**错误归属规则**（`ohsidianRecordConsoleError`）：内核 `Plugin failure: <id>` 行、我们自己的
+`plugin setting tab registration failed: <id>` 行、以及任何 `Error.stack` 里带
+`plugin:<id>:<line>:<col>` sourceURL 的错误（所有插件模块都是经 `window.eval` 带 sourceURL 求值的）——
+据此归到具体插件；没有归属的错误不进插件错误表（仍进 console.log）。
+另配命令 `OHSidian 诊断: 清空插件错误记录`（同时删除持久化文件）。
+
+**排查顺序建议**：先看「插件清单」的 `!` 尾注定位是哪个插件、再看「插件错误」拿栈、
+最后看「渲染层日志」补齐上下文；把整份报告复制给维护者即可。

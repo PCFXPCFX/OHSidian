@@ -60,6 +60,11 @@ InkDoc 侧车 <vault>/.obsidian/ohsidian-ink/docs/<key>.json
 
 - **笔落在 ink surface**：画。
 - **笔落在工具条/菜单/清除面板**：允许点按、长按、拖滑块。
+- **浮层打开时（设置/弹窗/命令面板/文件列表/大纲等抽屉）**：ink 工具条、菜单、清除面板、选区条
+  一律 `pointer-events:none` 且不可见（`body.ohsidian-overlay-open`），笔与手指点它们都落到浮层上；
+  浮层关闭后自动恢复。检测由 `ohsidian-ink.js` 的 `overlayOpenNow()`/`refreshOverlayGuard()` 350ms
+  轮询完成（`is-left-sidedock-open`/`is-right-sidedock-open`、`.modal-container`、`.prompt`、
+  `.suggestion-container`、`.menu`、`.workspace-drawer.is-open`）。
 - **笔落在 Obsidian 其他 UI 或空白/边距**：`pointerdown` 即拦截，不传给 Obsidian。
 - **笔的兼容 touch/mouse 事件**：笔活动窗口内吞掉；1.2s 无笔后恢复给手。
 - 笔从 UI 起笔滑动 >5px：拦截并抑制 click。
@@ -399,6 +404,7 @@ artifacts/stylus-eval/20261103-193000-v2.0.0/
 9. PDF 写回成功；备份位于主目录或 PDF 同目录；恢复可用。
 10. 关闭手写笔模式后完全回到普通 Obsidian：PDF 无叠层 canvas，诊断 `PDF叠层` 为 0。
 11. 长 PDF 滚动/翻页只挂载可见页，内存不随页数线性增长。
+12. 打开设置、文件列表、大纲、命令面板时工具条/菜单不可见、点不到；关闭后 0.5s 内恢复。
 12. PDF 打开/翻页无持续白页；`PDF写回` 的 `fake worker=0`。
 13. 写到第 3 页、翻到第 5 页再离开：两页都写回；写回后叠加层仍在，页面不长时间白屏。
 
