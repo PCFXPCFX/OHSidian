@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→208）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→209）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 208、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 209、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5616,3 +5616,19 @@ verify-pandoc-wasm（新增 host.cjs lock/内容检查）/verify-release 全绿�
 HAP 内 resources/resfile/pandoc 含 `pandoc-host.cjs`，asar 复核 rev208。
 **真机待验**：① 自检通过且显示「工具进程 wasm=object」；② 若失败，运行「Pandoc 宿主诊断」把报告发回
   （可据此判断是 utilityProcess 不可用、--no-jitless 未生效还是平台禁 JIT）。
+
+### 二十、rev 209：pandoc 工具进程的临时目录修复（自检 docx EACCES）
+
+rev208 真机自检：`pandoc 3.10 · 已就绪`，`version`/`markdown -> html` 通过，`markdown -> docx` 报
+`EACCES: permission denied, open '/ohsidian-pandoc-selftest.docx'`——utility 进程的 `process.cwd()` 是 `/`，
+自检写临时文件没有权限。
+
+修法：
+- 主进程在每次请求里带上 `tmpDir = app.getPath("temp")`；主进程直跑路径同样传入；
+- `pandoc-host.cjs` 创建服务时使用该 tmpDir，并回退 `TMPDIR/TEMP`；
+- `service-core.mjs` 自检文件改为 `<tmpDir>/ohsidian-pandoc-selftest-<pid>.docx`，目录不存在时先 mkdir；
+- 自检/命令报告的执行位置改为「主进程 / 工具进程（渲染进程 WebAssembly 不可用）」。
+
+**验证**：build-pandoc-wasm 重建并更新 lock；--repatch/verify-asar（rev209 标记）/verify-pandoc-wasm/
+verify-release 全绿；assembleHap BUILD SUCCESSFUL；HAP 内 pandoc-host.cjs 含 tmpDir 逻辑。
+**真机待验**：自检三项全部 OK（docx 应有字节数）；随后用 Enhancing Export 导出 docx/pptx/epub。

@@ -586,7 +586,12 @@ export function createService(createPandocInstance, options) {
       return "ok (" + r.stdout.length + " chars)";
     });
     await run("markdown -> docx", async () => {
-      const tmp = path.join(opts.tmpDir || process.cwd(), "ohsidian-pandoc-selftest.docx");
+      let tmpDir = opts.tmpDir || "";
+      if (!tmpDir) {
+        try { tmpDir = require("node:os").tmpdir(); } catch (eOs) { tmpDir = process.cwd(); }
+      }
+      try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (eMk) { /* may be read-only */ }
+      const tmp = path.join(tmpDir, "ohsidian-pandoc-selftest-" + process.pid + ".docx");
       const r = await runCli({ argv: ["-f", "markdown", "-t", "docx", "-o", tmp], stdin: "# self test\n" });
       if (r.code !== 0) throw new Error(r.stderr || "exit " + r.code);
       const buf = fs.readFileSync(tmp);

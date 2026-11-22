@@ -13,11 +13,11 @@
     "bytes": 16273254
   },
   "outputs-service": {
-    "sha256": "d6c6fa9a707608a07624594aa4b41abbf9d3e8e67fcda1157a6c48ecc022c102",
-    "bytes": 84682
+    "sha256": "a35def000d5a05ae856158075aa135ebadad1eef19a612fba083ec536f1c63e2",
+    "bytes": 84990
   },
   "outputs-host": {
-    "sha256": "6d144436ee17a7c86ccc33c2ee98d08afc8cc61c60658cd53da916a53840f2df",
-    "bytes": 2294
+    "sha256": "9277dbd65e5ed0cd2b0b9dd737724f3d416390cce794cefe554fda5e6d1585fd",
+    "bytes": 2743
   }
 }

@@ -526,7 +526,7 @@ if(ipcMainMain&&!ipcMainMain.__ohsidianPandocService){
     if(!__ohPandocMainCache.service){
       var api=__ohPandocMainCache.api;
       if(!api||typeof api.createService!=="function"||typeof api.createPandocInstance!=="function")throw new Error("pandoc-service.cjs 导出不完整（主进程）");
-      __ohPandocMainCache.service=api.createService(api.createPandocInstance,{wasmGzPath:req.wasmGzPath,version:req.version});
+      __ohPandocMainCache.service=api.createService(api.createPandocInstance,{wasmGzPath:req.wasmGzPath,version:req.version,tmpDir:(function(){try{return electronMain.app.getPath("temp")}catch(e){return ""}})()});
     }
     return __ohPandocMainCache.service;
   }
@@ -614,7 +614,7 @@ if(ipcMainMain&&!ipcMainMain.__ohsidianPandocService){
   }
   function __ohPandocUtilSend(req){
     var id=++__ohPandocUtil.seq;
-    var payload={id:id,kind:req.kind,argv:req.argv,stdin:req.stdin,cwd:req.cwd,query:req.query,version:req.version};
+    var payload={id:id,kind:req.kind,argv:req.argv,stdin:req.stdin,cwd:req.cwd,query:req.query,version:req.version,tmpDir:(function(){try{return electronMain.app.getPath("temp")}catch(e){return ""}})()};
     return new Promise(function(resolve,reject){
       __ohPandocUtil.pending[id]={resolve:resolve,reject:reject};
       try{

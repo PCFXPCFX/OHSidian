@@ -233,7 +233,7 @@ function ohsidianPandocProbeLines(){
     L.push("  状态: "+(s.ready?("已就绪 · pandoc "+s.version):(s.error||"未初始化")));
     var pr0=p.probe?p.probe():null;
     if(pr0){
-      L.push("  执行位置: "+(pr0.host==="main"?"主进程（渲染进程 WebAssembly 不可用）":(pr0.wasmRenderer?"渲染进程":"未初始化/自动")));
+      L.push("  执行位置: "+(pr0.host==="main"?"主进程 / 工具进程（渲染进程 WebAssembly 不可用）":(pr0.wasmRenderer?"渲染进程":"未初始化/自动")));
       L.push("  WebAssembly(渲染进程): "+(pr0.wasmRenderer?"可用":"不可用"));
     }
     var pr=p.probe?p.probe():null;
@@ -4173,7 +4173,7 @@ function ohsidianSettingsRows(root){
             }
             lines.push("");
             var st=window.__ohsidianPandoc.status();
-            lines.push("  执行位置: "+(st.host==="main"?"主进程（渲染进程 WebAssembly 不可用）":(st.wasmRenderer?"渲染进程":"自动")));
+            lines.push("  执行位置: "+(st.host==="main"?"主进程 / 工具进程（渲染进程 WebAssembly 不可用）":(st.wasmRenderer?"渲染进程":"自动")));
             lines.push("  资源目录: "+(window.__ohsidianPandoc.dir()||"(未找到)"));
             lines.push("  限制: 无 PDF / 无网络 / 仅 Lua filter；插件 execFile/spawn 调用会被自动接管。");
             ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",lines);
@@ -5343,7 +5343,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="208";
+var OHSIDIAN_PATCH_REV="209";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -5506,7 +5506,7 @@ var install=function(app){
             }
             L.push("");
             var st2=window.__ohsidianPandoc.status();
-            L.push("  执行位置: "+(st2.host==="main"?"主进程（渲染进程 WebAssembly 不可用）":(st2.wasmRenderer?"渲染进程":"自动")));
+            L.push("  执行位置: "+(st2.host==="main"?"主进程 / 工具进程（渲染进程 WebAssembly 不可用）":(st2.wasmRenderer?"渲染进程":"自动")));
             L.push("  资源目录: "+(window.__ohsidianPandoc.dir()||"(未找到)"));
             L.push("  限制: 无 PDF / 无网络 / 仅 Lua filter；插件 execFile/spawn 调用会被自动接管。");
             ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",L);

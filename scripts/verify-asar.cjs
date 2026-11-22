@@ -249,7 +249,7 @@ try {
     // rev205: built-in pandoc (WebAssembly) - renderer loader + child_process
     // shim + settings/status/command surface.
     'app built-in pandoc wasm patched in':
-      app.includes('window.__ohsidianPandocPatchRev = 208') &&
+      app.includes('window.__ohsidianPandocPatchRev = 209') &&
       app.includes('pandoc-service.cjs') &&
       app.includes('__ohsidianPandocWrapped') &&
       app.includes('Pandoc（内置 WASM）'),

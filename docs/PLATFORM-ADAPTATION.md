@@ -218,7 +218,7 @@ profile 再重签即可。离线改 profile 再自签**不可行**：profile 由
 
 > 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象
 > `main @ e528275`）。报告结论一句话：**两个插件不是同一种死法，也都不是 2.0 的代码改动
-> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **208**）；
+> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **209**）；
 > 报告里"2.0 无关"的增量考古（补丁层/引擎层 diff 与 eval/require/loadPlugin 零交集）不再
 > 赘述，见原报告第三部分。
 
@@ -383,7 +383,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 
 ### 6.7 真机定谳步骤（替代报告 §五的控制台探针）
 
-1. 装本版（rev 208）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
+1. 装本版（rev 209）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
 2. `secretStorage` 行：期望 `WARN adapter=有 · isEncryptionAvailable=false（明文模式）`，
    `引擎 safeStorage: undefined（引擎缺口；补丁已兜底为明文透传）`——若 remote 对象整体缺失则
    该行显示 `window.electron.remote 不可用`，同属引擎缺口，补丁同样兜底；
@@ -402,7 +402,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 - `node scripts/update-obsidian.mjs --repatch` → 内嵌 `verify-asar`（含
   `verify-plugin-install` 行为用例）全绿；
 - `assembleHap` **BUILD SUCCESSFUL**；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability`
-  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="208"`、
+  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="209"`、
   四条 NF 标记、console bridge 错误默认档；
 - `verify-release` / `check-docs` 全绿；
 - 独立只读审查（2026-11-22，对照冻结态代码 + 出货 asar 逐字）：NF-015/017/018 无 P1/P2；
@@ -529,6 +529,9 @@ HAP 增大 ≈16 MB（原始 120.5 MB → 137.7 MB）。
    utilityProcess 可用性、工具进程错误；自检失败弹窗也会带这些行；
 4. 若工具进程报告 `wasm=undefined`，说明 `--no-jitless` 被平台拒绝（JIT 被禁），该路线在设备上不可行，
    需要另做纯 JS 转换方案。
+
+**rev209**：utility 进程 cwd 为 `/`，自检写临时文件 EACCES → 主进程随请求传 `tmpDir=app.getPath("temp")`，
+host 用该目录创建服务，自检文件名带 pid；成功后自检三项应全 OK。
 
 **门禁**：`node scripts/build-pandoc-wasm.mjs --check`（lock sha256）与 `node scripts/verify-pandoc-wasm.cjs`
 （真实转换：md→html/docx、reference-doc、Lua filter、本地图片、PDF/exec-filter 拒绝、`--version` 延迟）；

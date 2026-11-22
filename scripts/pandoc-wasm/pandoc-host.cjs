@@ -21,6 +21,9 @@ function ensure(req) {
   service = api.createService(api.createPandocInstance, {
     wasmGzPath: path.join(__dirname, 'pandoc.wasm.gz'),
     version: (req && req.version) || require(path.join(__dirname, 'pandoc-version.txt')).toString().trim(),
+    // utility processes start with cwd=/ (not writable); self-test/output temp
+    // files must go to the app temp dir published by the main process.
+    tmpDir: (req && req.tmpDir) || process.env.TMPDIR || process.env.TEMP || '',
   });
   return service;
 }

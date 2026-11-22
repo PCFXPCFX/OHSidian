@@ -24,8 +24,8 @@
  * ========================================================================== */
 ;(function () {
   try {
-    if (window.__ohsidianPandocPatchRev === 208) return;
-    window.__ohsidianPandocPatchRev = 208;
+    if (window.__ohsidianPandocPatchRev === 209) return;
+    window.__ohsidianPandocPatchRev = 209;
     if (window.__ohsidianPandoc) return;
 
     var fs = require("fs");
@@ -534,7 +534,7 @@
     }
 
     window.__ohsidianPandoc = {
-      patchRev: 208,
+      patchRev: 209,
       dir: function () { return pandocDir(); },
       version: function () { return pandocVersion(); },
       status: function () {
