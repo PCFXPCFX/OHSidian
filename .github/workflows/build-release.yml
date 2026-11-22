@@ -119,6 +119,21 @@ jobs:
 
       - name: Install scripts dependencies
         run: npm ci --prefix scripts
+      # Built-in pandoc (WebAssembly): downloads the pinned pandoc-wasm npm
+      # tarballs, verifies scripts/pandoc-wasm.lock.json, bundles the service
+      # and writes resources/resfile/pandoc/ into the HAP. The same build is
+      # used on PC and tablet (no native binary, no weak sandbox needed).
+      - name: Cache pandoc-wasm downloads
+        uses: actions/cache@v4
+        with:
+          path: scripts/.cache/pandoc-wasm
+          key: pandoc-wasm-${{ hashFiles('scripts/pandoc-wasm.lock.json') }}
+
+      - name: Build bundled pandoc (WebAssembly)
+        run: node scripts/build-pandoc-wasm.mjs
+
+      - name: Verify bundled pandoc (behavioural gate)
+        run: node scripts/verify-pandoc-wasm.cjs
 
       # Version is pinned to the app package.json (upgrade via PR), NOT to
       # upstream "latest". --repatch is REQUIRED here: the plain path would

@@ -53,11 +53,23 @@ HarmonyOS 6.0.2 起（compatible API 22 / target API 24）· 平板 / 2in1
 git clone https://github.com/PCFXPCFX/OHSidian.git
 cd OHSidian
 
-# obsidian.asar 不入库，首次构建自动下载、校验并注入补丁（约 27 MB，仅一次）
+# 0. 工具依赖（scripts/ 下有独立 package.json；esbuild 用于打包内置 pandoc）
+npm ci --prefix scripts
+
+# 1. obsidian.asar 不入库，首次构建自动下载、校验并注入补丁（约 27 MB，仅一次）
+node scripts/update-obsidian.mjs --repatch
+
+# 2. 内置 pandoc（WebAssembly，约 16 MB）：首次运行会下载官方 pandoc-wasm，
+#    按 scripts/pandoc-wasm.lock.json 校验并生成 resources/resfile/pandoc/
+node scripts/build-pandoc-wasm.mjs
+
+# 3. 构建 HAP
 hvigorw assembleHap --mode module -p product=default
 
 # 产物：electron/build/default/outputs/default/*.hap
 ```
+
+（只改 HAP 源码时第 1/2 步可跳过；`resources/resfile/pandoc/` 不存在时内置 pandoc 会显示"不可用"，其余功能不受影响。）
 
 也可以用 DevEco Studio 打开项目执行 **Build > Build HAP(s)**。签名在 `build-profile.json5` 中配置，参考 `build-profile.example.json5`；发布包的构建、签名、校验与 tag 流程见[发布文档][release]。
 

@@ -5528,3 +5528,32 @@ BUILD SUCCESSFUL；HAP 内 asar 复核 rev 202；`verify-release` / `check-docs`
 
 **验证**：--repatch/verify-asar/verify-release/check-docs 全绿；assembleHap BUILD SUCCESSFUL；HAP 内 asar
 复核 rev204。**真机待验**：状态报告日志段只含本会话行；「清空渲染层日志」后报告显示空/本会话新行。
+
+### 十六、rev 205：内置 Pandoc 3.10（WebAssembly）——PC 与平板都能用真 pandoc
+
+**需求**：不申请弱沙箱，且 PC/平板都要能调用 pandoc（平板禁 `fork+exec`，HNP/HAP-bin 仅 PC/2in1）。
+
+**落地**：内置官方 `pandoc/pandoc-wasm`（Pandoc 3.10，GPL-2.0-or-later），在渲染进程内执行。
+
+- `scripts/build-pandoc-wasm.mjs`：按 `scripts/pandoc-wasm.lock.json` 下载并校验 npm 包（pandoc-wasm@1.1.0、
+  @bjorn3/browser_wasi_shim@0.4.2），生成 `pandoc.wasm.gz`（15.5 MB）+ `pandoc-service.cjs`（83 KB，
+  core.js+WASI shim 由 esbuild 打包）+ GPL/来源说明；`--check` 只校验 lock；`--update-lock` 用于升级。
+- `scripts/pandoc-wasm/service-core.mjs`：CLI 适配（`shellSplit`/`parseArgs`）、文件/参考文档/模板/bib/csl/
+  Lua filter/本地图片收集、`--version` 不加载 wasm、二进制输出必须 `-o`、PDF 与可执行 filter 明确拒绝、
+  `selfTest()`。Node 行为门禁实测：md→docx 80–300 ms（首次 ≈1 s）、285 KB md→html ≈2.8 s。
+- `scripts/patches/pandoc-wasm.js`：`Module._load` hook 替换 `child_process`（exec/execFile/spawn 接管 pandoc，
+  同步 API 明确报错）、`lookpath`/`which` 占位路径；`pandocDir` 从模式文件读取（ArkTS `publishPandocDir`），
+  暴露 `window.__ohsidianPandoc`。
+- 设置「诊断」新增「Pandoc（内置 WASM）」状态+自检；状态报告新增 `Pandoc(内置)`；命令
+  `OHSidian 诊断: Pandoc（内置 WASM）自检`。
+- CI（`build-release.yml`）：cache 下载 → `build-pandoc-wasm.mjs` → `verify-pandoc-wasm.cjs`；
+  HAP 增大 ≈16 MB（120.5 → 137.7 MB）。
+
+**限制**：无 PDF（需外部 LaTeX/Typst，指向内置 PDF 导出）、不联网、仅 Lua filter、同步 API 不支持；
+内存峰值 +100–200 MB。**GPL**：HAP 内附许可证与源码说明。
+
+**验证**：`verify-pandoc-wasm` 全绿（真实 docx/html 转换、reference-doc、Lua filter、本地图片、PDF/exec-filter
+拒绝、--version 快速应答）；`--repatch`/`verify-asar`/`verify-release`/`check-docs` 全绿；HAP 内 asar 复核
+rev 205 与 patch 标记、`modules.abc` 含 `publishPandocDir`、HAP 含 `resources/resfile/pandoc/*`。
+**真机待验**：① 设置→诊断→Pandoc 自检通过；② 用 Enhancing Export 导出 docx/pptx/epub；③ 平板与 PC 同一 HAP 均可用；
+④ PDF 导出给出明确提示。

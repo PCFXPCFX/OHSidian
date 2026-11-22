@@ -1,1 +1,16 @@
-{"name":"ohsidian-tools","private":true,"type":"module","scripts":{"render-architecture":"node render-architecture.mjs"},"dependencies":{"@electron/asar":"^4.3.0"}}
+{
+  "name": "ohsidian-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "render-architecture": "node render-architecture.mjs",
+    "build:pandoc-wasm": "node build-pandoc-wasm.mjs",
+    "verify:pandoc-wasm": "node verify-pandoc-wasm.cjs"
+  },
+  "dependencies": {
+    "@electron/asar": "^4.3.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

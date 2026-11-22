@@ -205,6 +205,21 @@ function ohsidianSandboxLabel(v){
   }
   return "未知（旧版本，或模式文件里没有 sandbox 字段）";
 }
+/* rev205: built-in pandoc (WebAssembly). The renderer patch scripts/patches/
+   pandoc-wasm.js loads the bundled Pandoc 3.10 WASM engine and routes plugin
+   child_process calls to it, so no native binary / weak sandbox is needed.
+   This label is shared by the status report and the settings diagnostics row. */
+function ohsidianBuiltinPandocLabel(){
+  try{
+    var p=window.__ohsidianPandoc;
+    if(!p)return "未接入（补丁未加载）";
+    var s=p.status();
+    if(!s)return "未初始化";
+    if(s.ready)return "pandoc "+s.version+" (wasm) · 已就绪";
+    if(s.error)return "pandoc "+s.version+" (wasm) · 不可用: "+s.error;
+    return "pandoc "+s.version+" (wasm) · 未使用（懒加载）";
+  }catch(e){return "未知: "+String((e&&e.message)||e)}
+}
 /* Atomic mode-file publish (H1): writeFileSync truncates first, so a crash
    (or a concurrent ArkTS reader) could observe an empty/partial file between
    truncate and write. Write the temp file first, then rename over the
@@ -3784,6 +3799,7 @@ function ohsidianBuildPandocReport(){
       (hc.shell&&hc.shell.errno?("  · shell: "+hc.shell.errno):""));
   }
   head.push("沙箱形态: "+ohsidianSandboxLabel(sandbox));
+head.push("内置 pandoc: "+ohsidianBuiltinPandocLabel());
   head.push("报告文件：应用数据目录/ohsidian-pandoc-check.json（反馈时一并附上）");
   head.push("─────────────────────────────────────────");
   return {lines:head.concat(lines),report:report};
@@ -4065,6 +4081,38 @@ function ohsidianSettingsRows(root){
         "max-height:360px;overflow:auto;font-size:12px;padding:10px;border-radius:8px;"+
         "background:var(--background-secondary)";
       diag.appendChild(outEl);
+    }
+    /* rev205: built-in pandoc (WebAssembly) status + self test. Plugins that
+       call pandoc keep working on both PC and tablet without a native binary. */
+    var builtinPandocCtl=itemEl(diag,"Pandoc（内置 WASM）",
+      "内置 pandoc 3.10 WebAssembly 引擎：插件用 execFile/spawn 调用 pandoc 时自动接管，无需外部二进制或弱沙箱，PC 与平板一致。"+
+      "限制：不支持 PDF（请用内置 PDF 导出）、不联网、只支持 Lua filter。");
+    if(builtinPandocCtl){
+      var bpLabel=document.createElement("span");
+      bpLabel.textContent=ohsidianBuiltinPandocLabel();
+      bpLabel.style.cssText="margin-right:8px;color:var(--text-muted);font-size:12px";
+      var bpBtn=document.createElement("button");
+      bpBtn.textContent="自检";
+      bpBtn.addEventListener("click",function(){
+        bpBtn.disabled=true;bpBtn.textContent="运行中…";
+        try{
+          window.__ohsidianPandoc.selfTest().then(function(r){
+            var lines=["OHSidian 诊断: Pandoc（内置 WASM）","","  pandoc "+r.version+(r.ready?" · 已就绪":" · 未初始化")];
+            for(var i=0;i<r.checks.length;i++){
+              lines.push("  "+(r.checks[i].ok?"OK  ":"FAIL")+" "+r.checks[i].name+(r.checks[i].detail?(" · "+r.checks[i].detail):""));
+            }
+            lines.push("");
+            lines.push("  资源目录: "+(window.__ohsidianPandoc.dir()||"(未找到)"));
+            lines.push("  限制: 无 PDF / 无网络 / 仅 Lua filter；插件 execFile/spawn 调用会被自动接管。");
+            ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",lines);
+            bpLabel.textContent=ohsidianBuiltinPandocLabel();
+          }).catch(function(eBp){
+            try{new Notice("Pandoc 自检失败: "+String((eBp&&eBp.message)||eBp))}catch(eN){}
+          }).then(function(){bpBtn.disabled=false;bpBtn.textContent="自检";});
+        }catch(eBp2){bpBtn.disabled=false;bpBtn.textContent="自检";}
+      });
+      builtinPandocCtl.appendChild(bpLabel);
+      builtinPandocCtl.appendChild(bpBtn);
     }
     /* NF-015 / NF-018 on-device adjudication: same copyable report the command
        palette opens (ohsidian-diag-plugins), also reachable from 设置 → 诊断. */
@@ -5221,7 +5269,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="204";
+var OHSIDIAN_PATCH_REV="205";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -5302,6 +5350,7 @@ function ohsidianBuildStatusLines(){
   row("窗口三键",(prefs.keepSystemTitleButtons===true?"保留":"不保留")+
     " · 网页字体 "+(prefs.webviewFonts===true?"开":"关"));
   row("Pandoc",(function(){try{return ohsidianPandocPath()}catch(e){return "?"}})());
+row("Pandoc(内置)",ohsidianBuiltinPandocLabel());
   row("沙箱",ohsidianSandboxLabel(ohsidianSandboxMode()));
   /* ---- 调试 --------------------------------------------------------- */
   sec("调试");
@@ -5373,6 +5422,21 @@ var install=function(app){
       callback:function(){try{ohsidianShowStatusReport()}catch(e){}}});
     app.commands.addCommand({id:"ohsidian-diag-pandoc",name:"OHSidian 诊断: Pandoc 环境",
       callback:function(){ohsidianRunPandocProbe()}});
+    app.commands.addCommand({id:"ohsidian-diag-pandoc-wasm",name:"OHSidian 诊断: Pandoc（内置 WASM）自检",
+      callback:function(){
+        try{
+          window.__ohsidianPandoc.selfTest().then(function(r){
+            var L=["OHSidian 诊断: Pandoc（内置 WASM）","","  pandoc "+r.version+(r.ready?" · 已就绪":" · 未初始化")];
+            for(var i=0;i<r.checks.length;i++){
+              L.push("  "+(r.checks[i].ok?"OK  ":"FAIL")+" "+r.checks[i].name+(r.checks[i].detail?(" · "+r.checks[i].detail):""));
+            }
+            L.push("");
+            L.push("  资源目录: "+(window.__ohsidianPandoc.dir()||"(未找到)"));
+            L.push("  限制: 无 PDF / 无网络 / 仅 Lua filter；插件 execFile/spawn 调用会被自动接管。");
+            ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",L);
+          }).catch(function(ePw){try{new Notice("Pandoc 自检失败: "+String((ePw&&ePw.message)||ePw))}catch(eN){}});
+        }catch(ePw2){}
+      }});
     app.commands.addCommand({id:"ohsidian-diag-plugins",name:"OHSidian 诊断: 插件排查（清单 / 错误 / 日志）",
       callback:function(){try{ohsidianRunPluginIntegrityProbe()}catch(e){}}});
     app.commands.addCommand({id:"ohsidian-diag-plugins-clear",name:"OHSidian 诊断: 清空插件错误记录",

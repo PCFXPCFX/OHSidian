@@ -1658,6 +1658,42 @@ export class WebAbility extends WebBaseAbility {
     }
   }
 
+  // rev205 (pandoc-on-wasm): the renderer needs the filesystem path of the
+  // bundled pandoc assets (resources/resfile/pandoc). resourceDir is the HAP
+  // installation directory; the renderer reads this from the mode file.
+  private publishPandocDir(): void {
+    let pandocDir: string = '';
+    try {
+      pandocDir = this.context.resourceDir + '/resources/resfile/pandoc';
+    } catch (eDir) {
+      LogUtil.warn(TAG, 'resourceDir unavailable for pandoc: ' + JSON.stringify(eDir));
+      return;
+    }
+    try {
+      const filesDir: string = this.context.getApplicationContext().filesDir;
+      const filePath: string = filesDir + '/ohsidian-mode.json';
+      let cfg: Record<string, Object> = {};
+      try {
+        if (fileIo.accessSync(filePath)) {
+          cfg = JSON.parse(fileIo.readTextSync(filePath)) as Record<string, Object>;
+          if (!cfg) {
+            cfg = {};
+          }
+        }
+      } catch (eRead) {
+        cfg = {};
+      }
+      if (cfg['pandocDir'] === pandocDir) {
+        return;
+      }
+      cfg['pandocDir'] = pandocDir;
+      this.publishModeFileAtomic(filePath, cfg);
+      LogUtil.info(TAG, 'pandoc dir published: ' + pandocDir);
+    } catch (err) {
+      LogUtil.error(TAG, 'failed to write pandocDir to mode file: ' + JSON.stringify(err));
+    }
+  }
+
   // Publishes the installed system font family names (font.getSystemFontList)
   // into the mode file as cfg.systemFonts. The renderer's font picker
   // (OHSidian: 界面字体命令) offers these so the user can apply the font
@@ -2726,6 +2762,7 @@ export class WebAbility extends WebBaseAbility {
     // guards, and if the first attempt throws, a later window must retry
     // instead of leaving the process without the listener until restart.
     this.publishDocumentsDir();
+    this.publishPandocDir();
     this.registerSystemConfigListener();
     if (!WebAbility.bootPublishesDone) {
       WebAbility.bootPublishesDone = true;

@@ -63,11 +63,14 @@ agent 探针只通过 `node scripts/build-agent.mjs` 临时注入，产物在
 3. 从 `build-profile.example.json5` 生成 CI 专用 `build-profile.json5`：
    **compatible `6.0.2(22)` / target `6.1.1(24)`**（与真机验证组合一致）；
 4. `update-obsidian.mjs --repatch` 下载、校验并注入补丁；
-5. `verify-asar.cjs` + `verify-release.cjs`；
-6. `hvigorw assembleHap`；
-7. 按桌面图标矩阵（`ohsidian` / `obsidian`）各产出一个 HAP，附
+5. `build-pandoc-wasm.mjs` 下载官方 pandoc-wasm（pinned + sha256），生成
+   `resources/resfile/pandoc/`（`pandoc.wasm.gz` ≈ 15.5 MB + 打包后的 service）；
+6. `verify-pandoc-wasm.cjs` 行为门禁（markdown→html/docx、Lua filter、PDF 拒绝）；
+7. `verify-asar.cjs` + `verify-release.cjs`；
+8. `hvigorw assembleHap`；
+9. 按桌面图标矩阵（`ohsidian` / `obsidian`）各产出一个 HAP，附
    `SHA256SUMS.txt`、`MD5SUMS.txt` 与图标预览；
-8. tag 推送时合并矩阵产物，创建 GitHub Release；手动触发时作为 workflow artifact。
+10. tag 推送时合并矩阵产物，创建 GitHub Release；手动触发时作为 workflow artifact。
 
 ### 2.1 必须配置一次的变量
 
@@ -186,6 +189,13 @@ Get-FileHash .\OHSidian-v2.0.1-*-icon-unsigned.hap -Algorithm MD5
   有「加载失败」弹窗 = 文件可能被截断（`BAD`，卸载后换网络重装）；无弹窗、只是设置页缺失 =
   `secretStorage` 吞错型（看 `secretStorage` 行，`WARN … false（明文模式）` 属正常）。完整
   排查链路见 `docs/PLATFORM-ADAPTATION.md` §六。
+- **插件用 pandoc 导出失败**：本版内置 pandoc 3.10（WebAssembly，+≈16 MB），插件用
+  `execFile`/`spawn` 调 pandoc 会被自动接管，`--version`/md→docx/html/epub/pptx/odt/Lua filter
+  /reference-doc 均可用，**PC 与平板一致，无需弱沙箱或外部二进制**。不支持：PDF 输出（需
+  LaTeX/Typst，请改用内置 PDF 导出）、远程 URL 资源（不联网）、可执行 filter（仅 Lua）。
+  诊断：设置 →「诊断」→「Pandoc（内置 WASM）」→ 自检，或命令面板同名命令。
+  构建侧：`npm ci --prefix scripts && node scripts/build-pandoc-wasm.mjs`（未执行时内置 pandoc
+  显示"不可用"，但不会影响其它功能）。
 - **需要渲染层日志**：error 级默认就落盘（`<Documents|userData>/OHSidian/console.log`，
   512 KB 轮转）；要 log/info 全量，用命令面板「OHSidian 诊断: 运行日志捕获」或 设置 →「诊断」组
   的「运行日志捕获 → 切换」切到「全量」并重启（重启生效）。「补丁与设置状态」报告现在自带

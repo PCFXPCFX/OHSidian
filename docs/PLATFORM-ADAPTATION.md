@@ -466,3 +466,37 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 
 **排查顺序建议**：先看「插件清单」的 `!` 尾注定位是哪个插件、再看「插件错误」拿栈、
 最后看「渲染层日志」补齐上下文；把整份报告复制给维护者即可。
+
+### 6.11 内置 Pandoc（WebAssembly，rev 205）
+
+**目标**：在不申请 `CUSTOM_SANDBOX`（平板平台禁 `fork+exec`、HNP/HAP-bin 仅 PC/2in1）的前提下，
+让 PC 与平板都能使用**真实 Pandoc**（不是子集实现）。
+
+**方案**：内置官方 WebAssembly 构建 [`pandoc/pandoc-wasm`](https://github.com/pandoc/pandoc-wasm)
+（Pandoc 3.10，GPL-2.0-or-later），在渲染进程内执行，不经过 `execve`。
+
+| 部件 | 说明 |
+| --- | --- |
+| `scripts/build-pandoc-wasm.mjs` | 按 `scripts/pandoc-wasm.lock.json` 下载 npm 包并校验 sha256；生成 `pandoc.wasm.gz`（55.9 MB → 15.5 MB）+ 打包后的 `pandoc-service.cjs`（core.js + WASI shim + CLI 适配，≈83 KB）；同时写出 GPL/来源说明。 |
+| `scripts/pandoc-wasm/service-core.mjs` | CLI 适配层：`shellSplit`/`parseArgs`、输入与资源读取、`--reference-doc`/`--template`/`--bibliography`/`--csl`/Lua filter/image 收集、`--version` 快速应答、PDF/可执行 filter 的明确拒绝；`createService(createPandocInstance,{wasmGzPath})` 懒加载 wasm。 |
+| `scripts/patches/pandoc-wasm.js` | 渲染层补丁：`Module._load` hook，把插件的 `require("child_process")` 换成 shim（`exec`/`execFile`/`spawn` 接管 pandoc；`execSync`/`spawnSync` 明确报错）、`lookpath`/`which` 返回占位路径；定位 `pandocDir`（ArkTS 发布）并暴露 `window.__ohsidianPandoc`。 |
+| `WebAbility.publishPandocDir()` | 把 `resourceDir + '/resources/resfile/pandoc'` 写入模式文件，渲染层据此读资源。 |
+| 设置/诊断 | 设置「诊断」组新增「Pandoc（内置 WASM）」（状态 + 自检）；状态报告「功能」段新增 `Pandoc(内置)` 行；命令 `OHSidian 诊断: Pandoc（内置 WASM）自检`。 |
+
+**实测（本机 Node，pandoc-wasm@1.1.0）**：gunzip+实例化 ≈0.3 s；md→docx 80–300 ms（首次 ≈1 s）；
+md→html/pptx/odt/epub 毫秒级；285 KB md→html ≈2.8 s；`--version` 不加载 wasm（1 ms）。
+HAP 增大 ≈16 MB（原始 120.5 MB → 137.7 MB）。
+
+**已知限制**（插件兼容边界）：
+1. **不能输出 PDF**（Pandoc 的 PDF 需要外部 LaTeX/Typst/xelatex；拦截层返回明确错误并指向内置 PDF 导出）；
+2. 沙箱内不联网：远程图片/URL 资源需由调用方先本地化（本地图片会被自动收集传入）；
+3. 只支持 Lua filter，可执行 filter（`--filter` 指向脚本/程序）会被拒绝；
+4. `execSync`/`spawnSync` 无法在异步 WASM 引擎上同步阻塞，明确报错（主流插件用异步 `exec`/`spawn`）；
+5. 大文档在单线程 WASM 中较慢（≈3 s/300 KB），可接受；内存峰值 +100–200 MB。
+
+**合规**：pandoc-wasm/pandoc.wasm 为 GPL-2.0-or-later；HAP 内附 `LICENSE-pandoc-wasm.txt` 与
+`PANDOC-SOURCE.txt`（源码/构建来源）。项目源码本身公开，满足 GPL 的源码提供义务。
+
+**门禁**：`node scripts/build-pandoc-wasm.mjs --check`（lock sha256）与 `node scripts/verify-pandoc-wasm.cjs`
+（真实转换：md→html/docx、reference-doc、Lua filter、本地图片、PDF/exec-filter 拒绝、`--version` 延迟）；
+`verify-asar` 另有 2 条标记（patch 已内置、诊断已接线）。
