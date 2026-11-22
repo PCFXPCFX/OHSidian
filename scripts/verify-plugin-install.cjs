@@ -166,6 +166,11 @@ check('BRAT bundle fingerprint + failure source locator present',
   app.includes('BRAT main.js 指纹') &&
   app.includes('__ohsidianPluginTabError') &&
   app.includes('失败位置（'));
+check('BRAT fingerprint normalizes the install transform (no false positive)',
+  app.includes('归一化(去掉内核追加的 nosourcemap 标记)') &&
+  app.includes('安装时追加的 +18 B 标记属正常'));
+check('diagnostic detects a plugin file replaced after boot',
+  app.includes('BRAT 文件时效') && app.includes('当前运行的是旧代码'));
 
 /* ---- Behaviour: synthetic downloads ------------------------------------- */
 if (helperSrc) {

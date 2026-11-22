@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→199）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→200）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 199、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 200、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5414,6 +5414,15 @@ NF-015 拦不到。**内核侧无需改**：处置是重装官方插件。为此
 「BRAT 失败位置」（按栈的行/列打印源码窗口、`getSettingDefinitions` 附近代码、i18n 函数是否存在），
 让同类问题一次定位到文件而不是内核。设置页补注册兜底保留（对完整 bundle 有效）。
 
+**rev 200（真机复测）**：用户从官方仓库重装后，诊断显示 `main.js` = 138,891 B/46 行/`44956ba123c4d1a1`——
+这正是**官方 2.2.0 资产经内核 `installPlugin` 处理后的形态**（安装会追加 `/* nosourcemap */` 标记：
++18 B、+1 行）。rev199 的指纹表只存了原始资产哈希（138,873 B/45 行/`d2fb579d4e83162a`），
+因此把合法安装误判成「非官方构建」——rev200 先按安装规则归一化再比对，并同时接受两种哈希。
+同一次诊断还显示 `已注册插件设置页(11)` 已含 `obsidian42-brat`、自愈无待办：**设置页已注册成功**，
+日志里 03:48 的 `R is not a function` 来自重装前启动的旧实例（控制台日志是累积的）。
+rev200 因此再加一段「BRAT 文件时效」：`main.js` 修改时间晚于本会话启动时间就判「当前运行的是旧代码」，
+提示必须**完全退出应用**（不是切后台）再启动。结论：本例根因是旧/残缺构建 + 重装后未重启，
+内核无需改动。
 **仍未完成**（原记）：
 BRAT settingsTab 的 `update()/display()` 在本端口抛错、或 `registerObsidianProtocolHandler` 抛错；
 拿到栈后再决定是补平台 API 还是继续用补注册兜底。

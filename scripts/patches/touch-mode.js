@@ -4708,8 +4708,21 @@ function ohsidianRunPluginIntegrityProbe(){
           try{bratBytes=Buffer.byteLength(bratTxt,"utf8")}catch(eBB){bratBytes=bratTxt.length}
           var bratLines=bratTxt.split("\n").length;
           var bratSha=cr.createHash("sha256").update(bratTxt,"utf8").digest("hex").slice(0,16);
+          /* installPlugin appends the "nosourcemap" marker (+18 B, +1 line), so a
+             legitimate market install never hashes like the raw release asset.
+             Strip that marker (and any sourcemap comment) before comparing. */
+          var bratNorm=bratTxt;
+          try{bratNorm=bratTxt.replace(/\n\/\* nosourcemap \*\/\s*$/,"").replace(f4p,"")}catch(eNorm){}
+          var bratNormBytes=0;
+          try{bratNormBytes=Buffer.byteLength(bratNorm,"utf8")}catch(eNB){bratNormBytes=bratNorm.length}
+          var bratNormSha=cr.createHash("sha256").update(bratNorm,"utf8").digest("hex").slice(0,16);
           add("  BRAT main.js 指纹: "+bratBytes+" B · "+bratLines+" 行 · sha256(16)="+bratSha);
-          if(BRAT_KNOWN[bratSha]){
+          if(bratNormSha!==bratSha){
+            add("  归一化(去掉内核追加的 nosourcemap 标记): "+bratNormBytes+" B · "+(bratNorm.split("\n").length)+" 行 · sha256(16)="+bratNormSha);
+          }
+          if(BRAT_KNOWN[bratNormSha]){
+            add("  判定: "+BRAT_KNOWN[bratNormSha]+"（归一化后匹配；安装时追加的 +18 B 标记属正常）");
+          }else if(BRAT_KNOWN[bratSha]){
             add("  判定: "+BRAT_KNOWN[bratSha]);
           }else{
             add("  判定: 非官方/未知构建（镜像站、重打包或开发版常见）。");
@@ -4751,9 +4764,32 @@ function ohsidianRunPluginIntegrityProbe(){
       var diagBratDir=(man["obsidian42-brat"]&&man["obsidian42-brat"].dir)||(diagCfgDir+"/plugins/obsidian42-brat");
       a.exists(diagBratDir+"/brat-migrations.json").then(function(has){
         add("  BRAT 迁移标记: "+(has?"存在（迁移已跑过）":"不存在（全新安装 → 每次启动都会重跑迁移）"));
+      },function(){}).then(function(){
         appendLogTail();
-        show();
-      },function(){appendLogTail();show()});
+        /* rev200: reinstalling a plugin while the app runs does NOT reload it;
+           the in-memory instance keeps the old code until a full restart. The
+           disk mtime vs renderer boot time makes that visible (the 2026-11-22
+           report showed errors from a stale instance right after a reinstall). */
+        return a.stat(diagBratDir+"/main.js").then(function(stB){
+          try{
+            var bootAt=0;
+            try{bootAt=performance.timeOrigin||0}catch(eBt){}
+            var mtimeB=(stB&&stB.mtime)||0;
+            if(bootAt&&mtimeB){
+              add("");
+              add("▍BRAT 文件时效");
+              add("  本会话启动: "+new Date(bootAt).toISOString());
+              add("  main.js 修改: "+new Date(mtimeB).toISOString());
+              if(mtimeB>bootAt+1500){
+                add("  BAD  文件在本会话加载之后被替换过 —— 当前运行的是旧代码！");
+                add("       请完全退出应用（不是切后台）再启动，然后重跑本诊断。");
+              }else{
+                add("  OK   文件早于本会话启动：当前运行的就是磁盘上的这份。");
+              }
+            }
+          }catch(eMt){}
+        },function(){});
+      }).then(function(){show()});
     },function(){show()});
   }catch(eOuter){
     add("  检查失败: "+String((eOuter&&eOuter.message)||eOuter));
@@ -4765,7 +4801,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="199";
+var OHSIDIAN_PATCH_REV="200";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
