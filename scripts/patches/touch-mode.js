@@ -4129,12 +4129,27 @@ function ohsidianSettingsRows(root){
         var ok=ohsidianWriteUiPrefs(prefs);
         try{new Notice("OHSidian: 嵌入网页字体跟随 → "+(on?"开":"关")+(ok?"（重开该网页生效）":"（写入失败）"),5000)}catch(e){}
       });
-    /* rev211: logging has its own section at the bottom of this page. */
+    /* rev212: advanced sections (Pandoc / 诊断 / 日志) are hidden by default;
+       normal users do not need them. The switch below reveals them and the
+       choice is remembered in ui-prefs. */
+    var advEls=[];
+    var showAdvRow=itemEl(basic,"显示高级信息",
+      "展开 Pandoc 内置引擎、诊断与日志分区；普通使用无需开启。");
+    toggleEl(showAdvRow,ohsidianReadUiPrefs().showDiagnostics===true,
+      function(on){
+        try{
+          var prefs=ohsidianReadUiPrefs();
+          prefs.showDiagnostics=!!on;
+          ohsidianWriteUiPrefs(prefs);
+        }catch(eS){ }
+        for(var i=0;i<advEls.length;i++){
+          try{advEls[i].style.display=on?"":"none"}catch(eD){}
+        }
+      });
     /* 手写笔设置现在是独立的“手写笔”选项卡，见 ohsidianBuildStylusTab(). */
     /* --- Pandoc（内置引擎信息） --- */
-    /* rev211: a dedicated Pandoc section explains the EMBEDDED engine for
-       other users: version / status / location / host. One control per row.
-       The external path input stays here (environment check only). */
+    /* rev212: info rows only; paths are copy buttons (they were clipped when
+       displayed inline). One control per row. */
     var pandocGroup=newGroup("Pandoc");
     var pvInfo=function(){
       try{
@@ -4149,18 +4164,33 @@ function ohsidianSettingsRows(root){
         };
       }catch(eV){return {version:"-",status:"未知",dir:"-",host:"-"}}
     };
-    var addInfoValue=function(list,title,desc,value,mono){
+    var addInfoValue=function(list,title,desc,value){
       var ctl=itemEl(list,title,desc);
       var v=mk("span","",String(value));
-      v.style.cssText="font-size:var(--font-ui-smaller);color:var(--text-muted);"+(mono?"word-break:break-all;":"")+
-        "max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+      v.style.cssText="font-size:var(--font-ui-smaller);color:var(--text-muted);";
       ctl.appendChild(v);
       return v;
+    };
+    var addCopyRow=function(list,title,desc,getValue){
+      var ctl=itemEl(list,title,desc);
+      if(!ctl)return;
+      var btn=mk("button","","复制");
+      btn.addEventListener("click",function(){
+        try{
+          var value=String(getValue()||"");
+          ohsidianCopyText(value,function(ok){
+            btn.textContent=ok?"已复制":"复制失败";
+            setTimeout(function(){btn.textContent="复制"},1500);
+          });
+        }catch(eC){btn.textContent="复制失败";setTimeout(function(){btn.textContent="复制"},1500)}
+      });
+      btn.style.cssText="padding:2px 10px;font-size:var(--font-ui-smaller);";
+      ctl.appendChild(btn);
     };
     var pandocNow=pvInfo();
     addInfoValue(pandocGroup,"版本","内置 WebAssembly 引擎版本",pandocNow.version);
     addInfoValue(pandocGroup,"状态","引擎运行状态",pandocNow.status);
-    addInfoValue(pandocGroup,"位置","随 HAP 安装的资源目录",pandocNow.dir,true);
+    addCopyRow(pandocGroup,"位置","随 HAP 安装的资源目录（复制路径）",function(){return pandocNow.dir});
     addInfoValue(pandocGroup,"宿主","执行进程",pandocNow.host);
     var extPathCtl=itemEl(pandocGroup,"外部路径","仅用于环境检查，不参与导出");
     if(extPathCtl){
@@ -4203,10 +4233,9 @@ function ohsidianSettingsRows(root){
       });
       selfTestCtl.appendChild(selfTestBtn);
     }
+    advEls.push(pandocGroup.parentNode);
 
-    /* --- 诊断（页面最底部） --- */
-    /* rev211: one native row per action, one button per row; only one report
-       may run at a time (locked until its modal closes). */
+    /* --- 诊断（页面底部） --- */
     var diag=newGroup("诊断");
     var diagRunRow=function(list,title,desc,run){
       var ctl=itemEl(list,title,desc);
@@ -4227,30 +4256,85 @@ function ohsidianSettingsRows(root){
       clearPluginBtn.addEventListener("click",function(){try{ohsidianClearPluginErrors()}catch(eC){} });
       clearPluginCtl.appendChild(clearPluginBtn);
     }
+    advEls.push(diag.parentNode);
 
-    /* --- 日志（诊断之后，页面最底部） --- */
+    /* --- 日志（最底部，独立分区；开关 + 选项卡） --- */
     var logGroup=newGroup("日志");
-    var logLevelCtl=itemEl(logGroup,"日志档位","仅错误 / 全量 / 关闭；重启生效");
-    if(logLevelCtl){
-      var logLevelVal=mk("span","",ohsidianConsoleCaptureLabel());
-      logLevelVal.style.cssText="margin-right:8px;font-size:var(--font-ui-smaller);color:var(--text-muted);";
-      var logLevelBtn=mk("button","","切换");
-      logLevelBtn.addEventListener("click",function(){
-        try{logLevelVal.textContent=ohsidianCycleConsoleCapture()}catch(eL){}
+    var captureRow=itemEl(logGroup,"日志捕获","开启后渲染层日志写入 console.log（默认仅错误）");
+    toggleEl(captureRow,ohsidianLogCaptureOn(),function(on){
+      ohsidianSetLogCapture(on);
+      if(typeof refreshLogPreview==="function")refreshLogPreview();
+    });
+    var verboseRow=itemEl(logGroup,"详细日志","记录 log/info 等全部级别（重启生效）");
+    toggleEl(verboseRow,ohsidianLogVerboseOn(),function(on){
+      ohsidianSetLogVerbose(on);
+      if(typeof refreshLogPreview==="function")refreshLogPreview();
+    });
+    var logTabRow=itemEl(logGroup,"日志详情","选项卡: 运行日志 / 插件错误");
+    var logTab="app";
+    var tabAppBtn=mk("button","","运行日志");
+    var tabPluginBtn=mk("button","","插件错误");
+    var logPre=mk("pre","ohsidian-log-preview");
+    logPre.style.cssText="white-space:pre-wrap;word-break:break-all;margin:0 0 8px;padding:8px;"+
+      "border-radius:6px;background:var(--background-secondary);font-size:11px;max-height:180px;overflow:auto;";
+    var refreshLogPreview=function(){
+      var text="";
+      try{
+        if(logTab==="app"){
+          var lines=ohsidianLogTailLines(40)||[];
+          text=lines.join("\n");
+        }else{
+          var errs=typeof ohsidianEnsurePluginErrors==="function"?ohsidianEnsurePluginErrors():[];
+          var out=[];
+          for(var i=0;i<errs.length;i++){
+            var e2=errs[i];
+            out.push((e2.plugin||"?")+"  "+(e2.line||"")+(e2.count&&e2.count>1?(" x"+e2.count):""));
+          }
+          text=out.join("\n");
+        }
+      }catch(eR){text="读取失败"}
+      if(!text)text="(空)";
+      logPre.textContent=text;
+      tabAppBtn.disabled=(logTab==="app");
+      tabPluginBtn.disabled=(logTab==="plugin");
+    };
+    tabAppBtn.addEventListener("click",function(){logTab="app";refreshLogPreview()});
+    tabPluginBtn.addEventListener("click",function(){logTab="plugin";refreshLogPreview()});
+    logTabRow.appendChild(tabAppBtn);
+    logTabRow.appendChild(tabPluginBtn);
+    logGroup.appendChild(logPre);
+    refreshLogPreview();
+    var copyLogCtl=itemEl(logGroup,"复制日志","复制当前选项卡内容");
+    if(copyLogCtl){
+      var copyLogBtn=mk("button","","复制");
+      copyLogBtn.addEventListener("click",function(){
+        try{ohsidianCopyText(logPre.textContent||"",function(ok){
+          copyLogBtn.textContent=ok?"已复制":"复制失败";
+          setTimeout(function(){copyLogBtn.textContent="复制"},1500);
+        })}catch(eCL){}
       });
-      logLevelCtl.appendChild(logLevelVal);
-      logLevelCtl.appendChild(logLevelBtn);
+      copyLogCtl.appendChild(copyLogBtn);
     }
-    var clearLogCtl=itemEl(logGroup,"清空渲染层日志","清空 console.log");
+    var clearLogCtl=itemEl(logGroup,"清空当前日志","清空当前选项卡对应的日志");
     if(clearLogCtl){
       var clearLogBtn=mk("button","","清空");
-      clearLogBtn.addEventListener("click",function(){try{ohsidianClearConsoleLog()}catch(eCL){} });
+      clearLogBtn.addEventListener("click",function(){
+        try{
+          if(logTab==="app")ohsidianClearConsoleLog();
+          else if(typeof ohsidianClearPluginErrors==="function")ohsidianClearPluginErrors();
+          refreshLogPreview();
+        }catch(eCLR){}
+      });
       clearLogCtl.appendChild(clearLogBtn);
     }
-    addInfoValue(logGroup,"日志文件","console.log 路径",ohsidianConsoleLogPath()||"-",true);
-    var errPath="-";
-    try{errPath=ohsidianPluginErrorsPath()||"-"}catch(eEP){}
-    addInfoValue(logGroup,"错误记录","plugin-errors.json 路径",errPath,true);
+    addCopyRow(logGroup,"日志文件","console.log 位置（复制路径）",function(){return ohsidianConsoleLogPath()||""});
+    addCopyRow(logGroup,"错误记录","plugin-errors.json 位置（复制路径）",function(){
+      try{return ohsidianPluginErrorsPath()||""}catch(eE){return ""}
+    });
+    advEls.push(logGroup.parentNode);
+    for(var advI=0;advI<advEls.length;advI++){
+      try{advEls[advI].style.display=(ohsidianReadUiPrefs().showDiagnostics===true)?"":"none"}catch(eAdv){}
+    }
   }catch(e){
     window.__ohsidianSettingsError="渲染设置页失败: "+String((e&&e.message)||e);
     try{console.warn("[OHSidian] settings rows failed:",window.__ohsidianSettingsError)}catch(e2){}
@@ -4995,21 +5079,30 @@ function ohsidianCycleConsoleCapture(){
   }catch(e){}
   return label;
 }
+/* rev212: switches used by the Logs section. Capture off = "0"; capture on
+   = default (errors only); verbose = "1". */
+function ohsidianLogCaptureOn(){
+  try{return localStorage.getItem("ohsidianConsoleCapture")!=="0"}catch(e){return true}
+}
+function ohsidianLogVerboseOn(){
+  try{return localStorage.getItem("ohsidianConsoleCapture")==="1"}catch(e){return false}
+}
+function ohsidianSetLogCapture(on){
+  try{
+    if(on)localStorage.removeItem("ohsidianConsoleCapture");
+    else localStorage.setItem("ohsidianConsoleCapture","0");
+  }catch(e){}
+}
+function ohsidianSetLogVerbose(on){
+  try{
+    if(on)localStorage.setItem("ohsidianConsoleCapture","1");
+    else if(ohsidianLogCaptureOn())localStorage.removeItem("ohsidianConsoleCapture");
+  }catch(e){}
+}
 /* rev203: the status report (command palette AND settings) also carries the
    console.log tail, so "补丁与设置状态" is a single support attachment too. */
 function ohsidianShowStatusReport(onClose){
   var L=ohsidianBuildStatusLines();
-  try{
-    L.push("");
-    L.push("▍渲染层日志（console.log 末尾，最多 40 行；优先错误/插件行）");
-    var tail=ohsidianLogTailLines(40);
-    for(var i=0;i<tail.length;i++)L.push(tail[i]);
-    L.push("");
-    L.push("  日志文件: "+(ohsidianConsoleLogPath()||"(不可用)"));
-    L.push("  插件错误记录: "+((typeof ohsidianPluginErrorsPath==="function"&&ohsidianPluginErrorsPath())||"(不可用)"));
-  }catch(e){
-    L.push("  日志读取失败: "+String((e&&e.message)||e));
-  }
   try{ohsidianShowReportModal("OHSidian 诊断: 补丁与设置状态",L,onClose)}catch(e2){}
 }
 /* NF-015 / NF-018 on-device adjudication (report 2026-11-22 §五). The console
@@ -5316,7 +5409,7 @@ function ohsidianRunPluginIntegrityProbe(onClose){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="211";
+var OHSIDIAN_PATCH_REV="212";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -5389,14 +5482,7 @@ function ohsidianBuildStatusLines(){
   try{var bp=window.__ohsidianPandoc&&window.__ohsidianPandoc.status();
     if(bp)builtin=bp.version+" / "+(bp.host||"renderer")+" / "+(bp.ready?"ready":(bp.error?"error":"lazy"))}catch(eB){}
   row("Pandoc内置",builtin);
-  row("日志档位",ohsidianConsoleCaptureLabel());
-  var logPath="";
-  try{logPath=ohsidianConsoleLogPath()||""}catch(eLP){}
-  row("日志文件",logPath||"unavailable");
-  var sessionLines="?";
-  try{var lt=ohsidianLogTailLines(1);
-    for(var i=0;i<lt.length;i++){var m=/本会话日志 (\d+) 行/.exec(lt[i]);if(m){sessionLines=m[1];break}}}catch(eLT){}
-  row("日志本会话",sessionLines+" 行");
+
   sec("插件");
   var installed="?",tabs="?",errors="0";
   try{installed=String(Object.keys((window.app.plugins&&window.app.plugins.manifests)||{}).length)}catch(eI){}

@@ -236,6 +236,10 @@ try {
       app.includes('diagRunRow(diag,"通用诊断"') &&
       app.includes('diagRunRow(diag,"Pandoc 诊断"') &&
       app.includes('diagRunRow(diag,"插件诊断"'),
+    'app advanced sections hidden by default':
+      app.includes('showDiagnostics') && app.includes('显示高级信息'),
+    'app path rows are copy buttons':
+      app.includes('addCopyRow(') && app.includes('复制失败'),
     'app single diagnostic at a time':
       app.includes('__ohsidianDiagBusy') && app.includes('ohsidianDiagRunWithLock'),
     'app diagnostics commands removed':
@@ -246,10 +250,10 @@ try {
       app.includes('补丁: "+OHSIDIAN_PATCH_REV') &&
       app.includes('内核: "+kernel'),
     'app logs have their own section':
-      app.includes('itemEl(logGroup,"日志档位"') && app.includes('ohsidianCycleConsoleCapture'),
+      app.includes('itemEl(logGroup,"日志捕获"') && app.includes('itemEl(logGroup,"日志详情"') && app.includes('refreshLogPreview'),
     'app status report carries console log':
       app.includes('function ohsidianLogTailLines(') &&
-      app.includes('▍渲染层日志（console.log 末尾，最多 40 行；优先错误/插件行）'),
+      app.includes('ohsidian-log-preview'),
     // rev204: the log tail is current-session only (older boot records look like
     // live defects on a support screenshot) and the renderer log can be cleared.
     'app log tail is session-only':
@@ -257,7 +261,7 @@ try {
       app.includes('已折叠更早会话'),
     'app clear renderer log':
       app.includes('function ohsidianClearConsoleLog()') &&
-      app.includes('itemEl(logGroup,"清空渲染层日志"'),
+      app.includes('itemEl(logGroup,"清空当前日志"'),
     'app sandbox diagnosis explains strong':
       app.includes('function ohsidianSandboxMeta()') &&
       app.includes('本包未声明 CUSTOM_SANDBOX') &&

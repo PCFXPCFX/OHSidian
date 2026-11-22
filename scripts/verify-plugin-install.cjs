@@ -140,7 +140,7 @@ check('console bridge uses a real ipcRenderer handle',
 check('vault-open migration uses the same IPC handle',
   app.includes('var vaultIpc=ohsidianIpcRenderer();'));
 check('log capture cycle exposed in logs section',
-  app.includes('ohsidianCycleConsoleCapture') && app.includes('日志档位'));
+  app.includes('ohsidianLogCaptureOn') && app.includes('日志捕获'));
 check('renderer safeStorage fallback block present',
   app.includes('window.__ohsidianSafeStorageFallback=') &&
   app.includes('getSelectedStorageBackend:function(){return "basic_text"}'));

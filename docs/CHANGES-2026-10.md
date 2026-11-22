@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→211）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→212）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 211、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 212、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5666,3 +5666,20 @@ verify-plugin-install/verify-release 全绿；assembleHap BUILD SUCCESSFUL；HAP
 verify-plugin-install/verify-release 全绿；assembleHap BUILD SUCCESSFUL；HAP 内 asar 复核 rev211。
 **真机待验**：页面底部依次为 Pandoc / 诊断 / 日志 三个分区，样式与其它设置一致；诊断每次只能运行一个；
 Pandoc 外部路径默认显示内置位置；自检按钮单独一行。
+
+### 二十三、rev 212：高级信息默认隐藏、路径改复制按钮、日志分区加开关与选项卡
+
+按反馈继续收敛：
+
+- **普通用户默认看不到**：常规组新增「显示高级信息」开关（默认关，保存在 ui-prefs），关闭时 Pandoc/诊断/日志三个
+  分区整体隐藏；只有排障时才展开；
+- **路径只提供复制按钮**：Pandoc「位置」、日志「日志文件 / 错误记录」不再内联显示（会被截断），改为每行一个「复制」
+  按钮，复制成功/失败有短反馈；
+- **日志分区可开关 + 选项卡**：「日志捕获」开关（开=按默认仅错误记录，关=不写日志）、「详细日志」开关（全量级别）；
+  「日志详情」选项卡在「运行日志 / 插件错误」间切换并预览内容，另有「复制日志」「清空当前日志」各自独立行；
+- **诊断不再混日志**：通用诊断报告去掉日志尾部/日志行（日志由独立分区提供）。
+
+**验证**：--repatch/verify-asar（新增「高级信息默认隐藏 / 路径复制按钮 / 日志开关+选项卡 / 诊断无日志」标记）/
+verify-plugin-install/verify-release 全绿；assembleHap BUILD SUCCESSFUL；HAP 内 asar 复核 rev212。
+**真机待验**：改动后三个分区默认不可见；「显示高级信息」打开后出现；Pandoc/日志路径行只有复制按钮；
+日志开关与两个选项卡可用。
