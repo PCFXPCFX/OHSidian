@@ -218,7 +218,7 @@ profile 再重签即可。离线改 profile 再自签**不可行**：profile 由
 
 > 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象
 > `main @ e528275`）。报告结论一句话：**两个插件不是同一种死法，也都不是 2.0 的代码改动
-> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **206**）；
+> 杀的**。工程侧可修的是它列的 NF-015/016/017/018 四条，本轮全部落地（补丁 rev **207**）；
 > 报告里"2.0 无关"的增量考古（补丁层/引擎层 diff 与 eval/require/loadPlugin 零交集）不再
 > 赘述，见原报告第三部分。
 
@@ -383,7 +383,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 
 ### 6.7 真机定谳步骤（替代报告 §五的控制台探针）
 
-1. 装本版（rev 206）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
+1. 装本版（rev 207）HAP；命令面板 →「OHSidian 诊断: 插件完整性与安全存储」；
 2. `secretStorage` 行：期望 `WARN adapter=有 · isEncryptionAvailable=false（明文模式）`，
    `引擎 safeStorage: undefined（引擎缺口；补丁已兜底为明文透传）`——若 remote 对象整体缺失则
    该行显示 `window.electron.remote 不可用`，同属引擎缺口，补丁同样兜底；
@@ -402,7 +402,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 - `node scripts/update-obsidian.mjs --repatch` → 内嵌 `verify-asar`（含
   `verify-plugin-install` 行为用例）全绿；
 - `assembleHap` **BUILD SUCCESSFUL**；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability`
-  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="206"`、
+  与 `decor API answered 801`；HAP 内 `obsidian.asar` 复核 `OHSIDIAN_PATCH_REV="207"`、
   四条 NF 标记、console bridge 错误默认档；
 - `verify-release` / `check-docs` 全绿；
 - 独立只读审查（2026-11-22，对照冻结态代码 + 出货 asar 逐字）：NF-015/017/018 无 P1/P2；
@@ -506,6 +506,16 @@ HAP 增大 ≈16 MB（原始 120.5 MB → 137.7 MB）。
 2. **自检点下去没有弹窗**：资源缺失时 `getService()` 同步抛错，被点击处理器的 try/catch 吞掉。现在
    `selfTest()`/`run()` 一律返回 Promise（错误走 `.catch`），失败时**总是**打开报告弹窗，内容包含错误 + 路径探针
    （模式字段、引擎路径、每个候选目录是否存在）。另加命令「OHSidian 诊断: Pandoc 路径探针」，可单独取这份列表。
+
+**rev207 修正（真机 rev206 暴露）**：设备渲染进程里 `WebAssembly is not defined`（该鸿蒙引擎的 V8 构建/上下文
+没有 WebAssembly），因此 wasm 引擎不能在渲染进程初始化。修法：
+1. 主进程补丁（`scripts/patches/main-process.js`）注册 `ohs-pandoc-call` / `ohs-pandoc-host` IPC：主进程持有
+   pandoc-service 实例（`require` 资源里的 CJS bundle），转换串行化；
+2. 渲染层 `getService()` 检测 `typeof WebAssembly`：不可用时自动改用主进程代理（`ipcRenderer.invoke`），
+   对外接口不变（`runCli/query/selfTest/info`），插件与设置页无感知；
+3. 自检报告新增「执行位置」与「宿主 WebAssembly：渲染进程/主进程」；失败弹窗也会带这两项，
+   如果主进程同样没有 WebAssembly，报告会明确写出（下一步需换纯 JS/WASM 解释器方案）。
+另外「Pandoc 环境检查」按钮现在也会弹出报告窗口（此前只写入设置页内联区域）。
 
 **门禁**：`node scripts/build-pandoc-wasm.mjs --check`（lock sha256）与 `node scripts/verify-pandoc-wasm.cjs`
 （真实转换：md→html/docx、reference-doc、Lua filter、本地图片、PDF/exec-filter 拒绝、`--version` 延迟）；

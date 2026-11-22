@@ -24,8 +24,8 @@
  * ========================================================================== */
 ;(function () {
   try {
-    if (window.__ohsidianPandocPatchRev === 206) return;
-    window.__ohsidianPandocPatchRev = 206;
+    if (window.__ohsidianPandocPatchRev === 207) return;
+    window.__ohsidianPandocPatchRev = 207;
     if (window.__ohsidianPandoc) return;
 
     var fs = require("fs");
@@ -148,11 +148,14 @@
         mode.resourceDir = cfg.resourceDir;
         mode.bundleCodeDir = cfg.bundleCodeDir;
       } catch (e4) { /* ignore */ }
-      return { dir: cachedDir, mode: mode, env: env, tried: lastTried };
+      return { dir: cachedDir, mode: mode, env: env, tried: lastTried,
+        wasmRenderer: wasmAvailable(), host: serviceHost };
     }
 
     var service = null;
     var serviceError = null;
+    var serviceHost = "";
+    var mainHostInfo = null;
     var bundledVersion = "";
     function pandocVersion() {
       if (bundledVersion) return bundledVersion;
@@ -164,6 +167,59 @@
       return bundledVersion;
     }
 
+    function wasmAvailable() {
+      try {
+        return typeof WebAssembly !== "undefined" && WebAssembly &&
+          typeof WebAssembly.instantiate === "function";
+      } catch (eWasm) { return false; }
+    }
+
+    function ipcHandle() {
+      try {
+        if (window.electron && window.electron.ipcRenderer) return window.electron.ipcRenderer;
+      } catch (e0) { /* ignore */ }
+      try { return require("electron").ipcRenderer; } catch (e1) { /* ignore */ }
+      try { return require("@electron/remote").ipcRenderer; } catch (e2) { /* ignore */ }
+      return null;
+    }
+
+    /* The HarmonyOS engine renderer has no WebAssembly ("WebAssembly is not
+       defined"), so the WASM engine is executed in the main process, which
+       exposes the ohs-pandoc-call IPC. The proxy keeps the same interface as
+       the in-renderer service so callers do not care where it runs. */
+    function createMainService(dir, wasmGzPath, version) {
+      var ipc = ipcHandle();
+      if (!ipc || typeof ipc.invoke !== "function") {
+        throw new Error("渲染进程没有 WebAssembly，且 ipcRenderer.invoke 不可用，无法在主进程执行 pandoc");
+      }
+      var base = { servicePath: path.join(dir, SERVICE_FILE), wasmGzPath: wasmGzPath, version: version };
+      function invoke(req) {
+        var payload = Object.assign({}, base, req || {});
+        return ipc.invoke("ohs-pandoc-call", payload).then(function (r) {
+          if (r && r.__ohsidianError) throw new Error(r.__ohsidianError);
+          return r;
+        });
+      }
+      return {
+        host: "main",
+        version: version,
+        wasmGzPath: wasmGzPath,
+        get ready() { return false; },
+        get lastError() { return ""; },
+        info: function () {
+          return { version: version, ready: false, lastError: "", wasmGzPath: wasmGzPath, host: "main" };
+        },
+        versionText: function () { return "pandoc " + version + "\n"; },
+        ensure: function () { return Promise.resolve(); },
+        runCli: function (args) {
+          return invoke({ kind: "runCli", argv: args.argv, stdin: args.stdin, cwd: args.cwd });
+        },
+        query: function (q) { return invoke({ kind: "query", query: q }); },
+        selfTest: function () { return invoke({ kind: "selfTest" }); },
+        hostInfo: function () { return invoke({ kind: "info" }).then(function () { return mainHostInfo; }); }
+      };
+    }
+
     function getService() {
       if (service) return service;
       if (serviceError) throw serviceError;
@@ -172,6 +228,12 @@
         if (!dir) {
           throw new Error("pandoc 资源未找到（点「自检」可看路径探针；HAP 需包含 resources/resfile/pandoc）");
         }
+        var wasmGzPath = path.join(dir, WASM_FILE);
+        if (!wasmAvailable()) {
+          service = createMainService(dir, wasmGzPath, pandocVersion());
+          serviceHost = "main";
+          return service;
+        }
         var api = require(path.join(dir, SERVICE_FILE));
         if (!api || typeof api.createService !== "function" || typeof api.createPandocInstance !== "function") {
           throw new Error("pandoc-service.cjs 导出不完整");
@@ -179,10 +241,11 @@
         var userData = null;
         try { userData = require("@electron/remote").app.getPath("userData"); } catch (e0) { userData = null; }
         service = api.createService(api.createPandocInstance, {
-          wasmGzPath: path.join(dir, WASM_FILE),
+          wasmGzPath: wasmGzPath,
           version: pandocVersion(),
           tmpDir: userData || undefined
         });
+        serviceHost = "renderer";
         return service;
       } catch (e) {
         serviceError = e;
@@ -471,11 +534,12 @@
     }
 
     window.__ohsidianPandoc = {
-      patchRev: 206,
+      patchRev: 207,
       dir: function () { return pandocDir(); },
       version: function () { return pandocVersion(); },
       status: function () {
-        var s = { version: pandocVersion(), dir: pandocDir(), ready: false, error: "", service: null, tried: lastTried.slice() };
+        var s = { version: pandocVersion(), dir: pandocDir(), ready: false, error: "", service: null,
+          tried: lastTried.slice(), wasmRenderer: wasmAvailable(), host: serviceHost };
         if (service) {
           try {
             var info = service.info();
@@ -497,6 +561,19 @@
         });
       },
       probe: function () { return pandocProbe(); },
+      /* Renderer + main-process WebAssembly capability. The engine renderer
+         reports "WebAssembly is not defined"; if the main process also lacks
+         it this surfaces the fact before the user sees a conversion error. */
+      hostInfo: function () {
+        var out = { renderer: { wasm: wasmAvailable() }, main: mainHostInfo };
+        var ipc = ipcHandle();
+        if (!ipc || typeof ipc.invoke !== "function") return Promise.resolve(out);
+        return ipc.invoke("ohs-pandoc-host").then(function (info) {
+          mainHostInfo = info || null;
+          out.main = mainHostInfo;
+          return out;
+        }).catch(function () { return out; });
+      },
       reset: function () { service = null; serviceError = null; },
       _wrapChildProcess: wrapChildProcess,
       _shellSplit: shellSplit,

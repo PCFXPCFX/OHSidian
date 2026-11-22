@@ -5224,7 +5224,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
 4. 折叠/旋转/连续拖拽改尺寸 → 布局最多翻转一次（合并窗），不出现连续 reload（I9）；
 5. 设置页点「复制结果」→ 剪贴板拿到完整报告（若两条剪贴板路径都被拒，按钮显示「复制失败」，退回命令面板「复制详细信息」）。
 
-## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→206）
+## 第 219 轮 (2026-11-22): 插件加载失败定谳落地（NF-015~018）——安装完整性、`secretStorage` 明文兜底、错误日志默认落盘、decor 能力缓存（补丁 rev 196→207）
 
 输入：外部审计《OHSidian-坚果云与 BRAT 插件加载失败——合并定谳报告》（审计对象 `main @ e528275`）。
 报告结论：**两个插件不是同一种死法，也都不是 2.0 的代码改动杀的**——坚果云 1.6.2 的 4.18 MB
@@ -5309,7 +5309,7 @@ dst: 'a=!1,s=function(e){return u4.hasOwnProperty(e)?'
   4 个 `safeStorage` 兜底用例、7 个诊断输出断言，另加 installPlugin case1/2/10/12 精确接线、
   IPC 句柄与内核真实 `f4`/`v4` 提取断言；不是只查 marker。
 - `--repatch` → 内嵌 verify-asar 全绿；HAP 内 `ets/modules.abc` 含 `WindowDecorCapability` /
-  `decor API answered 801`；HAP 内 asar 复核 rev 206、四条 NF 标记、错误默认档、复制按钮仍在。
+  `decor API answered 801`；HAP 内 asar 复核 rev 207、四条 NF 标记、错误默认档、复制按钮仍在。
 - `assembleHap` **BUILD SUCCESSFUL**；`verify-release` / `check-docs`（73 链接）全绿。
 - 文档：`docs/PLATFORM-ADAPTATION.md` §六（机制/取舍/支持话术/真机步骤）、`docs/RELEASE.md`
   §6 两条 FAQ、`docs/window-state-machine.md` §8.3/§8.5 补 NF-017 边界与取证锚点。
@@ -5576,3 +5576,23 @@ rev 205 与 patch 标记、`modules.abc` 含 `publishPandocDir`、HAP 含 `resou
 `pandocDirTried`/`bundleCodeDir` 探测逻辑。
 **真机待验**：① 设置→诊断→Pandoc（内置 WASM）→自检能弹出结果；② 若仍报未找到，自检弹窗/「Pandoc 路径探针」
 会列出候选目录与存在性，据此可直接定位安装布局；③ 成功后用 Enhancing Export 导出 docx/pptx/epub。
+
+### 十八、rev 207：渲染进程无 WebAssembly → pandoc 自动改由主进程执行
+
+真机 rev206 自检报告：`pandoc 3.10 · 未初始化`，`FAIL version · WebAssembly is not defined`。
+说明该鸿蒙 Electron 引擎的渲染进程 V8 没有 WebAssembly（不是资源路径问题——资源目录已正确解析到
+`/data/storage/el1/bundle/electron/resources/resfile/pandoc`）。
+
+修法：
+- 主进程补丁注册 `ohs-pandoc-call`（runCli/query/selfTest/info，串行执行）与 `ohs-pandoc-host`（typeof
+  WebAssembly + node/electron 版本）；主进程 `require()` 资源里的 `pandoc-service.cjs`，实例按 servicePath 缓存；
+- 渲染层检测 `typeof WebAssembly`：不可用时用 `ipcRenderer.invoke` 代理到主进程，接口与本地服务一致；
+- 自检/失败报告新增「执行位置」与「宿主 WebAssembly（渲染/主进程）」；若主进程也没有 wasm，报告会直接显示
+  `主进程=undefined`，届时需要纯 JS 解释器/预编译 asm.js 方案（另立项）；
+- 「Pandoc 环境检查」设置按钮同时弹出报告窗口。
+
+**验证**：--repatch/verify-asar（新增「pandoc 主进程回退」「主进程 pandoc host」两条标记）/
+verify-pandoc-wasm/verify-release 全绿；assembleHap BUILD SUCCESSFUL；HAP 内 asar 复核 rev207，
+main.js 含主进程服务 host。
+**真机待验**：① 自检报告应显示「执行位置: 主进程」且 version/html/docx 通过；② 若宿主 WebAssembly 行显示
+主进程也是 undefined，把报告发我，下一步做预编译 JS 方案；③ 通过后运行 Enhancing Export 导出 docx/pptx/epub。

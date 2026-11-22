@@ -249,7 +249,7 @@ try {
     // rev205: built-in pandoc (WebAssembly) - renderer loader + child_process
     // shim + settings/status/command surface.
     'app built-in pandoc wasm patched in':
-      app.includes('window.__ohsidianPandocPatchRev = 206') &&
+      app.includes('window.__ohsidianPandocPatchRev = 207') &&
       app.includes('pandoc-service.cjs') &&
       app.includes('__ohsidianPandocWrapped') &&
       app.includes('Pandoc（内置 WASM）'),
@@ -264,6 +264,13 @@ try {
       app.includes('function pandocProbe()') &&
       app.includes('ohsidian-diag-pandoc-paths') &&
       app.includes('ohsidianPandocProbeLines'),
+    // rev207: the engine renderer has no WebAssembly, so the service falls back
+    // to the main process over IPC; host diagnostics report both processes.
+    'app pandoc main-process fallback':
+      app.includes('ohs-pandoc-call') &&
+      app.includes('createMainService') &&
+      app.includes('wasmRenderer') &&
+      app.includes('ohsidianPandocShowFailure'),
     'app font scale follower': app.includes('applyFontScale'),
     'app style-font follower (OhosThemeFont)': app.includes('"OhosThemeFont","HarmonyOS Sans"'),
     'app documents-dir migration': app.includes('pickMigration') && app.includes('当前仓库在应用沙箱内'),
@@ -277,6 +284,9 @@ try {
     'app theme font face bridge': app.includes('applyThemeFontFace'),
     'app no adaptive keyboard poll': !app.includes('isEditing()?'),
     'main IPC guard': main.includes('__ohsidianIpcGuard'),
+    // rev207: pandoc service host in the main process (renderer has no WebAssembly).
+    'main pandoc service host': main.includes('__ohsidianPandocService') &&
+      main.includes('ohs-pandoc-call') && main.includes('ohs-pandoc-host'),
     'main updater disabled': main.includes('(at||(D.updateDisabled=!0))'),
     // The two most load-bearing textual patches: if upstream re-minifies and
     // these go silently unmatched, the app crashes at startup (version gate)

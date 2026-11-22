@@ -497,3 +497,72 @@ if(__ohApp&&__ohIpc&&typeof __ohIpc.on==="function"){
   }
 }
 }catch(e){}})();/*OHSIDIAN-MAIN-PATCH-END*/
+;(function(){try{
+/* rev207: pandoc-on-WebAssembly service host. The HarmonyOS engine's renderer
+   reports "WebAssembly is not defined" (the V8 build/context has no WASM), so
+   the renderer patch falls back to running pandoc here in the main process when
+   the renderer cannot. The renderer sends {servicePath, wasmGzPath, version}
+   + argv/stdin/cwd; conversions are serialized so two exports cannot fight over
+   the ~56 MB instance. If the main V8 also lacks WebAssembly the error is
+   returned verbatim and the settings self-test shows it (host diagnostics). */
+var electronMain=require("electron");
+var ipcMainMain=electronMain&&electronMain.ipcMain;
+if(ipcMainMain&&!ipcMainMain.__ohsidianPandocService){
+  ipcMainMain.__ohsidianPandocService=true;
+  var __ohPandocCache={key:"",api:null,service:null};
+  var __ohPandocChain=Promise.resolve();
+  function __ohPandocHostInfo(){
+    return {
+      wasm:(typeof WebAssembly),
+      wasmInstantiate:(typeof WebAssembly!=="undefined"&&typeof WebAssembly.instantiate),
+      node:String((process.versions&&process.versions.node)||""),
+      electron:String((process.versions&&process.versions.electron)||"")
+    };
+  }
+  function __ohPandocGet(req){
+    if(__ohPandocCache.key!==req.servicePath){
+      __ohPandocCache={key:req.servicePath,api:null,service:null};
+    }
+    if(!__ohPandocCache.api){
+      __ohPandocCache.api=require(req.servicePath);
+    }
+    if(!__ohPandocCache.service){
+      if(!__ohPandocCache.api||typeof __ohPandocCache.api.createService!=="function"||typeof __ohPandocCache.api.createPandocInstance!=="function"){
+        throw new Error("pandoc-service.cjs 导出不完整（主进程）");
+      }
+      __ohPandocCache.service=__ohPandocCache.api.createService(__ohPandocCache.api.createPandocInstance,{
+        wasmGzPath:req.wasmGzPath,version:req.version
+      });
+    }
+    return __ohPandocCache.service;
+  }
+  function __ohPandocRun(req){
+    return __ohPandocChain=__ohPandocChain.then(function(){
+      try{
+        var svc=__ohPandocGet(req);
+        if(req.kind==="selfTest")return svc.selfTest();
+        if(req.kind==="query")return svc.query(req.query);
+        if(req.kind==="info")return svc.info();
+        return svc.runCli({argv:req.argv,stdin:req.stdin,cwd:req.cwd});
+      }catch(e){
+        return {__ohsidianError:String((e&&e.message)||e)};
+      }
+    }).then(function(out){
+      return out;
+    },function(e){return {__ohsidianError:String((e&&e.message)||e)};});
+  }
+  try{
+    ipcMainMain.handle("ohs-pandoc-host",function(){return __ohPandocHostInfo();});
+    ipcMainMain.handle("ohs-pandoc-call",function(event,req){
+      try{
+        if(!req||typeof req.servicePath!=="string"||req.servicePath.indexOf("pandoc-service.cjs")<0){
+          return {__ohsidianError:"非法 pandoc service 路径"};
+        }
+        return __ohPandocRun(req);
+      }catch(e){return {__ohsidianError:String((e&&e.message)||e)};}
+    });
+  }catch(eReg){
+    try{console.warn("[OHSidian] pandoc main IPC registration failed: "+String(eReg&&eReg.message||eReg))}catch(e2){}
+  }
+}
+}catch(e){}})();

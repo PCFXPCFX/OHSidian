@@ -231,6 +231,11 @@ function ohsidianPandocProbeLines(){
     if(!p){L.push("  window.__ohsidianPandoc 不存在（pandoc 补丁未加载）");return L}
     var s=p.status();
     L.push("  状态: "+(s.ready?("已就绪 · pandoc "+s.version):(s.error||"未初始化")));
+    var pr0=p.probe?p.probe():null;
+    if(pr0){
+      L.push("  执行位置: "+(pr0.host==="main"?"主进程（渲染进程 WebAssembly 不可用）":(pr0.wasmRenderer?"渲染进程":"未初始化/自动")));
+      L.push("  WebAssembly(渲染进程): "+(pr0.wasmRenderer?"可用":"不可用"));
+    }
     var pr=p.probe?p.probe():null;
     if(pr){
       if(pr.dir)L.push("  资源目录: "+pr.dir);
@@ -253,6 +258,32 @@ function ohsidianPandocProbeLines(){
     L.push("  探针失败: "+String((eProbe&&eProbe.message)||eProbe));
   }
   return L;
+}
+/* rev207: self-test failure report. Adds the per-process WebAssembly
+   capability: the engine renderer has no WebAssembly, so the service runs in
+   the main process; if the main process lacks it too the report says so. */
+function ohsidianPandocShowFailure(err){
+  var base=["OHSidian 诊断: Pandoc（内置 WASM）自检失败","",
+    "  错误: "+String((err&&err.message)||err),""];
+  base=base.concat(ohsidianPandocProbeLines());
+  var shown=false;
+  function show(){
+    if(shown)return;shown=true;
+    try{ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",base)}catch(e){}
+  }
+  try{
+    var p=window.__ohsidianPandoc;
+    if(p&&p.hostInfo){
+      p.hostInfo().then(function(hi){
+        try{
+          var rWasm=((hi&&hi.renderer)||{}).wasm;
+          var mWasm=((hi&&hi.main)||{}).wasm;
+          base.push("  宿主 WebAssembly: 渲染进程="+(rWasm||"undefined")+", 主进程="+(mWasm||"undefined"));
+        }catch(eA){}
+        show();
+      }).catch(show);
+    }else{show()}
+  }catch(eH){show()}
 }
 /* Atomic mode-file publish (H1): writeFileSync truncates first, so a crash
    (or a concurrent ArkTS reader) could observe an empty/partial file between
@@ -4083,6 +4114,7 @@ function ohsidianSettingsRows(root){
           setTimeout(function(){
             try{
               var r=ohsidianBuildPandocReport();
+              try{ohsidianShowReportModal("OHSidian 诊断: Pandoc 环境",r.lines)}catch(eM){}
               if(outEl){
                 outEl.textContent=r.lines.join("\n");
                 outEl.style.display="block";
@@ -4136,17 +4168,14 @@ function ohsidianSettingsRows(root){
               lines.push("  "+(r.checks[i].ok?"OK  ":"FAIL")+" "+r.checks[i].name+(r.checks[i].detail?(" · "+r.checks[i].detail):""));
             }
             lines.push("");
+            var st=window.__ohsidianPandoc.status();
+            lines.push("  执行位置: "+(st.host==="main"?"主进程（渲染进程 WebAssembly 不可用）":(st.wasmRenderer?"渲染进程":"自动")));
             lines.push("  资源目录: "+(window.__ohsidianPandoc.dir()||"(未找到)"));
             lines.push("  限制: 无 PDF / 无网络 / 仅 Lua filter；插件 execFile/spawn 调用会被自动接管。");
             ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",lines);
             bpLabel.textContent=ohsidianBuiltinPandocLabel();
           }).catch(function(eBp){
-            try{
-              var failL=["OHSidian 诊断: Pandoc（内置 WASM）自检失败","",
-                "  错误: "+String((eBp&&eBp.message)||eBp),""];
-              failL=failL.concat(ohsidianPandocProbeLines());
-              ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",failL);
-            }catch(eN){
+            try{ohsidianPandocShowFailure(eBp)}catch(eN){
               try{new Notice("Pandoc 自检失败: "+String((eBp&&eBp.message)||eBp))}catch(eN2){}
             }
           }).then(function(){bpBtn.disabled=false;bpBtn.textContent="自检";});
@@ -5310,7 +5339,7 @@ function ohsidianRunPluginIntegrityProbe(){
    It reports the patch revision this file was packed with, whether the
    settings section registered (and why not), and whether the two most recent
    behavioural fixes are live. Costs nothing until someone runs it. */
-var OHSIDIAN_PATCH_REV="206";
+var OHSIDIAN_PATCH_REV="207";
 /* The frame style lives in Obsidian's GLOBAL config (<userData>/obsidian.json,
    key "frame"), not in the vault, so the renderer has to read that file itself.
    ArkTS cannot answer "did the user pick 隐藏?" on its own - this is how the
@@ -5472,16 +5501,13 @@ var install=function(app){
               L.push("  "+(r.checks[i].ok?"OK  ":"FAIL")+" "+r.checks[i].name+(r.checks[i].detail?(" · "+r.checks[i].detail):""));
             }
             L.push("");
+            var st2=window.__ohsidianPandoc.status();
+            L.push("  执行位置: "+(st2.host==="main"?"主进程（渲染进程 WebAssembly 不可用）":(st2.wasmRenderer?"渲染进程":"自动")));
             L.push("  资源目录: "+(window.__ohsidianPandoc.dir()||"(未找到)"));
             L.push("  限制: 无 PDF / 无网络 / 仅 Lua filter；插件 execFile/spawn 调用会被自动接管。");
             ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",L);
           }).catch(function(ePw){
-            try{
-              var failL2=["OHSidian 诊断: Pandoc（内置 WASM）自检失败","",
-                "  错误: "+String((ePw&&ePw.message)||ePw),""];
-              failL2=failL2.concat(ohsidianPandocProbeLines());
-              ohsidianShowReportModal("OHSidian 诊断: Pandoc（内置 WASM）",failL2);
-            }catch(eN){}
+            try{ohsidianPandocShowFailure(ePw)}catch(eN){}
           });
         }catch(ePw2){}
       }});
