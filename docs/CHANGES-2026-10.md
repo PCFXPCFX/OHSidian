@@ -5840,3 +5840,22 @@ check-docs 全绿。obsidian.asar 与 patch rev 不变（仍 rev213），本次�
 
 **未宣称已修复**：组字通道仍在引擎桥面，需真机回归后由维护者判定；未采用渲染层 `ime-fix.js`
 （2.5 s 时间窗两向误判，且不在补丁管线内）。
+
+
+### 三十、手写笔反馈减噪：ink rev 62（2026-11-24）
+
+复盘：`inkStatus` 在「切工具 / 切视图 / 成形 / 选中 / 清除确认 / 自动写回 PDF」等常规操作上都发一行字，
+而这些结果本来就在屏幕上可见；`penChromeHint()` 还会在笔尖点到 Obsidian 界面时每 20 秒弹一次 Notice。
+在**没有手写内容的笔记**里（常处编辑视图、笔触经常落在界面上）尤其吵，直接打断书写思路。
+
+- 新增 `inkQuietStatus()`：常规确认默认静默；设置项「安静反馈」改为「减少提示」（默认开），关闭后恢复逐条提示。
+  26 处常规调用改走该函数（笔/橡皮、阅读视图切换、手写层准备、一笔成形、选中/复制/删除、清除确认、
+  PDF 自动写回等）；错误与受阻（无 PDF、视图无手写层、墨迹过多、写回失败）仍然提示。
+- `penChromeHint()` 不再发 Notice，只留 `inkTrace`（吞掉笔触的行为不变，掌托过滤依赖它）。
+- 首次用笔一次性提示：`笔：写画 · 手指：操作界面 · 双击笔杆：工具条`，`inkIntroSeen` 持久化，只出现一次。
+- `OHSIDIAN_INK_REV` 61 → 62；`verify-asar` 新增两条断言（常规反馈静默 + 一次性上手提示）；
+  `docs/STYLUS.md`（状态行、设置表、反馈说明）与 `docs/CHANGELOG.md` 同步。
+
+**验证**：`--repatch` 后 `verify-asar` / `verify-plugin-install` / `verify-release` 全绿；HAP 重建后
+asar 内 `OHSIDIAN_INK_REV = "62"`、`inkQuietStatus` 与一次性提示串均在位；反馈改动只影响提示文案与
+提示时机，不改变笔事件处理、墨迹数据与 PDF 写回路径。

@@ -6,7 +6,7 @@
 
 ## 2.2.0（Obsidian 1.15.1 内核 + Issue #2 输入法缓解）
 
-`versionCode 2020000` · Obsidian 1.15.1 · 内核 `ink rev 61`
+`versionCode 2020000` · Obsidian 1.15.1 · 内核 `ink rev 62`
 
 > 内核 1.13.7 → **1.15.1**（官方签名件，SHA-256 + RSA-SHA256 双验证）；
 > Issue #2（手写输入法文字重复堆叠）在 ArkTS 适配层补候选段记账——**缓解，不是定谳修复**
@@ -27,10 +27,17 @@
   只补欠删（≤12 字符），其它输入事件清空记账；`IME_SEGMENT_CORRECTION_ENABLED=false` 回滚。
 - 需真机回归：手写逐笔 / 拼音英文键盘 / 退格后快速输入 / 移动光标 / 多窗口（清单见 IME-BRIDGE §4）。
 
+**手写笔反馈（ink rev 62）**
+
+- 常规操作（切工具、切视图、成形、选中、清除确认、自动写回 PDF）默认不再显示文字——结果本就在屏幕上；
+  只在失败/受阻时提示。「笔尖点在界面上」的 20 秒 Notice 移除；设置项「安静反馈」改为「减少提示」。
+- 首次用笔给一行上手提示（笔写画 · 手指操作界面 · 双击笔杆开工具条），只出现一次。
+
 **门禁**
 
 - `verify-asar` 6 个漂移标记同步 + 4 条新断言；`verify-plugin-install` 的 NF-015 改为对新 `UEe()`
   的行为门禁；`verify-release` 新增 ArkTS 记账断言。
+
 ## 2.1.1（内置 Pandoc 许可合规）
 
 `versionCode 2010001` · Obsidian 1.13.7 · 内核 `ink rev 61`

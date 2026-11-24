@@ -15,7 +15,7 @@
  * (action penSamplesOn) and matches samples by time and position.
  * ========================================================================== */
 window.__ohsidianInkPatch = "39";
-var OHSIDIAN_INK_REV = "61";
+var OHSIDIAN_INK_REV = "62";
 (function () {
   "use strict";
 
@@ -215,6 +215,17 @@ var OHSIDIAN_INK_REV = "61";
     } catch (e) {
       console.log("[OHSidian ink]", msg);
     }
+  }
+
+  /**
+   * Routine confirmations (tool switched, view switched, shape applied,
+   * selection changed). Their result is already visible on screen, so by
+   * default they say nothing at all - this class of message is exactly the
+   * "the pen keeps talking" complaint. "减少提示" off restores them.
+   */
+  function inkQuietStatus(msg, ms) {
+    if (state.quiet) return;
+    inkStatus(msg, ms);
   }
 
   function noticeError(msg, ms) {
@@ -468,14 +479,14 @@ var OHSIDIAN_INK_REV = "61";
       }
     }
     if (!changed) {
-      inkStatus("当前页墨色已与主题一致");
+      inkQuietStatus("当前页墨色已与主题一致");
       return;
     }
     doc.strokes = doc.strokes;
     pushHistory(doc, space, before);
     saveSoon(doc);
     scheduleRedraw();
-    inkStatus("已按主题重新着色 " + changed + " 笔（可撤销）");  }
+    inkQuietStatus("已按主题重新着色 " + changed + " 笔（可撤销）");  }
 
   // ---------------------------------------------------------------------
   // UI preferences: reuse the shared file touch-mode.js owns.
@@ -974,7 +985,7 @@ var OHSIDIAN_INK_REV = "61";
     restoreSpace(doc, space, []);
     markPdfPageDirty(s, space);
     schedulePdfWrite(s);
-    inkStatus("已清除本页墨迹（可撤销）");
+    inkQuietStatus("已清除本页墨迹（可撤销）");
     probeHook("inkClear", { space: space, removed: before.length });
     return true;
   }
@@ -1495,7 +1506,7 @@ var OHSIDIAN_INK_REV = "61";
       }
     } catch (e) {}
     state.shapeApplied++;
-    inkStatus("已成形", 600);
+    inkQuietStatus("已成形", 600);
     inkTrace("shape", { type: type, points: out.length });
     probeHook("inkShape", {
       source: "native",
@@ -1607,7 +1618,7 @@ var OHSIDIAN_INK_REV = "61";
     } else {
       eraseAt(surface, entry, sp[0], sp[1], st);
     }
-    inkStatus("压感橡皮", 700);
+    inkQuietStatus("压感橡皮", 700);
     inkTrace("pressureEraser", {
       space: space,
       p: Number(a.lastPressure || 0).toFixed(3),
@@ -4383,12 +4394,15 @@ var OHSIDIAN_INK_REV = "61";
     return [x, y, pr.p, pr.tiltX, pr.tiltY, Math.round(nowMs() - (state.strokeT0 || nowMs()))];
   }
 
-  var penChromeHintAt = 0;
+  /**
+   * Pen contact on Obsidian's own chrome is swallowed so palm rejection stays
+   * intact. That is indistinguishable from a dead UI, so it used to explain
+   * itself with a Notice every 20 s - which interrupted writing far more often
+   * than it helped. The one-time intro in setTool() already says "手指操作
+   * 界面"; keep the swallow silent and leave a trace for diagnostics only.
+   */
   function penChromeHint() {
-    var t = nowMs();
-    if (t - penChromeHintAt < 20000) return;
-    penChromeHintAt = t;
-    notice("手写工具激活中：笔尖只画不点界面。请用手指操作，或把工具切回「指针」", 4000);
+    inkTrace("penChromeSwallowed", { tool: state.tool });
   }
 
   function onPointerDownCapture(ev) {
@@ -4469,7 +4483,7 @@ var OHSIDIAN_INK_REV = "61";
         }
         if (!state.noSurfaceNotified) {
           state.noSurfaceNotified = true;
-          inkStatus(vt === "markdown"
+          inkQuietStatus(vt === "markdown"
             ? (vm === "preview"
               ? "手写层准备中…请稍候再落笔"
               : "正在切换到阅读视图，手写层准备中…")
@@ -4898,7 +4912,7 @@ var OHSIDIAN_INK_REV = "61";
         if (a.surface.kind === "pdf" || a.surface.kind === "pdfembed") {
           schedulePdfWrite(a.surface);
         }
-        inkStatus("已移动选中墨迹", 900);
+        inkQuietStatus("已移动选中墨迹", 900);
         probeHook("inkLassoAction", { action: "move", n: a.ids ? a.ids.length : 0 });
       }
       redrawEraseSurface(a.surface, a.entry);
@@ -5545,7 +5559,7 @@ var OHSIDIAN_INK_REV = "61";
       clientRect: null
     };
     updateSelectionBox();
-    inkStatus("已选中 " + ids.length + " 笔", 1100);
+    inkQuietStatus("已选中 " + ids.length + " 笔", 1100);
     inkTrace("lassoSelect", { strokes: ids.length, space: space });
   }
 
@@ -5592,7 +5606,7 @@ var OHSIDIAN_INK_REV = "61";
     updateSelectionBox();
     if (sel.space.indexOf("pdf:") === 0) markPdfPageDirty(sel.surface, sel.space);
     if (sel.surface.kind === "pdf" || sel.surface.kind === "pdfembed") schedulePdfWrite(sel.surface);
-    inkStatus("已复制 " + newIds.length + " 笔", 1100);
+    inkQuietStatus("已复制 " + newIds.length + " 笔", 1100);
     probeHook("inkLassoAction", { action: "duplicate", n: newIds.length });
   }
 
@@ -5622,7 +5636,7 @@ var OHSIDIAN_INK_REV = "61";
     if (sel.surface.kind === "pdf" || sel.surface.kind === "pdfembed") schedulePdfWrite(sel.surface);
     probeHook("inkLassoAction", { action: "delete", n: removed });
     clearSelection();
-    inkStatus("已删除 " + removed + " 笔", 1100);
+    inkQuietStatus("已删除 " + removed + " 笔", 1100);
   }
 
   function finishLasso(a) {
@@ -6125,7 +6139,7 @@ var OHSIDIAN_INK_REV = "61";
     // to write, so switch to reading view and enter pen mode.
     if (!activeSurfaceNow()) {
       if (inkEnterReadingMode()) {
-        inkStatus(kind === "squeeze" ? "已切换到阅读视图：打开手写工具条" : "已切换到阅读视图：可以开始手写", 3200);
+        inkQuietStatus(kind === "squeeze" ? "已切换到阅读视图：打开手写工具条" : "已切换到阅读视图：可以开始手写", 3200);
         inkAfterEnterReadingMode(kind);
         return;
       }
@@ -6140,7 +6154,7 @@ var OHSIDIAN_INK_REV = "61";
       if (wasHidden) expandToolbar();
       if (dbl === "wake") {
         if (!wasHidden) expandToolbar();
-        inkStatus("手写工具条已唤醒");
+        inkQuietStatus("手写工具条已唤醒");
         return;
       }
       if (dbl === "undo") { inkUndo(); return; }
@@ -6149,17 +6163,17 @@ var OHSIDIAN_INK_REV = "61";
       // not "erase": toggling straight to the eraser here felt like a bug.
       if (wasPointer) {
         setTool(state.lastPenTool || "pen");
-        inkStatus("笔");
+        inkQuietStatus("笔");
         return;
       }
       // Pen ↔ eraser. The highlighter is a pen tool in this context: a
       // double-tap from it switches to the eraser, and back to the last pen.
       if (state.tool === "eraser") {
         setTool(state.lastPenTool || "pen");
-        inkStatus("笔");
+        inkQuietStatus("笔");
       } else {
         setTool("eraser");
-        inkStatus("橡皮");
+        inkQuietStatus("橡皮");
       }
       return;
     }
@@ -6167,8 +6181,8 @@ var OHSIDIAN_INK_REV = "61";
       if (sq === "none") return;
       if (sq === "undo") { if (ensureInkTarget()) inkUndo(); return; }
       if (sq === "pen-eraser") {
-        if (state.tool === "eraser") { setTool(state.lastPenTool || "pen"); inkStatus("笔"); }
-        else { setTool("eraser"); inkStatus("橡皮"); }
+        if (state.tool === "eraser") { setTool(state.lastPenTool || "pen"); inkQuietStatus("笔"); }
+        else { setTool("eraser"); inkQuietStatus("橡皮"); }
         return;
       }
       if (ensureInkTarget()) togglePalette();
@@ -6214,7 +6228,7 @@ var OHSIDIAN_INK_REV = "61";
   function ensureInkTarget() {
     var surface = activeSurfaceNow();
     if (!surface) {
-      inkStatus("手写层准备中…", 1500);
+      inkQuietStatus("手写层准备中…", 1500);
       inkAwaitSurface("gesture");
       return false;
     }
@@ -6269,7 +6283,7 @@ var OHSIDIAN_INK_REV = "61";
       state.pendingTool = null;
       inkStatus("当前笔记无法切换到阅读视图；请手动切换后重试。");      return false;
     }
-    inkStatus("已切换到阅读视图，手写层准备中…", 3000);
+    inkQuietStatus("已切换到阅读视图，手写层准备中…", 3000);
     inkAfterEnterReadingMode("pen");
     return true;
   }
@@ -6849,7 +6863,7 @@ var OHSIDIAN_INK_REV = "61";
         s.annotationFresh = false;
       }
       if (!auto) inkStatus("已写入 PDF 第 " + (page + 1) + " 页；原始文件已备份", 4500);
-      else inkStatus("已直接写入 PDF 第 " + (page + 1) + " 页（原文件已备份）", 1800);
+      else inkQuietStatus("已直接写入 PDF 第 " + (page + 1) + " 页（原文件已备份）", 1800);
       return true;
     } catch (eW) {
       if (!auto) notice("写入 PDF 异常：" + ((eW && eW.message) || eW), 6000);
@@ -7392,7 +7406,7 @@ var OHSIDIAN_INK_REV = "61";
         el._cleared = true;
         if (hint) hint.textContent = "已清除本页";
         var s = state.activeSurface || activeSurfaceNow();
-        if (s && inkClearSpace(s)) inkStatus("已清除本页墨迹");
+        if (s && inkClearSpace(s)) inkQuietStatus("已清除本页墨迹");
         else if (hint) hint.textContent = "当前没有可清除的墨迹";
         setTimeout(hideClearPanel, 520);
       } else if (hint) {
@@ -7469,7 +7483,7 @@ var OHSIDIAN_INK_REV = "61";
     if (thumb) thumb.style.left = "0%";
     if (track) track.setAttribute("aria-valuenow", "0");
     if (hint) hint.textContent = "向右滑到底并松手";
-    inkStatus("长按/双击橡皮：滑到底清除本页", 2200);
+    inkQuietStatus("长按/双击橡皮：滑到底清除本页", 2200);
   }
 
   function hideClearPanel() {
@@ -7843,7 +7857,7 @@ var OHSIDIAN_INK_REV = "61";
     });
     if (tool !== "pointer" && !activeSurfaceNow()) {
       state.pendingTool = tool;
-      inkStatus("手写层准备中…", 1800);
+      inkQuietStatus("手写层准备中…", 1800);
       inkAwaitSurface("setTool");
     }
     if (tool === "pen" || tool === "highlighter") {
@@ -7857,6 +7871,12 @@ var OHSIDIAN_INK_REV = "61";
       document.body.classList.remove("ohsidian-ink-pen");
     } else {
       document.body.classList.add("ohsidian-ink-pen");
+    }
+    if (tool !== "pointer" && pref("inkIntroSeen", "") !== "2") {
+      // Shown once, ever. Three facts, one line, no modal: after this the pen
+      // stays silent unless something is actually wrong.
+      setPref("inkIntroSeen", "2");
+      inkStatus("笔：写画 · 手指：操作界面 · 双击笔杆：工具条", 6500);
     }
     updateToolbarState();
     inkTrace("setTool", { tool: tool, surface: !!activeSurfaceNow() });
@@ -8135,7 +8155,7 @@ var OHSIDIAN_INK_REV = "61";
     if (!root) return;
     root.classList.remove("is-hidden");
     expandToolbar();
-    inkStatus("手写工具");
+    inkQuietStatus("手写工具");
   }
 
   /** Hide the chrome while the pen is on the page; restore it on lift. */
@@ -8331,8 +8351,8 @@ var OHSIDIAN_INK_REV = "61";
           var menu = document.getElementById(MENU_ID);
           if (menu) menu.setAttribute("data-pos", v);
         });
-        ctx.toggleEl(ctx.itemEl(g, "安静反馈",
-          "常规操作只在笔尖上方显示一行很淡的提示，不弹 Notice；关闭后恢复系统通知。", true),
+        ctx.toggleEl(ctx.itemEl(g, "减少提示",
+          "常规操作（切工具、切视图、成形、选中）不再显示文字，视图本身可见；只在失败或受阻时提示。关闭后恢复逐条提示。", true),
           pref("inkQuiet", true) !== false,
           function (on) { state.quiet = !!on; setPref("inkQuiet", !!on); });
         var effects = ctx.newGroup("界面效果");
@@ -8821,7 +8841,7 @@ var OHSIDIAN_INK_REV = "61";
     };
     add("ohsidian-ink-mode", "OHSidian: 手写模式 开/关（指针 ↔ 笔）", function () {
       setTool(state.tool === "pointer" ? state.lastPenTool : "pointer");
-      inkStatus("手写工具：" + state.tool);
+      inkQuietStatus("手写工具：" + state.tool);
     });
     add("ohsidian-ink-toggle-feature", "OHSidian 手写: 启用/关闭手写模式", function () {
       var on = !state.enabled;
@@ -8850,7 +8870,7 @@ var OHSIDIAN_INK_REV = "61";
     });
     add("ohsidian-ink-enable", "OHSidian: 开启手写（切到阅读视图并选笔）", function () {
       if (!activeSurfaceNow() && inkEnterReadingMode()) {
-        inkStatus("已切换到阅读视图", 3000);
+        inkQuietStatus("已切换到阅读视图", 3000);
         inkAfterEnterReadingMode("pen");
         return;
       }

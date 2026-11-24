@@ -46,6 +46,13 @@ try {
       app.includes('pdfInk'),
     'app ink settings + diagnostics hooks': app.includes('__ohsidianInkHooks') &&
       app.includes('buildSettings'),
+    // rev62: the pen must not narrate routine actions. Tool/view switches,
+    // shape application and selection changes are visible on screen; only
+    // failures and blockers may speak. "减少提示" off restores the old chatter.
+    'app ink routine feedback is silent': app.includes('function inkQuietStatus(') &&
+      !app.includes('notice("手写工具激活中'),
+    'app ink one-time intro hint': app.includes('pref("inkIntroSeen"') &&
+      app.includes('笔：写画 · 手指：操作界面 · 双击笔杆：工具条'),
     // P0 (docs/PDF-PERF-AUDIT.md): the PDF overlay is opt-in, bounded to the
     // visible pages, capped at 2x, redrawn per page, and its page table is
     // pruned instead of retaining detached canvases.
