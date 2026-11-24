@@ -14,6 +14,7 @@ const SKIP_DIRS = new Set(['node_modules', '.git', '.cache', 'oh_modules', 'arti
 const SKIP_FILES = new Set([
   'CHANGES-2026-09.md',
   'CHANGES-2026-10.md',
+  'CHANGES-2026-11.md',
   'HEVC-HARDWARE-DECODE-ANALYSIS.md',
   'B-NATIVE-OVERLAY.md',
 ]);

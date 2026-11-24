@@ -36,7 +36,7 @@
 
 | 文档 | 说明 |
 |---|---|
-| [CHANGES-2026-09](CHANGES-2026-09.md) / [CHANGES-2026-10](CHANGES-2026-10.md) | 逐轮开发日志，含真机取证；只用于追溯 |
+| [CHANGES-2026-09](CHANGES-2026-09.md) / [CHANGES-2026-10](CHANGES-2026-10.md) / [CHANGES-2026-11](CHANGES-2026-11.md) | 逐轮开发日志，含真机取证；只用于追溯 |
 | [archive/](archive/README.md) | 审计、性能、体积等已完成的历史报告 |
 
 ## 维护约定

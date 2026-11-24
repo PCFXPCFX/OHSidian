@@ -407,7 +407,7 @@ require("electron").ipcRenderer`（与内核自身 `electron.ipcRenderer.sendSyn
 - `verify-release` / `check-docs` 全绿；
 - 独立只读审查（2026-11-22，对照冻结态代码 + 出货 asar 逐字）：NF-015/017/018 无 P1/P2；
   NF-016 1 个 P1（bridge 接线死路）+ 3 个 P2（门禁假保障、文档入口、验收锚点），全部修复并
-  复跑门禁，详见 `docs/CHANGES-2026-10.md` 第 219 轮 §九；
+  复跑门禁，详见 `docs/CHANGES-2026-11.md` 第 219 轮 §九；
 - **未做真机验证**（本机无设备），V-1~V-6 见 §6.7。
 
 ### 6.9 仍未做（本轮范围外）

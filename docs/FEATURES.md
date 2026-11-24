@@ -1,7 +1,7 @@
 # 功能与差异（相对原版 Obsidian）
 
 > 本文说明 OHsidian 在官方 Obsidian 之上做了什么。安装与构建见 [README](../README.md)，
-> 手写笔细节见 [STYLUS](STYLUS.md)，逐轮实现记录见 [CHANGES-2026-10](CHANGES-2026-10.md)。
+> 手写笔细节见 [STYLUS](STYLUS.md)，逐轮实现记录见 [CHANGES-2026-10](CHANGES-2026-10.md) / [CHANGES-2026-11](CHANGES-2026-11.md)。
 
 OHsidian 最初基于 [HanversionOvO/OHSidian][upstream] 的 Electron 兼容层，现已脱离
 GitHub Fork 网络独立维护。下面列的是**本移植版当前的行为**；与官方 Obsidian 桌面端

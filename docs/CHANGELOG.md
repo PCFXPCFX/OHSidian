@@ -1,7 +1,8 @@
 # 版本记录
 
 > 只记**对外发布**的版本与用户可感知的变化。逐轮实现细节、真机取证与回归分析见
-> [CHANGES-2026-09](CHANGES-2026-09.md)、[CHANGES-2026-10](CHANGES-2026-10.md)
+> [CHANGES-2026-09](CHANGES-2026-09.md)、[CHANGES-2026-10](CHANGES-2026-10.md)、
+> [CHANGES-2026-11](CHANGES-2026-11.md)
 > （开发日志，不是发布说明）。
 
 ## 2.2.0（Obsidian 1.15.1 内核 + Issue #2 输入法缓解）

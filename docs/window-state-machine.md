@@ -614,7 +614,7 @@ maximize（`reason:1`），不是代码保证的；WMS 不做时窗口就停在�
 
 > 输入：外部审计移交包 8 份报告（审计基线 `e528275`），本轮对当前 HEAD 复核锚点后
 > 落地低风险项、显式延后需要真机回归的结构性项。线 B（pandoc/鸿蒙能力）
-> 的落地见 `docs/CHANGES-2026-10.md` 第 215 轮与 `docs/PLATFORM-ADAPTATION.md` A6。
+> 的落地见 `docs/CHANGES-2026-11.md` 第 215 轮与 `docs/PLATFORM-ADAPTATION.md` A6。
 
 ### 7.1 已落地
 
