@@ -80,10 +80,11 @@ for (const [file, patch, marker] of [
   // they would be missing and the app would die at startup ("manual update
   // required") behind a seemingly-successful refresh. Abort loudly instead.
   const requiredMarks = {
-    'app.js': [['drawer vault switch (openVaultChooser)', 'i.app.openVaultChooser()']],
+    'app.js': [['drawer vault switch (openVaultChooser)', '(Bm(t.path),i.app.openVaultChooser())']],
     'main.js': [
-      ['version-floor gate (bo=Math.max)', 'bo=Math.max(parseInt(fo.split(".")[0]),28)'],
-      ['updater disable latch', '(at||(D.updateDisabled=!0))&&(e.emit("disable",!0)'],
+      ['version-floor gate ($t=Math.max)', '$t=Math.max(parseInt(fi.split(".")[0]),28)'],
+      ['updater disable latch', '(no||(k.updateDisabled=!0))&&(e.emit("disable",!0)'],
+      ['nativeTheme guard (engine has no nativeTheme)', 'r.nativeTheme&&r.nativeTheme.shouldUseDarkColors'],
     ],
   };
   const missing = (requiredMarks[file] || [])
@@ -98,16 +99,18 @@ for (const [file, patch, marker] of [
   // scripts/update-obsidian.mjs APP_BODY_PATCHES.
   if (file === 'app.js') {
     const bodyPatches = [
-      ['window.localStorage.setItem("mobile-selected-vault",n),location.reload()',
+      ['window.localStorage.setItem("mobile-selected-vault",t.path),location.reload()',
        'i.app.openVaultChooser()', 'vault drawer switch'],
-      ['var t=["Inter","Source Code Pro"];Xne=t;',
-       'var t=["Inter","Source Code Pro"].concat(window.__ohsidianSystemFonts||[]);Xne=t;',
+      ['window.localStorage.setItem("mobile-selected-vault",u),location.reload()',
+       'this.app.openVaultChooser()', 'settings vault select'],
+      ['let o=["Inter","Source Code Pro"];$A=o;',
+       'let o=["Inter","Source Code Pro"].concat(window.__ohsidianSystemFonts||[]);$A=o;',
        'settings font list injection'],
       // Plugin require() must not be gated by the mobile emulation: this renderer
       // has full Node, so the shim's null is a false negative that killed every
       // plugin requiring a Node module while in touch mode.
-      ['a=document.body.hasClass("emulate-mobile"),s=function(e){return u4.hasOwnProperty(e)?',
-       'a=!1,s=function(e){return u4.hasOwnProperty(e)?',
+      ['l=document.body.hasClass("emulate-mobile"),c=p=>Object.hasOwn(_oe,p)?',
+       'l=!1,c=p=>Object.hasOwn(_oe,p)?',
        'plugin require unrestricted in touch mode'],
     ];
     for (const [bsrc, bdst, name] of bodyPatches) {
@@ -128,8 +131,8 @@ for (const [file, patch, marker] of [
     // the window-frame default - an unset global frame value counts as
     // native; explicit "hidden"/"custom" keep their stock frameless
     // semantics. Idempotent via the patched form check.
-    const fsrc = 'let Ae=D.frame==="native",Ue=Ae?"default":"hidden"';
-    const fdst = 'let Ae=D.frame==="native"||D.frame==null,Ue=Ae?"default":"hidden"';
+    const fsrc = 'Ke=k.frame==="native",vt=Ke?"default":"hidden"';
+    const fdst = 'Ke=k.frame==="native"||k.frame==null,vt=Ke?"default":"hidden"';
     if (src.includes(fdst)) {
       console.log('[refresh] body patch already applied: frame default unset=native');
     } else if (src.includes(fsrc)) {

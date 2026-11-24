@@ -70,8 +70,8 @@ try {
     // JavaScript Content-Type the module worker is rejected and pdf.js
     // silently runs parsing on the UI thread (slow/white PDF pages).
     'main app:// MIME map (pdf worker)': main.includes('".mjs":"text/javascript; charset=utf-8"') &&
-      main.includes('T.set("Content-Type",_ohMap[_ohExt])') &&
-      main.includes('S["Content-Type"]=_ohMap[_ohExt]'),
+      main.includes('E.set("Content-Type",_ohMap[_ohExt])') &&
+      main.includes('T["Content-Type"]=_ohMap[_ohExt]'),
     'app media hang watchdog (round 95c)': app.includes('loadedmetadata') && app.includes('__ohsidianWatched'),
     'app back-press consumer (round 96)': app.includes('applyBackPress'),
     // Round 104: back press must close the mobile drawer / tab switcher, and
@@ -92,7 +92,7 @@ try {
     'app atomic mode-file write (H1)': app.includes('writeModeFileSync'),
     'app trash meta sidecar (F2)': app.includes('.ohsidian-trash-meta.json'),
     'main trash purge will-quit pass (F-N16)': main.includes('__ohTrashPurgeOnce'),
-    'main frame default unset=native (round 93e)': main.includes('D.frame==null'),
+    'main frame default unset=native (round 93e)': main.includes('k.frame==null'),
     'app per-window geometry match (round 87 B2)': app.includes('resolveGeometry'),
     'app event-driven keyboard (modePollMs=200)': app.includes('modePollMs=200'),
     'app system fonts style': app.includes('ohsidian-system-fonts'),
@@ -267,7 +267,7 @@ try {
       app.includes('本包未声明 CUSTOM_SANDBOX') &&
       app.includes('签名 profile 缺 CUSTOM_SANDBOX ACL'),
     'kernel settings definition keys unique':
-      app.includes('function $2(e,t){return(e.heading?e.type+":"+e.heading:e.type)+"#"+t}'),
+      app.includes('function AEe(o,t){return o.id?o.type+":id:"+o.id:(o.heading?o.type+":"+o.heading:o.type)+"#"+t}'),
     // rev205: built-in pandoc (WebAssembly) - renderer loader + child_process
     // shim + settings/status/command surface.
     'app built-in pandoc wasm patched in':
@@ -342,17 +342,30 @@ try {
     'main pandoc utility host': main.includes('--no-jitless') &&
       main.includes('pandoc-host.cjs') && main.includes('utilityProcess') &&
       main.includes('__ohPandocUtil'),
-    'main updater disabled': main.includes('(at||(D.updateDisabled=!0))'),
+    'main updater disabled': main.includes('(no||(k.updateDisabled=!0))'),
+    // R1 (kernel-upgrade audit 2026-11-23): 1.15.1 reads
+    // r.nativeTheme.shouldUseDarkColors on the first-window path, but this
+    // engine's main-process shim has no nativeTheme module. The guard must stay
+    // (an unguarded dereference is a boot-time TypeError).
+    'main nativeTheme guard': main.includes('r.nativeTheme&&r.nativeTheme.shouldUseDarkColors'),
+    // The renderer gate constant must stay exactly 28.2.3: raising it switches
+    // 1.15.x onto engine-untested plugin-script-root / clipboard branches, and
+    // the main-process floor must stay below the gate (28 >= 21).
+    'app renderer floor const intact': app.includes('Ix="28.2.3"'),
+    'main gate floor 21 intact': main.includes('if($t<21)'),
     // The two most load-bearing textual patches: if upstream re-minifies and
     // these go silently unmatched, the app crashes at startup (version gate)
     // or touch-mode vault switching dead-ends (drawer). Verify the patched
     // forms explicitly instead of trusting update-obsidian.mjs warnings.
-    'main version-floor gate patched': main.includes('bo=Math.max(parseInt(fo.split(".")[0]),28)'),
-    // src-first body patch: 'i.app.openVaultChooser()' alone also occurs in
-    // upstream's "manage-vaults" branch, so assert the patched call site and
-    // that the unpatched drawer handler is gone.
-    'app drawer switch routed': app.includes('(Wf(n),i.app.openVaultChooser())'),
-    'app drawer switch source replaced': !app.includes('setItem("mobile-selected-vault",n),location.reload()'),
+    'main version-floor gate patched': main.includes('$t=Math.max(parseInt(fi.split(".")[0]),28)'),
+    // src-first body patch: 'openVaultChooser()' alone also occurs in
+    // upstream's "manage-vaults" branch, so assert the patched call sites
+    // (drawer + settings select) and that the unpatched reload handlers are gone.
+    'app drawer switch routed': app.includes('(Bm(t.path),i.app.openVaultChooser())'),
+    'app settings vault select routed': app.includes('(Bm(u),this.app.openVaultChooser())'),
+    'app drawer switch source replaced':
+      !app.includes('setItem("mobile-selected-vault",t.path),location.reload()') &&
+      !app.includes('setItem("mobile-selected-vault",u),location.reload()'),
     'main deeplink cursor file (no main-file rewrite)': main.includes('.cursor.json'),
     'main default vault fix': main.includes('__ohsidianDefaultVault'),
     'main deeplink bridge': main.includes('__ohsidianDeepLink'),
@@ -383,8 +396,16 @@ try {
     // in touch mode only). Assert the patched form positively AND the upstream
     // test negatively, so a skipped body patch is loud instead of silent.
     'app plugin require not gated by emulate-mobile':
-      app.includes('a=!1,s=function(e){return u4.hasOwnProperty(e)?') &&
-      !app.includes('a=document.body.hasClass("emulate-mobile"),s=function'),
+      app.includes('l=!1,c=p=>Object.hasOwn(_oe,p)?') &&
+      !app.includes('l=document.body.hasClass("emulate-mobile"),c=p=>Object.hasOwn(_oe,p)?'),
+    // NF-015 on the 1.15.1 shape: the whole download lives in the single
+    // helper UEe(); the patch replaces it and marks the sentinels the
+    // behavioural gate in verify-plugin-install.cjs slices out.
+    'app plugin download helper patched':
+      app.includes('/*OHSIDIAN-PLUGIN-FETCH*/') &&
+      app.includes('/*OHSIDIAN-PLUGIN-FETCH-END*/') &&
+      app.includes('__ohsidianPluginDownloadIncomplete=true') &&
+      app.includes('releases.obsidian.md/proxy?url='),
   };
   let ok = true;
   for (const [k, v] of Object.entries(checks)) {

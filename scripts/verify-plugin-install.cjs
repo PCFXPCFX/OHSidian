@@ -36,94 +36,34 @@ try {
   process.exit(1);
 }
 
-/* ---- NF-015: the prefetch helper as shipped ------------------------------ */
-const HELPER_START = 't.prototype.__ohsidianFetchPluginBundle=function(manifestUrl,mainUrl){';
-const helperStart = app.indexOf(HELPER_START);
-const helperEnd = helperStart >= 0 ? app.indexOf(',t.prototype.installPlugin=function', helperStart) : -1;
-const helperSrc = helperStart >= 0 && helperEnd > helperStart ? app.slice(helperStart, helperEnd) : null;
-check('install prefetch helper present in app.js', !!helperSrc);
-check('install prefetch ends at its statement boundary (comma-joined, no ;)',
-  !!helperSrc && helperSrc.trimEnd().endsWith('}') && !helperSrc.trimEnd().endsWith(';'));
-check('install prefetch validates with new Function (loadPlugin parity)',
-  !!helperSrc && helperSrc.includes('new Function(String(resp.text).replace(f4,"")+v4)'));
-check('install prefetch retries through the release proxy',
-  !!helperSrc && helperSrc.includes('releases.obsidian.md/proxy?url='));
-check('install prefetch marks the rejection as incomplete',
-  !!helperSrc && helperSrc.includes('__ohsidianPluginDownloadIncomplete=true'));
-/* ---- Structural + runtime: the helper is one element of the minified class
-   body's `return v(t,e),method=...,t` comma expression. A semicolon there ends
-   the return early, the factory yields the helper function instead of the
-   PluginManager class, `new Plugins(app)` produces the helper's Promise and
-   Obsidian fails at boot with "i.app.plugins.on is not a function" (device
-   report 2026-11-22). Marker checks cannot see this, so evaluate the shipped
-   factory and assert that it really is the class. ---- */
-check('install helper joins the class method list with a comma',
-  app.includes('},t.prototype.installPlugin=function(e,t,n){'));
-check('install helper does not terminate the class return early',
-  !/};\s*t\.prototype\.installPlugin=/.test(app));
-(function verifyShippedPluginManagerClass() {
-  const ctorAnchor = 'i.manifests={},i.plugins={}';
-  const ctor = app.indexOf(ctorAnchor);
-  check('PluginManager constructor found in app.js', ctor >= 0);
-  if (ctor < 0) return;
-  const before = app.slice(Math.max(0, ctor - 160), ctor);
-  const m = before.match(/var ([A-Za-z_$][\w$]*)=function\(e\)\{function t\(t\)\{var n,i=e\.call\(this\)\|\|this;return\s*$/);
-  check('PluginManager factory start locatable', !!m);
-  if (!m) return;
-  const name = m[1];
-  const start = app.lastIndexOf('var ' + name + '=function(e){', ctor);
-  const endMarker = ',t}(FD)';
-  const end = app.indexOf(endMarker, ctor);
-  check('PluginManager factory end locatable', start >= 0 && end > start);
-  if (start < 0 || end <= start) return;
-  /* include the comma-returned class and the `(FD)` invocation, otherwise this
-     would only evaluate the outer wrapper function, not its result */
-  const factorySrc = app.slice(start, end + endMarker.length);
-  const stub = new Proxy(function () {}, {
-    get: (t, p) => (p === Symbol.toPrimitive ? () => 'stub' : stub),
-    apply: () => stub,
-    construct: () => stub,
-  });
-  const envBase = {
-    v: function (t, e) {
-      t.prototype = e && e.prototype ? Object.create(e.prototype) : {};
-      t.prototype.constructor = t;
-    },
-  };
-  /* With-scope proxy: every unresolved identifier is a stub. Symbol.unscopables
-     MUST stay undefined, otherwise the with-lookup treats every name as
-     unscopable and falls through to the real global scope ("FD is not defined"). */
-  const env = new Proxy(envBase, {
-    has: () => true,
-    get: (t, p) => (p === Symbol.unscopables ? undefined : (p in t ? t[p] : stub)),
-  });
-  let T = null;
-  try {
-    T = new Function('__env', 'with(__env){' + factorySrc + '\nreturn ' + name + ';}')(env);
-  } catch (e) {
-    check('PluginManager factory evaluates', false);
-    return;
-  }
-  check('PluginManager factory yields the class (not the helper)',
-    typeof T === 'function' && !!T.prototype &&
-    typeof T.prototype.installPlugin === 'function' &&
-    typeof T.prototype.enablePlugin === 'function' &&
-    typeof T.prototype.checkForUpdates === 'function' &&
-    typeof T.prototype.__ohsidianFetchPluginBundle === 'function');
-})();
-check('installPlugin wires the validating prefetch into case 1',
-  app.includes('case 1:return m.trys.push([1,3,,4]),[4,this.__ohsidianFetchPluginBundle(Py(e,t,eL),Py(e,t,tL))];'));
-check('installPlugin unpacks the pair (a=manifest, d=main)',
-  app.includes('case 2:return l=m.sent(),a=l[0],d=l[1],(s=JSON.parse(a)).id&&s.id===i?[3,4]:'));
-check('installPlugin still writes the MANIFEST text (a) as manifest.json',
-  app.includes('case 10:return[4,(p=c.adapter).write(h+"/"+eL,a)]'));
-check('installPlugin writes the PREFETCHED main.js text (d) as main.js',
-  app.includes('case 12:return m.trys.push([12,15,,16]),[4,(d&&d.length?d:zy(Py(e,t,tL)).then(function(resp){return resp.text}))];') &&
-  app.includes('f=d.replace(f4,"")+v4,[4,p.write(h+"/"+tL,f)]'));
+/* ---- NF-015: the 1.15.1 download helper as shipped -----------------------
+   Obsidian 1.15.1 collapsed plugin download into one helper (`UEe()`) that
+   fetches manifest + main.js + styles. Our patch replaces that whole function,
+   so the gate slices it out between sentinels and drives it with a synthetic
+   `sr()` / `Xm()` pair: a truncated body must be re-fetched through the
+   release proxy, a doubly-truncated body must reject with the marked
+   "incomplete" error, and a plain network error must propagate untouched. */
+const FETCH_START = '/*OHSIDIAN-PLUGIN-FETCH*/';
+const FETCH_END = '/*OHSIDIAN-PLUGIN-FETCH-END*/';
+const fetchStart = app.indexOf(FETCH_START);
+const fetchEnd = fetchStart >= 0 ? app.indexOf(FETCH_END, fetchStart) : -1;
+const fetchSrc = fetchStart >= 0 && fetchEnd > fetchStart
+  ? app.slice(fetchStart + FETCH_START.length, fetchEnd) : null;
+check('plugin download helper patch present in app.js', !!fetchSrc);
+check('patched helper parses the body exactly like loadPlugin',
+  !!fetchSrc && fetchSrc.includes('new Function(String(v).replace(TV,"")+IV)'));
+check('patched helper retries through the release proxy',
+  !!fetchSrc && fetchSrc.includes('releases.obsidian.md/proxy?url='));
+check('patched helper marks the rejection as incomplete',
+  !!fetchSrc && fetchSrc.includes('__ohsidianPluginDownloadIncomplete=true'));
+check('patched helper is a standalone function (no class-body injection)',
+  app.includes('async function UEe(o,t){') && !app.includes('},t.prototype.__ohsidianFetchPluginBundle='));
 check('install failure surface names the truncation',
   app.includes('插件文件下载不完整（疑似网络截断）'));
 check('load failure names a truncated main.js',
   app.includes('插件文件下载不完整') && app.includes('plugin file unparsable'));
+check('installPlugin is still a class method (patch did not unbalance the class)',
+  app.includes('async installPlugin(e,i,r){') && app.includes('async writePluginFiles(e,i){'));
 
 /* ---- NF-016 / NF-018 / diagnostics markers ------------------------------ */
 check('console bridge defaults to errors-only',
@@ -173,26 +113,31 @@ check('diagnostic detects a plugin file replaced after boot',
   app.includes('BRAT 文件时效') && app.includes('stale(文件晚于本会话启动)'));
 
 /* ---- Behaviour: synthetic downloads ------------------------------------- */
-if (helperSrc) {
-  /* Use the KERNEL's real f4/v4 values, extracted from the shipped app.js.
-     Feeding our own copies would let a kernel-symbol rename turn every market
-     install into "download incomplete" while this gate stayed green
-     (audit 2026-11-22, P2-1). */
-  const fvDef = app.match(/f4=(\/\^[\s\S]*?\/gm),v4=("(?:[^"\\]|\\.)*")/);
-  check('kernel f4/v4 transform constants extractable', !!fvDef);
-  let f4 = null;
-  let v4 = null;
-  if (fvDef) {
-    try {
-      f4 = eval(fvDef[1]);
-      v4 = eval(fvDef[2]);
-    } catch (e) {
-      f4 = null;
-      v4 = null;
+if (fetchSrc) {
+  /* Rebuild the kernel's REAL transform constants from the shipped app.js:
+     TV strips sourceMappingURL data URLs, IV appends the nosourcemap marker
+     that loadPlugin expects. Feeding our own copies would let a future kernel
+     rename make every market install "download incomplete" while this gate
+     stayed green (audit 2026-11-22, P2-1). */
+  let TV = null;
+  let IV = null;
+  const tvIdx = app.indexOf('TV=/^');
+  if (tvIdx >= 0) {
+    const tvEnd = app.indexOf('/gm', tvIdx);
+    if (tvEnd > tvIdx) {
+      try { TV = eval(app.slice(tvIdx + 3, tvEnd + 3)); } catch (e) { TV = null; }
     }
   }
-  check('kernel transform: f4 is the sourcemap regex, v4 the marker comment',
-    f4 instanceof RegExp && typeof v4 === 'string' && /nosourcemap/.test(v4));
+  const ivIdx = app.indexOf('IV=`');
+  if (ivIdx >= 0) {
+    const ivEnd = app.indexOf('`', ivIdx + 4);
+    if (ivEnd > ivIdx) {
+      try { IV = eval(app.slice(ivIdx + 3, ivEnd + 1)); } catch (e) { IV = null; }
+    }
+  }
+  check('kernel TV/IV transform constants extractable', TV instanceof RegExp && typeof IV === 'string');
+  check('kernel transform: TV is the sourcemap regex, IV the nosourcemap marker',
+    TV instanceof RegExp && /nosourcemap/.test(IV));
   const body = Array.from({ length: 4000 }, (_, i) => 'var v' + i + '=' + i + ';').join('\n') +
     '\n;(function(){return 1;})();';
   /* Deterministic truncation: the final construct is left unclosed, exactly the
@@ -201,74 +146,83 @@ if (helperSrc) {
      make this gate pass for the wrong reason. */
   const truncated = body.slice(0, body.length - 8);
   const manifest = JSON.stringify({ id: 'fixture-plugin', name: 'Fixture', version: '1.0.0' });
-  const MURL = 'https://github.com/fixture/repo/releases/download/1.0.0/manifest.json';
-  const JURL = 'https://github.com/fixture/repo/releases/download/1.0.0/main.js';
+  const REPO = 'fixture/repo';
+  const VER = '1.0.0';
+  const Xm = (repo, ver, file) =>
+    'https://github.com/' + repo + '/releases/download/' + ver + '/' + file;
+  const MURL = Xm(REPO, VER, 'manifest.json');
+  const JURL = Xm(REPO, VER, 'main.js');
+  const SURL = Xm(REPO, VER, 'styles.css');
   const PROXY = 'https://releases.obsidian.md/proxy?url=' + encodeURIComponent(JURL);
-
-  function makeHelper(routes, calls) {
-    const fakeZy = function (url) {
+  class Kp extends Error { }
+  function baseRoutes() {
+    return { [MURL]: { body: manifest }, [JURL]: { body }, [SURL]: { body: 'body{color:red}' } };
+  }
+  /* The shipped helper is evaluated with the SAME kernel constants and the
+     same `sr`/`Xm` contract (sr returns an object whose .text is a promise). */
+  function makeUEe(routes, calls) {
+    const sr = (url) => {
       calls.push(url);
       const r = routes[url];
-      if (!r) return Promise.reject(new Error('HTTP 404 ' + url));
-      if (r.err) return Promise.reject(r.err);
-      return Promise.resolve({ text: r.body, headers: {}, arrayBuffer: Buffer.from(r.body) });
+      const p = !r ? Promise.reject(new Kp('Request failed, status 404', 404))
+        : r.err ? Promise.reject(r.err) : Promise.resolve(r.body);
+      return { text: p };
     };
-    const quiet = { warn: () => {}, error: () => {}, log: () => {} };
-    const T = new Function('t', 'f4', 'v4', 'zy', 'console', helperSrc + '\nreturn t;')(
-      function t() {}, f4, v4, fakeZy, quiet);
-    return new T();
+    const quiet = { warn() { }, error() { }, log() { } };
+    return new Function('sr', 'Xm', '$h', 'UT', 'qT', 'TV', 'IV', 'kp', 'console',
+      fetchSrc + '\nreturn UEe;')(sr, Xm, 'manifest.json', 'main.js', 'styles.css', TV, IV, Kp, quiet);
   }
-
-  function run(inst, mu, ju) {
-    return inst.__ohsidianFetchPluginBundle(mu, ju).then(
-      (v) => ({ ok: true, v }),
-      (e) => ({ ok: false, e }));
-  }
+  const run = (UEe) => UEe(REPO, VER).then(
+    (v) => ({ ok: true, v }),
+    (e) => ({ ok: false, e }));
 
   Promise.resolve()
     .then(() => {
       const calls = [];
-      const inst = makeHelper({ [MURL]: { body: manifest }, [JURL]: { body } }, calls);
-      return run(inst, MURL, JURL).then((r) => {
-        check('behaviour: complete download accepted', r.ok && r.v[0] === manifest && r.v[1] === body);
+      const UEe = makeUEe(baseRoutes(), calls);
+      return run(UEe).then((r) => {
+        check('behaviour: complete download accepted',
+          r.ok && r.v.manifest === manifest && r.v.main === body.replace(TV, '') + IV &&
+          r.v.styles === 'body{color:red}');
         check('behaviour: complete download is not re-fetched', calls.indexOf(PROXY) === -1);
       });
     })
     .then(() => {
       const calls = [];
-      const inst = makeHelper({
-        [MURL]: { body: manifest },
-        [JURL]: { body: truncated },
-        [PROXY]: { body },
-      }, calls);
-      return run(inst, MURL, JURL).then((r) => {
-        check('behaviour: truncated body is retried through the proxy', r.ok && r.v[1] === body);
-        check('behaviour: proxy retried exactly once', calls.filter((u) => u === PROXY).length === 1);
+      const routes = baseRoutes();
+      routes[JURL] = { body: truncated };
+      routes[PROXY] = { body };
+      const UEe = makeUEe(routes, calls);
+      return run(UEe).then((r) => {
+        check('behaviour: truncated body is retried through the proxy',
+          r.ok && r.v.main === body.replace(TV, '') + IV);
+        check('behaviour: proxy retried exactly once',
+          calls.filter((u) => u === PROXY).length === 1);
       });
     })
     .then(() => {
-      const inst = makeHelper({
-        [MURL]: { body: manifest },
-        [JURL]: { body: truncated },
-        [PROXY]: { body: truncated },
-      }, []);
-      return run(inst, MURL, JURL).then((r) => {
+      const routes = baseRoutes();
+      routes[JURL] = { body: truncated };
+      routes[PROXY] = { body: truncated };
+      return run(makeUEe(routes, [])).then((r) => {
         check('behaviour: doubly truncated download is rejected',
           !r.ok && r.e && r.e.__ohsidianPluginDownloadIncomplete === true);
       });
     })
     .then(() => {
       const calls = [];
-      const inst = makeHelper({ [MURL]: { body: manifest }, [JURL]: { err: new Error('connection reset') } }, calls);
-      return run(inst, MURL, JURL).then((r) => {
+      const routes = baseRoutes();
+      routes[JURL] = { err: new Error('connection reset') };
+      return run(makeUEe(routes, calls)).then((r) => {
         check('behaviour: plain network error propagates untouched',
           !r.ok && /connection reset/.test(r.e && r.e.message) &&
           r.e.__ohsidianPluginDownloadIncomplete !== true && calls.indexOf(PROXY) === -1);
       });
     })
     .then(() => {
-      const inst = makeHelper({ [MURL]: { body: manifest }, [JURL]: { body: '' } }, []);
-      return run(inst, MURL, JURL).then((r) => {
+      const routes = baseRoutes();
+      routes[JURL] = { body: '' };
+      return run(makeUEe(routes, [])).then((r) => {
         check('behaviour: empty body is rejected as incomplete',
           !r.ok && r.e && r.e.__ohsidianPluginDownloadIncomplete === true);
       });
@@ -279,10 +233,10 @@ if (helperSrc) {
     })
     .then(() => {
       /* ---- NF-018: shipped k6 fallback expression ---------------------- */
-      const k6Start = app.indexOf('n.safeStorage=(function(){');
-      const k6End = app.indexOf('})(),n}', k6Start);
+      const k6Start = app.indexOf('this.safeStorage=(function(){');
+      const k6End = app.indexOf('})()}', k6Start);
       const iife = k6Start >= 0 && k6End > k6Start
-        ? app.slice(k6Start + 'n.safeStorage='.length, k6End + '})()'.length) : '';
+        ? app.slice(k6Start + 'this.safeStorage='.length, k6End + '})()'.length) : '';
       check('safeStorage adapter fallback expression extractable', iife.startsWith('(function(){'));
       if (!iife.startsWith('(function(){')) return;
       const make = new Function('window', 'return ' + iife);

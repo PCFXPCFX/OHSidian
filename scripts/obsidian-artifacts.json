@@ -1,5 +1,11 @@
 {
   "_comment": "Official Obsidian artifacts pinned per kernel version. The upstream desktop-releases.json only carries the current stable entry, so a pinned (older) kernel is resolved from here instead of silently downloading latest. Keep this in sync with web_engine/src/main/resources/resfile/resources/app/package.json; values are copied from obsidian-releases/desktop-releases.json at that version's release commit.",
+  "1.15.1": {
+    "downloadUrl": "https://github.com/obsidianmd/obsidian-releases/releases/download/v1.15.1/obsidian-1.15.1.asar.gz",
+    "hash": "P2gIwUIEBjNJ1aelm58vY3lYBj+oXu6+dn4T4G0xTA8=",
+    "signature": "e3jAQiUjC729X4kizHMTCUb19cquQAhW0JppzdSEgJXorH6DJIVmUB6brZHdf+xitwllDRdsHwyRe4rGaiFyTmLl5IEartx99/ozZZpUW8MApBt9ecu2w6viQkg5V4kppHpk2GeS53ubspJvQe+WO7jBjT9+kEqa814DBjBYlIpUXJjbIgFpir3Gsbw7vOgR85PgH8XORdp7Fx9twd6r6o6VGWYhu6EEwbov+F9apiYzcJyE09CWeAuXmgk0BZReMua5Mw9uPitxwaeicfBv9gJTbvk1TkE5EsJHLQ8XtCBFzXgwKSZNOT9lOZDSso7llfgN/nHDsLPZdsxpthccTA==",
+    "source": "obsidian-releases@379d0b17cec8a24e368daee82ebe5b509606516f desktop-releases.json (latestVersion, fetched 2026-11-22; re-checked 2026-11-23 @ bd5fc44, unchanged)"
+  },
   "1.13.7": {
     "downloadUrl": "https://github.com/obsidianmd/obsidian-releases/releases/download/v1.13.7/obsidian-1.13.7.asar.gz",
     "hash": "aSU+OaoLmA48+W6eiopL7Wtkge9wIc12L2eHJmLY0lo=",

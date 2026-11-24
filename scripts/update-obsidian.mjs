@@ -8,8 +8,8 @@
  *
  * Usage:
  *   node scripts/update-obsidian.mjs            # update to latest stable
- *   node scripts/update-obsidian.mjs 1.13.7     # update to a specific version
- *   node scripts/update-obsidian.mjs 1.13.7 --repatch   # force a rebuild
+ *   node scripts/update-obsidian.mjs 1.15.1     # update to a specific version
+ *   node scripts/update-obsidian.mjs 1.15.1 --repatch   # force a rebuild
  *   node scripts/update-obsidian.mjs --repatch          # rebuild the pinned kernel
  *   node scripts/update-obsidian.mjs --repatch --agent  # INTERNAL: device-agent probes
  *
@@ -391,24 +391,38 @@ async function main() {
   // reload silently keeps the current vault. Route both to openVaultChooser,
   // which opens the starter (vault chooser) window via the working
   // desktop/createWindow path.
-  const drawerSwitchSrc = 'window.localStorage.setItem("mobile-selected-vault",n),location.reload()';
+  // 1.15.1 renamed the drawer pane local from `n` to `t.path` and added the
+  // async-persistence dual write `Bm(t.path),` in front of it (see the kernel
+  // notes in docs/PLATFORM-ADAPTATION.md). Keep that prefix and route only the
+  // localStorage+reload tail: `(Bm(t.path),i.app.openVaultChooser())`.
+  const drawerSwitchSrc = 'window.localStorage.setItem("mobile-selected-vault",t.path),location.reload()';
   const drawerSwitchDst = 'i.app.openVaultChooser()';
+  const drawerSwitchApplied = '(Bm(t.path),i.app.openVaultChooser())';
+  // The settings-page vault <select> carries the SAME dead end (write the
+  // mobile key, reload, desktop shell ignores it). 1.15.1 already calls
+  // `this.app.openVaultChooser()` for its "manage-vaults" option in the same
+  // arrow handler, so `this.app` is proven in scope right at the patch site.
+  const drawerSelectSrc = 'window.localStorage.setItem("mobile-selected-vault",u),location.reload()';
+  const drawerSelectDst = 'this.app.openVaultChooser()';
+  const drawerSelectApplied = '(Bm(u),this.app.openVaultChooser())';
   // Obsidian's font picker candidates (Zne): a hardcoded seed list plus a
   // desktop-font probe table that mostly misses on HarmonyOS, and the
   // engine does not implement the get-fonts module - so settings show
   // only Inter / Source Code Pro. Inject the full system family list
   // (published by ArkTS as cfg.systemFonts, surfaced at boot as
   // window.__ohsidianSystemFonts).
-  const fontListSrc = 'var t=["Inter","Source Code Pro"];Xne=t;';
-  const fontListDst = 'var t=["Inter","Source Code Pro"].concat(window.__ohsidianSystemFonts||[]);Xne=t;';
+  // 1.15.1 moved this into the lazy font loader `ele()` (seed `let o=[...]`).
+  const fontListSrc = 'let o=["Inter","Source Code Pro"];$A=o;';
+  const fontListDst = 'let o=["Inter","Source Code Pro"].concat(window.__ohsidianSystemFonts||[]);$A=o;';
   // The delete confirmation dialog shows a stock "moved to your .trash
   // folder" notice on the local branch (trashOption is forced "local" by
   // the trash hook). Swap that notice for the OHSidian destination note:
   // window.__ohsidianTrashNote (injected patch) builds the text at
   // dialog-open time and returns null on any error, in which case the
   // stock notice still renders.
-  const deleteNoteSrc = '"local"===i?o.createEl("p",{text:bd.dialogue.labelMoveToVaultTrash()}):';
-  const deleteNoteDst = '"local"===i?o.createEl("p",{text:window.__ohsidianTrashNote?window.__ohsidianTrashNote():bd.dialogue.labelMoveToVaultTrash()}):';
+  // 1.15.1 minified the local branch to `r==="local"?l.createEl(...)`.
+  const deleteNoteSrc = 'r==="local"?l.createEl("p",{text:w.dialogue.labelMoveToVaultTrash()}):';
+  const deleteNoteDst = 'r==="local"?l.createEl("p",{text:window.__ohsidianTrashNote?window.__ohsidianTrashNote():w.dialogue.labelMoveToVaultTrash()}):';
   // PDF page canvases: Obsidian pins maxCanvasPixels=16 MiB but leaves
   // capCanvasAreaFactor at the upstream default 200 (screen pixels x3), i.e.
   // ~15.4 Mpx on this 2.249-density tablet - never a constraint for an A4
@@ -435,75 +449,64 @@ async function main() {
   // "模式一换插件就坏". Force `a` to false: the whitelist still resolves first,
   // everything else falls through to the real require, and `rd.isMobile` (the
   // actual mobile LAYOUT) is untouched.
-  const pluginRequireSrc = 'a=document.body.hasClass("emulate-mobile"),s=function(e){return u4.hasOwnProperty(e)?';
-  const pluginRequireDst = 'a=!1,s=function(e){return u4.hasOwnProperty(e)?';
+  // 1.15.1 also rewrote loadPlugin(): the emulate-mobile flag is now `l` and
+  // the whitelist shim is `c=p=>Object.hasOwn(_oe,p)?`.
+  const pluginRequireSrc = 'l=document.body.hasClass("emulate-mobile"),c=p=>Object.hasOwn(_oe,p)?';
+  const pluginRequireDst = 'l=!1,c=p=>Object.hasOwn(_oe,p)?';
 
   /* -------------------------------------------------------------------------
      NF-015 (report 2026-11-22): plugin downloads used to be written to disk
-     with ZERO validation. `zy()` retries through the release proxy only when
-     the request THROWS; when a peer resets mid-body and the network stack
-     still reports success, installPlugin writes the truncated bytes verbatim
-     and every later loadPlugin() eval dies with SyntaxError -> the generic 563
-     "插件加载失败" notice, forever, with no trace in any log. The audit caught
-     a deterministic truncation point at 1,548,288 bytes on this environment and
-     the biggest community plugin (nutstore-sync 1.6.2, 4,182,455 bytes) is
-     exactly the class that hits it. Fix: prefetch manifest + main.js BEFORE
-     anything is written, parse the body exactly the way loadPlugin will
-     (`replace(f4,"")+v4`, evaluated as a function body), retry once through
-     the release proxy, and abort with an explicit message instead of writing a
-     plugin the kernel can never load. Parsing 4 MB costs ~100 ms once, at
-     install time only.
+     with ZERO validation. The upstream request wrapper retries through the
+     release proxy when the request THROWS, but a peer that resets mid-body
+     while the stack still reports success hands installPlugin a truncated
+     main.js; it is written verbatim and every later loadPlugin() eval dies
+     with SyntaxError -> the generic 563 "插件加载失败" notice, forever, with no
+     trace in any log (the audit caught a deterministic truncation point at
+     1,548,288 bytes; nutstore-sync 1.6.2, 4,182,455 bytes, is exactly the kind
+     that hits it). 1.13.x had this spread over the tslib state machine of
+     installPlugin (`case 1` / `case 2` / `case 12`); Obsidian 1.15.1 collapsed
+     the whole download into one helper `UEe()`, so the patch is now a single
+     function replacement: fetch the manifest, fetch main.js, PARSE it exactly
+     the way loadPlugin will (`replace(TV,"")+IV` evaluated as a function
+     body), retry once through the release proxy when the body does not parse,
+     and throw a marked "incomplete" error instead of letting a doomed plugin
+     reach disk. Parsing 4 MB costs ~100 ms, once, at install time only.
      ------------------------------------------------------------------------- */
-  const PLUGIN_BUNDLE_HELPER = `t.prototype.__ohsidianFetchPluginBundle=function(manifestUrl,mainUrl){
-  var looksComplete=function(resp){
-    if(!resp||typeof resp.text!=="string"||resp.text.length<64)return false;
-    try{ new Function(String(resp.text).replace(f4,"")+v4); }catch(e){ return false }
-    return true;
-  };
-  var incomplete=function(resp){
-    var err=new Error("plugin main.js incomplete ("+(resp&&typeof resp.text==="string"?resp.text.length:0)+" chars)");
-    err.__ohsidianPluginDownloadIncomplete=true;
-    return err;
-  };
-  var fetchMain=function(url){
-    return zy(url).then(function(resp){
-      if(looksComplete(resp))return resp.text;
-      throw incomplete(resp);
-    });
-  };
-  var guarded=fetchMain(mainUrl).then(null,function(first){
-    if(!first||first.__ohsidianPluginDownloadIncomplete!==true)throw first;
-    try{ console.warn("[OHSidian] plugin main.js looks truncated, retrying through the release proxy:",mainUrl,first.message); }catch(eLog){}
-    return fetchMain("https://releases.obsidian.md/proxy?url="+encodeURIComponent(mainUrl)).then(null,function(second){
-      /* keep the truncation verdict when the retry itself fails: the proxy
-         being unreachable does not make the first body complete. */
-      throw (second&&second.__ohsidianPluginDownloadIncomplete===true)?second:first;
-    });
-  });
-  return Promise.all([zy(manifestUrl).then(function(resp){ return resp.text; }),guarded]);
-}`;
-  const PLUGIN_INSTALL_HELPER_SRC = 't.prototype.installPlugin=function(e,t,n){return y(this,void 0,Promise,';
-  /* The minified class body is `return v(t,e),method1=...,method2=...,t` - one
-     comma expression. This helper must therefore be joined with a COMMA and
-     must NOT end with a semicolon: a `;` there terminates the return early,
-     the factory yields the helper function instead of the class, and
-     `new Plugins(app)` returns the helper's Promise - Obsidian then dies at
-     boot with "i.app.plugins.on is not a function" (device report 2026-11-22). */
-  const PLUGIN_INSTALL_HELPER_DST = PLUGIN_BUNDLE_HELPER + ',' + PLUGIN_INSTALL_HELPER_SRC;
-  const pluginInstallFetchSrc = 'case 1:return m.trys.push([1,3,,4]),[4,zy(Py(e,t,eL)).text];';
-  const pluginInstallFetchDst = 'case 1:return m.trys.push([1,3,,4]),[4,this.__ohsidianFetchPluginBundle(Py(e,t,eL),Py(e,t,tL))];';
-  const pluginInstallPairSrc = 'case 2:return a=m.sent(),(s=JSON.parse(a)).id&&s.id===i?[3,4]:';
-  const pluginInstallPairDst = 'case 2:return l=m.sent(),a=l[0],d=l[1],(s=JSON.parse(a)).id&&s.id===i?[3,4]:';
-  const pluginInstallFailSrc = 'case 3:return l=m.sent(),console.error(l),o.containerEl.removeClass("is-loading"),o.setMessage(y4.msgFailedToInstallPlugin({name:r})),setTimeout((function(){return o.hide()}),3e3),[2];';
-  const pluginInstallFailDst = 'case 3:return l=m.sent(),console.error(l),o.containerEl.removeClass("is-loading"),o.setMessage((l&&(l.__ohsidianPluginDownloadIncomplete===true||l instanceof SyntaxError))?"安装失败：插件文件下载不完整（疑似网络截断），请更换网络后重试":y4.msgFailedToInstallPlugin({name:r})),setTimeout((function(){return o.hide()}),6e3),[2];';
-  const pluginInstallWriteSrc = 'case 12:return m.trys.push([12,15,,16]),[4,zy(Py(e,t,tL)).text];';
-  const pluginInstallWriteDst = 'case 12:return m.trys.push([12,15,,16]),[4,(d&&d.length?d:zy(Py(e,t,tL)).then(function(resp){return resp.text}))];';
+  const PLUGIN_FETCH_SRC = 'async function UEe(o,t){let e=await sr(Xm(o,t,$h)).text,i=await sr(Xm(o,t,UT)).text;i=i.replace(TV,"")+IV;let r=null;try{r=await sr(Xm(o,t,qT)).text}catch(n){if(!(n instanceof kp))throw n}return{manifest:e,main:i,styles:r}}';
+  /* The sentinels let scripts/verify-plugin-install.cjs slice this function out
+     of the shipped app.js and drive it against synthetic downloads, so a patch
+     that is present but inert fails the gate instead of shipping. */
+  const PLUGIN_FETCH_DST = [
+    '/*OHSIDIAN-PLUGIN-FETCH*/',
+    'async function UEe(o,t){',
+    'let e=await sr(Xm(o,t,$h)).text;',
+    'var ohParses=function(v){try{new Function(String(v).replace(TV,"")+IV);return true}catch(err){return false}};',
+    'var ohIncomplete=function(v){var err=new Error("plugin main.js incomplete ("+(v?String(v).length:0)+" chars)");err.__ohsidianPluginDownloadIncomplete=true;return err};',
+    'var ohUrl=Xm(o,t,UT);',
+    'var ohMain=await sr(ohUrl).text;',
+    'if(!ohParses(ohMain)||String(ohMain).length<64){',
+    'try{console.warn("[OHSidian] plugin main.js looks truncated, retrying through the release proxy:",ohUrl)}catch(eW){}',
+    'var ohRetry=null;',
+    'try{ohRetry=await sr("https://releases.obsidian.md/proxy?url="+encodeURIComponent(ohUrl)).text}catch(eR){throw ohIncomplete(ohMain)}',
+    'if(!ohParses(ohRetry)||String(ohRetry).length<64)throw ohIncomplete(ohRetry);',
+    'ohMain=ohRetry;',
+    '}',
+    'var i=ohMain.replace(TV,"")+IV;',
+    'let r=null;try{r=await sr(Xm(o,t,qT)).text}catch(n){if(!(n instanceof kp))throw n}',
+    'return{manifest:e,main:i,styles:r}}',
+    '/*OHSIDIAN-PLUGIN-FETCH-END*/',
+  ].join('\n');
+  /* installPlugin() failure surface (1.15.1 shape):
+     `catch(d){return console.error(d),l(zo.msgFailedToInstallPlugin({name:a}))}`
+     where `l()` is the local notice helper (drop is-loading, auto-hide 3 s). */
+  const pluginInstallFailSrc = 'catch(d){return console.error(d),l(zo.msgFailedToInstallPlugin({name:a}))}';
+  const pluginInstallFailDst = 'catch(d){return console.error(d),l((d&&(d.__ohsidianPluginDownloadIncomplete===true||d instanceof SyntaxError))?"安装失败：插件文件下载不完整（疑似网络截断），请更换网络后重试":zo.msgFailedToInstallPlugin({name:a}))}';
   /* A plugin that is ALREADY broken on disk (installed before this fix) keeps
      failing at loadPlugin's eval with SyntaxError. Give that failure its own
      actionable notice instead of the generic 563 so support can tell the two
      apart: 563 + SyntaxError = the file itself is incomplete. */
-  const pluginLoadSyntaxSrc = 'case 3:return i=r.sent(),this.loadingPluginId=null,new Aw(bd.interface.msgFailedToLoadPlugin({plugin:e})),console.error("Plugin failure: "+e,i),[2,!1];';
-  const pluginLoadSyntaxDst = 'case 3:return i=r.sent(),this.loadingPluginId=null,new Aw(bd.interface.msgFailedToLoadPlugin({plugin:e})),(i instanceof SyntaxError)&&(new Aw("插件「"+e+"」的 main.js 无法解析：文件可能下载不完整。请在插件市场卸载后更换网络重新安装。",12e3),console.error("[OHSidian] plugin file unparsable (truncated download?): "+e+" :: "+(i&&i.message))),console.error("Plugin failure: "+e,i),[2,!1];';
+  const pluginLoadSyntaxSrc = 'catch(n){return this.loadingPluginId=null,new R(w.interface.msgFailedToLoadPlugin({plugin:e})),console.error("Plugin failure: "+e,n),!1}';
+  const pluginLoadSyntaxDst = 'catch(n){return this.loadingPluginId=null,new R(w.interface.msgFailedToLoadPlugin({plugin:e})),(n instanceof SyntaxError)&&(new R("插件「"+e+"」的 main.js 无法解析：文件可能下载不完整。请在插件市场卸载后更换网络重新安装。",12e3),console.error("[OHSidian] plugin file unparsable (truncated download?): "+e+" :: "+(n&&n.message))),console.error("Plugin failure: "+e,n),!1}';
   /* NF-018 (report 2026-11-22): the kernel's desktop secretStorage adapter
      reads window.electron.remote.safeStorage, which this engine does not
      implement (0 hits in the wrapper main.js and the ArkTS tree). Giving it
@@ -511,64 +514,74 @@ async function main() {
      "unavailable" - is what makes BRAT 2.2.0's token migration complete. The
      fallback object itself comes from the touch-mode patch
      (window.__ohsidianSafeStorageFallback); this patch only makes the adapter
-     prefer it when the engine value is missing or incomplete. */
-  const secretStorageAdapterSrc = 'n.safeStorage=window.electron.remote.safeStorage,n}';
-  const secretStorageAdapterDst = 'n.safeStorage=(function(){var s=null;try{s=window.electron&&window.electron.remote&&window.electron.remote.safeStorage}catch(e){s=null}if(s&&typeof s.isEncryptionAvailable==="function"&&typeof s.encryptString==="function"&&typeof s.decryptString==="function"&&typeof s.getSelectedStorageBackend==="function")return s;try{console.warn("[OHSidian] engine has no remote.safeStorage - secretStorage uses plaintext passthrough (NF-018)")}catch(eW){}return window.__ohsidianSafeStorageFallback||{isEncryptionAvailable:function(){return false},getSelectedStorageBackend:function(){return "basic_text"},encryptString:function(v){return String(v)},decryptString:function(v){return String(v)}}})(),n}';
+     prefer it when the engine value is missing or incomplete.
+     1.15.1 shape: a constructor class field
+     `this.safeStorage=window.electron.remote.safeStorage}` (1.13.x used the
+     `n.safeStorage=...,n}` comma expression), so the closing brace stays. */
+  const secretStorageAdapterSrc = 'this.safeStorage=window.electron.remote.safeStorage}';
+  const secretStorageAdapterDst = 'this.safeStorage=(function(){var s=null;try{s=window.electron&&window.electron.remote&&window.electron.remote.safeStorage}catch(e){s=null}if(s&&typeof s.isEncryptionAvailable==="function"&&typeof s.encryptString==="function"&&typeof s.decryptString==="function"&&typeof s.getSelectedStorageBackend==="function")return s;try{console.warn("[OHSidian] engine has no remote.safeStorage - secretStorage uses plaintext passthrough (NF-018)")}catch(eW){}return window.__ohsidianSafeStorageFallback||{isEncryptionAvailable:function(){return false},getSelectedStorageBackend:function(){return "basic_text"},encryptString:function(v){return String(v)},decryptString:function(v){return String(v)}}})()}';
   /* rev203: settings-definition keys. The kernel derives a definition key as
-     `type:heading` (or `type#index` without a heading). A plugin that emits
-     two groups with the SAME heading (nutstore-sync 1.6.2 has two 模块开关:
-     groups) produces colliding keys: the kernel logs 'duplicate setting key' and
-     the keyed re-render diff may reuse one group's DOM for the other. Append the
-     position index so every key is unique and still stable across re-renders
-     (re-renders keep the definition order). */
-  const settingsDefKeySrc = 'function $2(e,t){return e.heading?e.type+":"+e.heading:e.type+"#"+t}';
-  const settingsDefKeyDst = 'function $2(e,t){return(e.heading?e.type+":"+e.heading:e.type)+"#"+t}';
+     `type:heading` (or `type#index` without a heading, `type:id:<id>` when the
+     definition carries an id). A plugin that emits two groups with the SAME
+     heading (nutstore-sync 1.6.2 has two 模块开关: groups) produces colliding
+     keys: the kernel logs 'duplicate setting key' and the keyed re-render diff
+     may reuse one group's DOM for the other. Append the position index to the
+     heading / plain branches so every key is unique and still stable across
+     re-renders (re-renders keep the definition order); id-keyed definitions
+     are already unique and keep their upstream key. 1.15.1 minified the helper
+     to `AEe`. */
+  const settingsDefKeySrc = 'function AEe(o,t){return o.id?o.type+":id:"+o.id:o.heading?o.type+":"+o.heading:o.type+"#"+t}';
+  const settingsDefKeyDst = 'function AEe(o,t){return o.id?o.type+":id:"+o.id:(o.heading?o.type+":"+o.heading:o.type)+"#"+t}';
   const APP_BODY_PATCHES = [
-    [drawerSwitchSrc, drawerSwitchDst, 'vault drawer switch routed to openVaultChooser',
+    [drawerSwitchSrc, drawerSwitchDst, drawerSwitchApplied, 'vault drawer switch routed to openVaultChooser',
       'vault drawer switch site not found (app.js layout changed?); ' +
       'drawer vault switching will silently no-op in touch mode'],
-    [fontListSrc, fontListDst, 'system font list injected into the settings font picker',
+    [drawerSelectSrc, drawerSelectDst, drawerSelectApplied, 'settings-page vault switch routed to openVaultChooser',
+      'settings vault-select site not found (app.js layout changed?); ' +
+      'switching vault from the settings dropdown will silently no-op'],
+    [fontListSrc, fontListDst, fontListDst, 'system font list injected into the settings font picker',
       'font picker seed site not found (app.js layout changed?); ' +
       'settings will show only Inter / Source Code Pro'],
-    [deleteNoteSrc, deleteNoteDst, 'delete dialog shows the OHSidian trash destination',
+    [deleteNoteSrc, deleteNoteDst, deleteNoteDst, 'delete dialog shows the OHSidian trash destination',
       'delete dialog notice site not found (app.js layout changed?); ' +
       'the delete dialog keeps the stock ".trash folder" wording'],
-    [pdfCanvasSrc, pdfCanvasDst, 'PDF page canvas capped at one screen on high-DPI touch devices',
+    [pdfCanvasSrc, pdfCanvasDst, pdfCanvasDst, 'PDF page canvas capped at one screen on high-DPI touch devices',
       'PDF canvas config site not found (app.js layout changed?); ' +
       'wide PDF pages keep the full-resolution canvas (~39 MB/page on the tablet)'],
-    [pluginRequireSrc, pluginRequireDst, 'plugin require() no longer gated by EmulateMobile (touch mode)',
+    [pluginRequireSrc, pluginRequireDst, pluginRequireDst, 'plugin require() no longer gated by EmulateMobile (touch mode)',
       'loadPlugin require-shim site not found (app.js layout changed?); ' +
       'touch mode will keep failing every plugin that requires a Node module'],
-    // NF-015: plugin install integrity (report 2026-11-22).
-    [PLUGIN_INSTALL_HELPER_SRC, PLUGIN_INSTALL_HELPER_DST, 'plugin install: manifest+main.js prefetched and parsed before any write',
-      'installPlugin site not found (app.js layout changed?); a truncated plugin main.js will still be written unchecked'],
-    [pluginInstallFetchSrc, pluginInstallFetchDst, 'plugin install: downloads go through the validating prefetch',
-      'installPlugin manifest download site not found (app.js layout changed?); truncation defence is inactive'],
-    [pluginInstallPairSrc, pluginInstallPairDst, 'plugin install: prefetched manifest+main.js unpacked',
-      'installPlugin manifest-check site not found (app.js layout changed?); truncation defence is inactive'],
-    [pluginInstallFailSrc, pluginInstallFailDst, 'plugin install: incomplete download gets an explicit message',
+    // NF-015: plugin install integrity (report 2026-11-22). 1.15.1's single
+    // download helper UEe() carries the whole defence in one replacement.
+    [PLUGIN_FETCH_SRC, PLUGIN_FETCH_DST, '/*OHSIDIAN-PLUGIN-FETCH*/',
+      'plugin install: manifest+main.js parsed and retried before any write',
+      'plugin download helper UEe() site not found (app.js layout changed?); ' +
+      'a truncated plugin main.js will still be written unchecked'],
+    [pluginInstallFailSrc, pluginInstallFailDst, '插件文件下载不完整（疑似网络截断）',
+      'plugin install: incomplete download gets an explicit message',
       'installPlugin failure site not found (app.js layout changed?); truncated installs keep the generic message'],
-    [pluginInstallWriteSrc, pluginInstallWriteDst, 'plugin install: main.js write uses the validated body',
-      'installPlugin main.js write site not found (app.js layout changed?); truncation defence is inactive'],
-    [pluginLoadSyntaxSrc, pluginLoadSyntaxDst, 'plugin load: SyntaxError gets a "file may be truncated" notice',
+    [pluginLoadSyntaxSrc, pluginLoadSyntaxDst, '[OHSidian] plugin file unparsable',
+      'plugin load: SyntaxError gets a "file may be truncated" notice',
       'enablePlugin failure site not found (app.js layout changed?); a truncated plugin keeps the generic notice'],
     // NF-018: secretStorage on a desktop-form package without engine safeStorage.
-    [secretStorageAdapterSrc, secretStorageAdapterDst, 'secretStorage desktop adapter falls back to plaintext (engine has no safeStorage)',
+    [secretStorageAdapterSrc, secretStorageAdapterDst, 'engine has no remote.safeStorage',
+      'secretStorage desktop adapter falls back to plaintext (engine has no safeStorage)',
       'k6 safeStorage site not found (app.js layout changed?); BRAT-style secretStorage plugins will keep failing silently'],
     // rev203: plugins with duplicate settings-group headings (nutstore-sync) must
     // not collide in the definition-key diff.
-    [settingsDefKeySrc, settingsDefKeyDst, 'settings definition keys unique by position',
+    [settingsDefKeySrc, settingsDefKeyDst, settingsDefKeyDst, 'settings definition keys unique by position',
       'settings keying site not found (app.js layout changed?); plugins with duplicate group headings keep logging duplicate-setting-key warnings'],
   ];
-  for (const [src, dst, okMsg, warnMsg] of APP_BODY_PATCHES) {
-    // src FIRST: the drawer dst token ("i.app.openVaultChooser()") also exists
-    // in upstream's "manage-vaults" branch, so testing dst first makes a
-    // pristine app.js look "already applied" and silently skips the real
-    // replacement (touch-mode vault switching then stays on reload()).
+  for (const [src, dst, appliedNeedle, okMsg, warnMsg] of APP_BODY_PATCHES) {
+    // src FIRST: several dst tokens already exist elsewhere in upstream's code
+    // (the drawer's `i.app.openVaultChooser()` prefix, `this.app.openVaultChooser()`
+    // in the manage-vaults option), so testing dst first makes a pristine app.js
+    // look "already applied" and silently skips the real replacement. The
+    // explicit appliedNeedle can only exist after this specific patch.
     if (appSrc.includes(src)) {
       appSrc = appSrc.replace(src, dst);
       log(okMsg);
-    } else if (appSrc.includes(dst)) {
+    } else if (appSrc.includes(appliedNeedle)) {
       log('body patch already applied: ' + okMsg);
     } else {
       log('WARNING: ' + warnMsg);
@@ -584,29 +597,33 @@ async function main() {
   if (fs.existsSync(asarMainJs)) {
     let mainSrc = fs.readFileSync(asarMainJs, 'utf8');
     log('injecting IPC guard + version-floor bypass into main.js');
-    /* Belt-and-suspenders for the "Electron major < 18" gate: the runtime
+    /* Belt-and-suspenders for the "Electron major < 21" gate: the runtime
        process.versions shim may be silently ignored if the engine made the
        object read-only, so also patch the gate's definition textually. The
-       parsed major has exactly one consumer (verified by string search), so
-       flooring it at 22 is safe and keeps any later logic consistent. */
-    const GATE_DEF = 'bo=parseInt(fo.split(".")[0])';
+       parsed major has exactly two consumers (verified by string search:
+       `$t>=29` for plugin-script-root, `$t<21` for the gate), so flooring it
+       at 28 is safe and keeps every later logic branch on the same side.
+       1.15.1 renamed the minified pair (fo/bo -> fi/$t); the value `28.2.3`
+       and the gate semantics are unchanged - do NOT raise the shim. */
+    const GATE_DEF = '$t=parseInt(fi.split(".")[0])';
     if (mainSrc.includes(GATE_DEF)) {
-      mainSrc = mainSrc.replace(GATE_DEF, 'bo=Math.max(parseInt(fo.split(".")[0]),28)');
-      log('version-floor gate patched (bo floored at 28)');
+      mainSrc = mainSrc.replace(GATE_DEF, '$t=Math.max(parseInt(fi.split(".")[0]),28)');
+      log('version-floor gate patched ($t floored at 28)');
     } else if (mainSrc.includes('no longer supported')) {
       log('WARNING: version-floor gate pattern not found - upstream may have changed it; investigate manually');
     }
     /* Disable the auto-updater: on HarmonyOS there is nothing to update
        into (HAPs are distributed through this repo's Releases), and the
        updater would only burn battery checking obsidian.md. main.js gates
-       the updater on (workBuild || D.updateDisabled) and emits "disable"
+       the updater on (workBuild || config.updateDisabled) and emits "disable"
        when set - force the flag so every boot starts with updates off,
-       regardless of what the global config says. */
-    const UPDATER_DISABLE_SRC = '(at||D.updateDisabled)&&(e.emit("disable",!0)';
+       regardless of what the global config says. 1.15.1 renamed the minified
+       pair (at/D -> no/k) and the flag now lives on the config object `k`. */
+    const UPDATER_DISABLE_SRC = '(no||k.updateDisabled)&&(e.emit("disable",!0)';
     // NOTE: `||` binds tighter than `=`, so the assignment MUST get its own
-    // parens - `(at||D.updateDisabled=!0)` would parse as
-    // `(at||D.updateDisabled)=!0` and fail with "Invalid left-hand side".
-    const UPDATER_DISABLE_DST = '(at||(D.updateDisabled=!0))&&(e.emit("disable",!0)';
+    // parens - `(no||k.updateDisabled=!0)` would parse as
+    // `(no||k.updateDisabled)=!0` and fail with "Invalid left-hand side".
+    const UPDATER_DISABLE_DST = '(no||(k.updateDisabled=!0))&&(e.emit("disable",!0)';
     if (mainSrc.includes(UPDATER_DISABLE_SRC)) {
       mainSrc = mainSrc.replace(UPDATER_DISABLE_SRC, UPDATER_DISABLE_DST);
       log('auto-updater force-disabled (updateDisabled latched true)');
@@ -618,13 +635,15 @@ async function main() {
        `new Worker(url,{type:"module"})` for pdf.worker.min.mjs) are rejected
        without a JavaScript MIME type; pdf.js then silently falls back to a
        "fake worker" on the UI thread, which is exactly the slow/white PDF
-       loading path. Set a small extension->MIME map on the same response. */
-    const APP_MIME_SRC = 'return T.set("Access-Control-Allow-Origin","*")';
-    const APP_MIME_DST = 'let _ohExt=String(n).toLowerCase();let _ohDot=_ohExt.lastIndexOf(".");_ohExt=_ohDot>=0?_ohExt.slice(_ohDot):"";let _ohMap={".mjs":"text/javascript; charset=utf-8",".js":"text/javascript; charset=utf-8",".wasm":"application/wasm",".css":"text/css; charset=utf-8",".json":"application/json",".html":"text/html; charset=utf-8",".pdf":"application/pdf",".svg":"image/svg+xml",".ttf":"font/ttf",".otf":"font/otf",".woff":"font/woff",".woff2":"font/woff2"};if(_ohMap[_ohExt])T.set("Content-Type",_ohMap[_ohExt]);return T.set("Access-Control-Allow-Origin","*")';
+       loading path. Set a small extension->MIME map on the same response.
+       1.15.1 handle branch: path variable `s`, header object `E` (Headers). */
+    const APP_MIME_SRC = 'return E.set("Access-Control-Allow-Origin","*")';
+    const APP_MIME_DST = 'let _ohExt=String(s).toLowerCase();let _ohDot=_ohExt.lastIndexOf(".");_ohExt=_ohDot>=0?_ohExt.slice(_ohDot):"";let _ohMap={".mjs":"text/javascript; charset=utf-8",".js":"text/javascript; charset=utf-8",".wasm":"application/wasm",".css":"text/css; charset=utf-8",".json":"application/json",".html":"text/html; charset=utf-8",".pdf":"application/pdf",".svg":"image/svg+xml",".ttf":"font/ttf",".otf":"font/otf",".woff":"font/woff",".woff2":"font/woff2"};if(_ohMap[_ohExt])E.set("Content-Type",_ohMap[_ohExt]);return E.set("Access-Control-Allow-Origin","*")';
     // Electron still exposes registerFileProtocol; when that branch wins the
     // handler builds a callback object instead of a Response. Patch both.
-    const APP_MIME_FILE_SRC = 'n({path:s,headers:S})';
-    const APP_MIME_FILE_DST = '(function(){let _ohExt=String(s).toLowerCase();let _ohDot=_ohExt.lastIndexOf(".");_ohExt=_ohDot>=0?_ohExt.slice(_ohDot):"";let _ohMap={".mjs":"text/javascript; charset=utf-8",".js":"text/javascript; charset=utf-8",".wasm":"application/wasm",".css":"text/css; charset=utf-8",".json":"application/json",".html":"text/html; charset=utf-8",".pdf":"application/pdf",".svg":"image/svg+xml",".ttf":"font/ttf",".otf":"font/otf",".woff":"font/woff",".woff2":"font/woff2"};if(_ohMap[_ohExt])S["Content-Type"]=_ohMap[_ohExt]})(),n({path:s,headers:S})';
+    // 1.15.1 file-protocol branch: path `d`, headers object `T`.
+    const APP_MIME_FILE_SRC = 's({path:d,headers:T})';
+    const APP_MIME_FILE_DST = '(function(){let _ohExt=String(d).toLowerCase();let _ohDot=_ohExt.lastIndexOf(".");_ohExt=_ohDot>=0?_ohExt.slice(_ohDot):"";let _ohMap={".mjs":"text/javascript; charset=utf-8",".js":"text/javascript; charset=utf-8",".wasm":"application/wasm",".css":"text/css; charset=utf-8",".json":"application/json",".html":"text/html; charset=utf-8",".pdf":"application/pdf",".svg":"image/svg+xml",".ttf":"font/ttf",".otf":"font/otf",".woff":"font/woff",".woff2":"font/woff2"};if(_ohMap[_ohExt])T["Content-Type"]=_ohMap[_ohExt]})(),s({path:d,headers:T})';
     if (mainSrc.includes(APP_MIME_DST)) {
       log('app:// MIME map already present (module worker can load)');
     } else if (mainSrc.includes(APP_MIME_SRC)) {
@@ -642,18 +661,18 @@ async function main() {
       log('WARNING: app:// file-protocol anchor not found');
     }
     /* Round 93 (93e): default the window frame to NATIVE. Upstream reads
-       the GLOBAL config (D = <userData>/obsidian.json) once at startup:
-       `Ae=D.frame==="native"` -> every unset value (the stock "hidden"
-       frameless) creates frameless windows whose WMS min/max/close buttons
-       float over the content and collide with Obsidian's own top-right
+       the GLOBAL config (1.13.x `D`, 1.15.1 `k` = <userData>/obsidian.json)
+       once at startup: `Ke=k.frame==="native"` -> every unset value (the stock
+       "hidden" frameless) creates frameless windows whose WMS min/max/close
+       buttons float over the content and collide with Obsidian's own top-right
        controls on this device (hidden was unverifiable-by-settings too:
-       the frame UI and the window construction both key off D.frame, so
+       the frame UI and the window construction both key off the same field, so
        only the main-process default could fix it - renderer-side
        migrations 93b/93d wrote the wrong file and were inert). Reversing
        the default keeps explicit choices intact: "hidden"/"custom" still
        produce frameless windows, an unset value now means native. */
-    const FRAME_DEFAULT_SRC = 'let Ae=D.frame==="native",Ue=Ae?"default":"hidden"';
-    const FRAME_DEFAULT_DST = 'let Ae=D.frame==="native"||D.frame==null,Ue=Ae?"default":"hidden"';
+    const FRAME_DEFAULT_SRC = 'Ke=k.frame==="native",vt=Ke?"default":"hidden"';
+    const FRAME_DEFAULT_DST = 'Ke=k.frame==="native"||k.frame==null,vt=Ke?"default":"hidden"';
     if (mainSrc.includes(FRAME_DEFAULT_DST)) {
       log('frame default already patched (unset -> native)');
     } else if (mainSrc.includes(FRAME_DEFAULT_SRC)) {
@@ -662,6 +681,24 @@ async function main() {
     } else {
       log('WARNING: frame default pattern not found - windows keep the hidden-frameless default; ' +
         'set 窗口边框样式 = 原生 manually in settings if the caption collides');
+    }
+    /* R1 (kernel-upgrade audit 2026-11-23): 1.15.1 main.js reads
+       `r.nativeTheme.shouldUseDarkColors` on the window-creation path (starter
+       window `systemTheme`, appearance following). The engine's main-process
+       shim does not implement a nativeTheme module, so an unguarded dereference
+       throws a TypeError while the first window is being built (possible white
+       screen). One-line guard: an absent module simply means "not dark".
+       The long-term fix belongs in the engine (NativeThemeAdapter already
+       exists renderer-side); this keeps the app bootable until then. */
+    const NATIVE_THEME_SRC = 'ro=()=>r.nativeTheme.shouldUseDarkColors?"theme-dark":"theme-light"';
+    const NATIVE_THEME_DST = 'ro=()=>((r.nativeTheme&&r.nativeTheme.shouldUseDarkColors)?"theme-dark":"theme-light")';
+    if (mainSrc.includes(NATIVE_THEME_DST)) {
+      log('nativeTheme guard already present');
+    } else if (mainSrc.includes(NATIVE_THEME_SRC)) {
+      mainSrc = mainSrc.replace(NATIVE_THEME_SRC, NATIVE_THEME_DST);
+      log('nativeTheme guard added (engine has no nativeTheme module)');
+    } else {
+      log('WARNING: nativeTheme use site not found - first-window theme detection may throw on this engine');
     }
     fs.writeFileSync(asarMainJs, MAIN_PROCESS_PATCH + mainSrc);
   }
