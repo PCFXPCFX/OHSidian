@@ -50,6 +50,8 @@ try {
       ime.includes('IME_EMULATE_MULTI_DELETE') &&
       ime.includes('this.nativeContext.DeleteBackCallback(1)') &&
       ime.includes('IME multi-delete emulated:'),
+    'IME emulated delete loop is capped': ime.includes('IME_MAX_DELETE_CHARS') &&
+      ime.includes('n = IME_MAX_DELETE_CHARS'),
     'IME revision window + prefix guard': ime.includes('IME_REVISION_WINDOW_MS') && ime.includes('imePrefixRelated'),
     'IME other input events clear the segment': ime.includes('resetImeSegmentState'),
     // Audit B-4: IMFAdapter is resolved through Inject.getOrCreate() with the

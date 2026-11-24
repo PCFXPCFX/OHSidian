@@ -28,6 +28,7 @@
 
 - **删除按数量展开**：`deleteLeft(n)` 的 n 在引擎侧被忽略（一次只删 1 字符），适配层改发 n 次
   `DeleteBackCallback(1)`（`imeDeleteBack`），并在 n>1 时写日志 `IME multi-delete emulated: N`；
+  单次展开上限 64 字符（超出截断并告警，防异常事件流阻塞 UI）；
 - 记录上一次插入的候选文本；
 - 40 ms 窗口内累加删除量（一次修订可能拆成多块）；
 - `insertText(新候选)` 到达时，若 40 ms 内且与上一次插入**同前缀**，判为一次候选修订：

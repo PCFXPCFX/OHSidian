@@ -87,6 +87,10 @@ const IME_SEGMENT_MAX_CORRECTION: number = 12;
 /* The pinned engine ignores the count argument of the delete-backward bridge:
    one call removes one character. Keep true for this engine; see imeDeleteBack. */
 const IME_EMULATE_MULTI_DELETE: boolean = true;
+/* Safety cap for the emulated loop: handwriting revisions never ask for more
+   than a candidate segment, and an unbounded loop on a broken event stream
+   would block the UI thread. Larger requests are clamped and logged. */
+const IME_MAX_DELETE_CHARS: number = 64;
 
 /*
  * Issue #2 accounting state lives at MODULE scope on purpose. IMFAdapter is
@@ -342,6 +346,10 @@ export class IMFAdapter extends BaseAdapter {
     let n: number = Math.floor(count);
     if (!(n > 0)) {
       return;
+    }
+    if (n > IME_MAX_DELETE_CHARS) {
+      LogUtil.warn(TAG, `IME delete clamped: ${n} -> ${IME_MAX_DELETE_CHARS}`);
+      n = IME_MAX_DELETE_CHARS;
     }
     if (!IME_EMULATE_MULTI_DELETE || n === 1) {
       this.nativeContext.DeleteBackCallback(n);

@@ -1922,3 +1922,44 @@ asar 内 `OHSIDIAN_INK_REV = "62"`、`inkQuietStatus` 与一次性提示串均�
 **验证（本轮）**：`verify-release` / `verify-asar` / `verify-plugin-install` / `verify-native-libs` /
 `check-docs` 全绿；HAP 重建后 `modules.abc` 含 `imeDeleteBack` 与 `IME multi-delete emulated`；
 真机效果待用户复测（预期：逐笔写"我爱北京天安门"不再累积残留，日志可见多删展开行）。
+
+
+### 三十三、2.2.0 发布前自审（2026-11-24）
+
+用户要求「做一次审计，没问题就打 tag」。审计范围：代码 / 构建 / 产物 / 门禁 / 发版文档；方法为复跑
+完整管线与全部门禁 + 产物级校验（HAP 解包）。
+
+**复现构建（产物级）**
+
+- `update-obsidian.mjs --repatch`：`WARNING=0`；staged verify 通过后安装 1.15.1 asar。
+- asar 内容指纹（归档值，跨工具链稳定）：app.js 4,037,710 B `419ebb03923f6cdb925b9d6bbeacdbe1ef23421d963c43318761be56297025e3`；
+  main.js 253,633 B `f2811332ab5155dd86a5efdeb1c47dba16dca5cf4af08522323794f68b2def23`；
+  asar 25,420,696 B（辅助哈希 `7fce6be6…ba342`）。
+
+**门禁（当次实际输出）**
+
+| 门禁 | 结果 |
+|---|---|
+| `verify-asar` | `FRESH-PROCESS VERIFY: SYNTAX OK | all markers present`（约 190 项 OK / 0 FAIL） |
+| `verify-plugin-install` | `PLUGIN-INSTALL VERIFY: OK`（53 项 / 0 FAIL） |
+| `verify-release` | OK（agent probe 零残留 + IME 源码断言 11 项） |
+| `verify-native-libs` | `NATIVE-LIBS VERIFY: OK (5 libraries, ELF + size + sha256)` |
+| `verify-pandoc-wasm` | `PANDOC-WASM VERIFY: OK`；`build-pandoc-wasm --check` → `licenses present` |
+| `check-docs` | `85 checked, 0 broken, 22 files` |
+| workflow YAML | `build-release.yml` 解析通过（jobs: build/release，29 steps） |
+
+**版本与文档一致性**：App 2.2.0/2020000；内核 pin 1.15.1（artifacts 1.15.1 + 1.13.7 回滚条目）；
+ink rev 62；touch/pandoc rev 213；README×2 badge 1.15.1；CHANGELOG/RELEASE/STYLUS 对齐 2.2.0；
+`CHANGES-2026-11` 拆分后 10 月文件不含 11 月轮次。
+
+**出货产物**：HAP 136,652,138 B，sha256 `7d85437eb123df93bbdf100e1afb3ac298f4c323e37dda4a70202210e635bf7d`；
+`module.json` 2.2.0/2020000；包内 asar 内核 1.15.1 + 全部补丁；`ets/modules.abc` 含
+`ImeSegmentState` / `imeDeleteBack` / `IME_MAX_DELETE_CHARS` / `IME candidate revision`；
+`resources/resfile/pandoc/` 8 个资源含三份许可证与源码声明。
+
+**本轮代码增量（审计中补强）**：`IME_MAX_DELETE_CHARS = 64`——多删展开循环加安全上限并告警，
+防止异常事件流把 UI 线程卡住；`verify-release` 断言 10 → 11 项。
+
+**结论**：代码 / 构建 / 产物侧通过，tag `v2.2.0` 打在本次提交上。
+**唯一未闭合项**：IME 多删展开修复尚未经真机确认（真机回归 I-1）。若复测仍有堆叠，需修后
+重建 tag（tag 尚未推送，可安全移动）。
