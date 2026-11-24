@@ -5859,3 +5859,41 @@ check-docs 全绿。obsidian.asar 与 patch rev 不变（仍 rev213），本次�
 **验证**：`--repatch` 后 `verify-asar` / `verify-plugin-install` / `verify-release` 全绿；HAP 重建后
 asar 内 `OHSIDIAN_INK_REV = "62"`、`inkQuietStatus` 与一次性提示串均在位；反馈改动只影响提示文案与
 提示时机，不改变笔事件处理、墨迹数据与 PDF 写回路径。
+
+
+### 三十一、新增更改审计（c40f584→53efe8b）落地：IME 两处修复 + 三项门禁补盲（2026-11-24）
+
+审计（《OHSidian-新增更改审计报告-c40f584至53efe8b-2.2.0线》）结论：无 P1/P2，245 项门禁在审计环境
+复现全绿；P3 项与本轮落地的处置如下。
+
+**IME 记账两处修复（审计 B-4 / B-1，B-4 实为缺陷）**
+
+- **B-4（真缺陷）**：`IMFAdapter` 经 `Inject.getOrCreate()` 解析，`bind(...).toSelf()` 是 inversify
+  默认 **transient** 作用域——每次原生回调都可能拿到新实例。实例字段会在回调/聚焦切换间被重置，
+  `showTextInput()` 在新实例上还会因 `IMEonListen=false` **重复注册**监听（文字双投风险）。
+  修复：记账状态与"监听已注册"标志移到模块级 `ImeSegmentState`（与绑定作用域无关），
+  `onListenIME()` 增加一次性注册守卫。
+- **B-1（单位分叉）**：`prev.length` 为 UTF-16 码元、IMF `deleteLeft(length)` 为平台字符单位，BMP
+  汉字重合、扩展区字符（生僻字/emoji）分叉。修复：候选段含代理对时**跳过纠正**（`imeHasSurrogate`），
+  宁可少一次缓解也不按错误计数删除。
+- B-2（`Date.now()` 非单调）与 B-3（无删除的追加式前缀扩展插入会被当作修订）按审计建议只补文档：
+  `docs/IME-BRIDGE.md` 新增 B-1~B-4 边界表与真机"生僻字/emoji"用例；B-3 标注"首字被吞"时的日志定位分支。
+- `verify-release.cjs` 的 IME 断言 6 → 9 项（模块级状态、监听守卫、代理对跳过）。
+
+**三项门禁补盲（审计 G-1 / G-2 / G-3）**
+
+1. **G-1 原生库 LFS 完整性**（新增 `scripts/verify-native-libs.cjs`）：`electron/libs/arm64-v8a/`
+   五只 `.so` 必须非 LFS 指针、ELF 魔数、尺寸与 sha256 与登记值一致（`libadapter.so` = 1,500,704 B /
+   `a7f6e4be…30b0`）。构建机漏 `git lfs pull` 时指针文件会被打进 HAP 且现有门禁全都看不见。
+2. **G-2 index.html 引用面**（`verify-asar.cjs` 新增 2 条）：asar 内 `index.html` 必须仍有
+   `enhance.js` 挂载点与 1.15.x 的启动快照 iframe 骨架，防上游静默改挂载面。
+3. **G-3 内容指纹**（新增 `scripts/asar-fingerprint.cjs`）：打印 `app.js` / `main.js` 的 sha256 + 字节数
+   （跨 `@electron/asar` 版本稳定）与 asar 整体哈希（辅助）。`RELEASE.md` 门禁清单与 HAP 归档条目
+   已引用；CI 增加 "Verify native engine libraries" 与 "Record asar content fingerprints" 两步。
+
+**当前产物指纹（本轮实测，归档口径）**：app.js 4,037,710 B
+`419ebb03923f6cdb925b9d6bbeacdbe1ef23421d963c43318761be56297025e3`；main.js 253,633 B
+`f2811332ab5155dd86a5efdeb1c47dba16dca5cf4af08522323794f68b2def23`；asar 25,420,696 B
+（辅助哈希 `7fce6be6…ba342`；审计环境重建为 25,414,539 B，差异只在 asar 头部，内容指纹一致口径）。
+
+**未落地**：F-3 真机回归（唯一硬闸门，清单见审计 §九 I-1）、F-1 打 tag（审计通过后执行）。

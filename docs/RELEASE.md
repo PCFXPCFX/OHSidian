@@ -22,6 +22,8 @@
 - [ ] 内核 pin 与锚点：`resfile/resources/app/package.json` version = `1.15.1`
       （`scripts/obsidian-artifacts.json` 有该条目），`--repatch` 日志 **无 `WARNING:`**，
       `verify-asar` 的 nativeTheme / `Ix="28.2.3"` / `if($t<21)` 断言通过。
+- [ ] 引擎原生库不是 LFS 指针：`node scripts/verify-native-libs.cjs` 输出
+      `NATIVE-LIBS VERIFY: OK`（5 只 `.so` 的 ELF 魔数 / 尺寸 / sha256）。
 - [ ] Issue #2 改动需真机回归（清单见 [IME-BRIDGE](IME-BRIDGE.md) §4）；未过真机前，
       发布说明只能写"缓解"，不得写"修复"。
 - [ ] [CHANGELOG](CHANGELOG.md) 已写本次发布内容；[STYLUS](STYLUS.md) 的 `ink rev`
@@ -32,13 +34,22 @@
 ### 1.2 门禁
 
 ```powershell
+# 引擎原生库（LFS 指针防混入）
+node scripts/verify-native-libs.cjs
+
 # release asar 必须干净
 node scripts/verify-release.cjs
 node scripts/verify-asar.cjs
 
+# asar 内容指纹（归档用：app.js / main.js sha256，跨工具链稳定）
+node scripts/asar-fingerprint.cjs
+
 # 手写回归（需要设备 + 笔；只跑断言，不录屏）
 node scripts/stylus-eval/run.mjs --mode gate
 ```
+
+`asar-fingerprint` 的 `app.js` / `main.js` sha256 是发版归档值；`obsidian.asar` 整体哈希仅作辅助
+（asar 头部 integrity 表随 `@electron/asar` 版本变化，两个合规环境重建可差数 KB，内容不变）。
 
 手写改动（`ohsidian-ink.js`、Pen Kit、PDF 写回）必须跑 gate；纯文档/构建改动可只跑前两条。
 需要宣传素材时用 `--mode capture`，详见 [STYLUS](STYLUS.md) 第 9 节。
@@ -56,6 +67,8 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
 - [ ] 设置 → 手写笔可打开，笔能出墨，关闭后 PDF 叠层为 0；
 - [ ] 打开 PDF 写一笔，离开后注释位置正确（不整体左下偏移）；
 - [ ] 关于页显示 `2.2.0`、内核 `1.15.1`；弹窗/深浅色跟随/PDF 打开/删除文案/换仓/字体列表冒烟正常。
+- [ ] 出货 HAP 归档：记录构建提交（须含 `ink rev 62`）、HAP sha256、`asar-fingerprint` 的
+      app.js / main.js 内容指纹，写入 Release 说明；tag 指向该构建提交，避免"tag ≠ 实际出货"。
 
 本地 HAP 只用于冒烟；对外发布包由 CI 以 tag 重新构建。
 

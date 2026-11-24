@@ -21,6 +21,12 @@ const asarPath = process.env.OHSIDIAN_ASAR_PATH
 try {
   const app = extractFile(asarPath, 'app.js').toString('utf8');
   const main = extractFile(asarPath, 'main.js').toString('utf8');
+  // index.html is upstream-owned (the OHSidian pipeline never rewrites it), and
+  // no other gate reads it. Two surfaces depend on it: the enhancement hook
+  // (enhance.js, where an optional renderer-side fix would have to attach) and
+  // the 1.15.x scriptless startup-snapshot iframe that runs before app.js.
+  // An upstream change to either would otherwise ship silently (audit G-2).
+  const indexHtml = extractFile(asarPath, 'index.html').toString('utf8');
   try { new vm.Script(app); console.log('  OK  app.js syntax'); } catch (e) {
     console.log('  FAIL app.js syntax:', e.message);
     const m = e.stack && e.stack.match(/<anonymous>:(\d+):(\d+)/);
@@ -46,6 +52,12 @@ try {
       app.includes('pdfInk'),
     'app ink settings + diagnostics hooks': app.includes('__ohsidianInkHooks') &&
       app.includes('buildSettings'),
+    // Upstream mount surface (audit G-2, kernel 1.15.1).
+    'upstream index.html keeps the enhance.js hook':
+      indexHtml.includes('<script type="text/javascript" defer src="enhance.js">'),
+    'upstream index.html keeps the startup snapshot':
+      indexHtml.includes("frame.id = 'startup-snapshot'") &&
+      indexHtml.includes("performance.measure('startup-snapshot-wait'"),
     // rev62: the pen must not narrate routine actions. Tool/view switches,
     // shape application and selection changes are visible on screen; only
     // failures and blockers may speak. "减少提示" off restores the old chatter.

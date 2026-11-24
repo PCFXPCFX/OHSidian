@@ -119,6 +119,12 @@ jobs:
 
       - name: Install scripts dependencies
         run: npm ci --prefix scripts
+
+      # Native engine libraries are git-LFS objects. A checkout that skipped
+      # `git lfs pull` leaves 132-byte pointer files behind and hvigor packs them
+      # as the engine -> the app crashes on launch, and no asar gate can see it.
+      - name: Verify native engine libraries (LFS objects)
+        run: node scripts/verify-native-libs.cjs
       # Built-in pandoc (WebAssembly): downloads the pinned pandoc-wasm npm
       # tarballs, verifies scripts/pandoc-wasm.lock.json, bundles the service
       # and writes resources/resfile/pandoc/ into the HAP. The same build is
@@ -144,6 +150,11 @@ jobs:
 
       - name: Verify patched asar (syntax + patch markers)
         run: node scripts/verify-asar.cjs
+
+      # Content fingerprints (app.js/main.js sha256) are reproducible across
+      # toolchains, unlike the archive hash: they are the release archival value.
+      - name: Record asar content fingerprints
+        run: node scripts/asar-fingerprint.cjs
 
       # The device-agent probe is maintainer-local (gitignored). A clean
       # checkout must never contain it; fail if a stray commit re-adds it.

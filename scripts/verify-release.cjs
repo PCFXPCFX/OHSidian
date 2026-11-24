@@ -39,11 +39,20 @@ try {
   }
   const imeChecks = {
     'IME accounting switch present': ime.includes('IME_SEGMENT_CORRECTION_ENABLED'),
-    'IME insert path records the candidate': ime.includes('this.imeLastInsertText = text'),
+    'IME insert path records the candidate': ime.includes('imeSegment.lastInsertText = text'),
     'IME insert path tops up an under-delete': ime.includes('this.nativeContext.DeleteBackCallback(deficit)'),
     'IME delete path forwards the original length first': ime.includes('this.nativeContext.DeleteBackCallback(length)'),
     'IME revision window + prefix guard': ime.includes('IME_REVISION_WINDOW_MS') && ime.includes('imePrefixRelated'),
     'IME other input events clear the segment': ime.includes('resetImeSegmentState'),
+    // Audit B-4: IMFAdapter is resolved through Inject.getOrCreate() with the
+    // default (transient) inversify scope, so state MUST be module-level or it
+    // resets on every callback and the listener flag re-registers listeners.
+    'IME state is module-scoped (DI-transient safe)':
+      ime.includes('const imeSegment: ImeSegmentState') && ime.includes('class ImeSegmentState'),
+    'IME listener registration is guarded once': ime.includes('if (imeSegment.listenBound)'),
+    // Audit B-1: guess-correction must not run where UTF-16 code units and the
+    // platform's character count can diverge (surrogate pairs).
+    'IME surrogate-pair segments skip the correction': ime.includes('imeHasSurrogate(prev)'),
   };
   const imeFail = Object.entries(imeChecks).filter(([, v]) => !v).map(([k]) => k);
   if (imeFail.length) {

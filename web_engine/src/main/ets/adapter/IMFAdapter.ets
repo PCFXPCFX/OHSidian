@@ -85,15 +85,29 @@ const IME_REVISION_WINDOW_MS: number = 40;
 const IME_SEGMENT_MAX_CHARS: number = 16;
 const IME_SEGMENT_MAX_CORRECTION: number = 12;
 
+/*
+ * Issue #2 accounting state lives at MODULE scope on purpose. IMFAdapter is
+ * resolved through Inject.getOrCreate(), which lazily binds it with the default
+ * inversify scope (transient): every native callback and every focus change can
+ * resolve a fresh instance. Instance fields would therefore reset on each
+ * callback, and each showTextInput() on a fresh instance would register a
+ * SECOND set of keyboard listeners (double-delivered text). One module-level
+ * object is shared by all instances, so the bookkeeping and the "listeners
+ * already registered" flag survive however the adapter is bound (audit B-4).
+ */
+class ImeSegmentState {
+  lastInsertText: string = '';
+  pendingDeleteLength: number = -1;
+  pendingDeleteAt: number = 0;
+  lastInsertAt: number = 0;
+  listenBound: boolean = false;
+}
+
+const imeSegment: ImeSegmentState = new ImeSegmentState();
+
 @injectable()
 export class IMFAdapter extends BaseAdapter {
   private inputMethodController = inputMethod.getController();
-  private IMEonListen = false;
-  /* Issue #2 candidate-segment accounting (see the block comment above). */
-  private imeLastInsertText: string = '';
-  private imePendingDeleteLength: number = -1;
-  private imePendingDeleteAt: number = 0;
-  private imeLastInsertAt: number = 0;
 
   @LogMethod
   attachTextInput(textConfigIMF: IMFAdapterTextConfig, requestKeyboardReason: number, callback: (ret: boolean) => void) {
@@ -142,9 +156,9 @@ export class IMFAdapter extends BaseAdapter {
     // Re-register the IME listeners if a previous offListenIME() detached
     // them: without this the soft keyboard comes up but typing is dead.
     // (showTextInputHelper does the same for the attach-driven path.)
-    if (!this.IMEonListen) {
+    if (!imeSegment.listenBound) {
       this.onListenIME();
-      this.IMEonListen = true;
+      imeSegment.listenBound = true;
     }
     if (deviceInfo.sdkApiVersion >= 15) {
       this.inputMethodController.showTextInput(requestKeyboardReason).then(() => {
@@ -171,7 +185,7 @@ export class IMFAdapter extends BaseAdapter {
     this.inputMethodController.off('moveCursor');
     // Allow a later attach to re-register the listeners, otherwise the soft
     // keyboard stops delivering input for the rest of the session.
-    this.IMEonListen = false;
+    imeSegment.listenBound = false;
     this.resetImeSegmentState();
   }
 
@@ -200,9 +214,9 @@ export class IMFAdapter extends BaseAdapter {
   private showTextInputHelper(requestKeyboardReason: number, callback: (ret: boolean) => void) {
     if (deviceInfo.sdkApiVersion >= 15) {
       this.inputMethodController.showTextInput(requestKeyboardReason).then(() => {
-        if (!this.IMEonListen) {
+        if (!imeSegment.listenBound) {
           this.onListenIME();
-          this.IMEonListen = true;
+          imeSegment.listenBound = true;
         }
         callback(true);
       }).catch((err: BusinessError) => {
@@ -211,9 +225,9 @@ export class IMFAdapter extends BaseAdapter {
       });
     } else {
       this.inputMethodController.showTextInput().then(() => {
-        if (!this.IMEonListen) {
+        if (!imeSegment.listenBound) {
           this.onListenIME();
-          this.IMEonListen = true;
+          imeSegment.listenBound = true;
         }
         callback(true);
       }).catch((err: BusinessError) => {
@@ -224,6 +238,12 @@ export class IMFAdapter extends BaseAdapter {
   }
 
   private onListenIME() {
+    // The module-level flag is the real guard: a fresh adapter instance (see the
+    // ImeSegmentState comment) must not register a second listener set.
+    if (imeSegment.listenBound) {
+      return;
+    }
+    imeSegment.listenBound = true;
     this.inputMethodController.on('insertText', (text: string) => {
       this.applyImeInsert(text);
       // Deliberately NOT calling changeSelection here: the text buffer lives
@@ -254,19 +274,20 @@ export class IMFAdapter extends BaseAdapter {
    */
   private applyImeInsert(text: string): void {
     let now: number = Date.now();
-    let prev: string = this.imeLastInsertText;
-    let withinDelete: boolean = this.imePendingDeleteAt > 0 &&
-      (now - this.imePendingDeleteAt) <= IME_REVISION_WINDOW_MS &&
-      this.imePendingDeleteLength >= 0;
-    let withinInsert: boolean = this.imeLastInsertAt > 0 &&
-      (now - this.imeLastInsertAt) <= IME_REVISION_WINDOW_MS;
+    let prev: string = imeSegment.lastInsertText;
+    let withinDelete: boolean = imeSegment.pendingDeleteAt > 0 &&
+      (now - imeSegment.pendingDeleteAt) <= IME_REVISION_WINDOW_MS &&
+      imeSegment.pendingDeleteLength >= 0;
+    let withinInsert: boolean = imeSegment.lastInsertAt > 0 &&
+      (now - imeSegment.lastInsertAt) <= IME_REVISION_WINDOW_MS;
     if (IME_SEGMENT_CORRECTION_ENABLED && prev.length > 0 && prev.length <= IME_SEGMENT_MAX_CHARS &&
+      !this.imeHasSurrogate(prev) && !this.imeHasSurrogate(text) &&
       this.imePrefixRelated(prev, text)) {
       let deficit: number = -1;
       if (withinDelete) {
         // The IME removed the current candidate and is writing its replacement.
         // Deficit > 0 means it removed less than the previous candidate length.
-        deficit = prev.length - this.imePendingDeleteLength;
+        deficit = prev.length - imeSegment.pendingDeleteLength;
       } else if (withinInsert && text.length > prev.length) {
         // The IME replaced the candidate without deleting at all.
         deficit = prev.length;
@@ -277,10 +298,10 @@ export class IMFAdapter extends BaseAdapter {
       }
     }
     this.nativeContext.InsertTextCallback(text);
-    this.imeLastInsertText = text;
-    this.imeLastInsertAt = now;
-    this.imePendingDeleteLength = -1;
-    this.imePendingDeleteAt = 0;
+    imeSegment.lastInsertText = text;
+    imeSegment.lastInsertAt = now;
+    imeSegment.pendingDeleteLength = -1;
+    imeSegment.pendingDeleteAt = 0;
   }
 
   /**
@@ -290,16 +311,34 @@ export class IMFAdapter extends BaseAdapter {
   private applyImeDeleteLeft(length: number): void {
     this.nativeContext.DeleteBackCallback(length);
     let now: number = Date.now();
-    if (this.imePendingDeleteAt > 0 && (now - this.imePendingDeleteAt) <= IME_REVISION_WINDOW_MS) {
-      this.imePendingDeleteLength += length;
+    if (imeSegment.pendingDeleteAt > 0 && (now - imeSegment.pendingDeleteAt) <= IME_REVISION_WINDOW_MS) {
+      imeSegment.pendingDeleteLength += length;
     } else {
-      this.imePendingDeleteLength = length;
+      imeSegment.pendingDeleteLength = length;
     }
-    this.imePendingDeleteAt = now;
-    if (this.imePendingDeleteLength > IME_SEGMENT_MAX_CHARS) {
+    imeSegment.pendingDeleteAt = now;
+    if (imeSegment.pendingDeleteLength > IME_SEGMENT_MAX_CHARS) {
       // Too much removed to be one candidate segment; stop trusting the window.
       this.resetImeSegmentState();
     }
+  }
+
+  /**
+   * Audit B-1: `prev.length` is in UTF-16 code units while IMF's deleteLeft
+   * length is in the platform's own character unit. They coincide for BMP text
+   * (every common CJK char) and diverge for supplementary code points
+   * (rare CJK extensions, emoji). Guess-correction is only safe where the two
+   * units provably agree, so a candidate segment containing a surrogate pair
+   * disables the correction for that round instead of deleting the wrong count.
+   */
+  private imeHasSurrogate(text: string): boolean {
+    for (let i = 0; i < text.length; i++) {
+      let code: number = text.charCodeAt(i);
+      if (code >= 0xD800 && code <= 0xDFFF) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private imePrefixRelated(prev: string, next: string): boolean {
@@ -316,10 +355,10 @@ export class IMFAdapter extends BaseAdapter {
   }
 
   private resetImeSegmentState(): void {
-    this.imeLastInsertText = '';
-    this.imePendingDeleteLength = -1;
-    this.imePendingDeleteAt = 0;
-    this.imeLastInsertAt = 0;
+    imeSegment.lastInsertText = '';
+    imeSegment.pendingDeleteLength = -1;
+    imeSegment.pendingDeleteAt = 0;
+    imeSegment.lastInsertAt = 0;
   }
 
   private detachTextInputHelper(callback: (ret: boolean) => void) {
