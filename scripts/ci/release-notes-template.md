@@ -2,7 +2,10 @@ OHSidian 是 [Obsidian](https://obsidian.md) 的非官方 HarmonyOS 移植版：
 
 > 目标系统：HarmonyOS 6.0.2 起（compatible API 22 / target API 24，真机验证）。遇到问题欢迎提 [Issue](https://github.com/PCFXPCFX/OHSidian/issues)。
 
-## 本版新增与修复（2.2.0）
+## 本版新增与修复（2.2.1）
+
+- **退格吞字修复**：微信输入法手写态按退格不再吞掉候选前的正文（2.2.0 输入法缓解的副作用）；
+  长按退格与拼音/英文键盘行为不变。根因仍在引擎输入法桥面，属缓解。
 
 - **Obsidian 内核升级 1.13.7 → 1.15.1**：官方签名件（SHA-256 + RSA-SHA256 双验证），补丁面全部
   重锚（换仓、字体、删除文案、PDF 画布、插件安装/require/secretStorage、版本闸与 MIME 等）；

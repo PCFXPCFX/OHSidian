@@ -68,17 +68,22 @@ const TAG: string = 'IMFAdapter';
  *    an IME emits delete+insert for one revision back to back;
  *  - prefix relation required, so "今天" -> "明天" (a real edit) is never
  *    treated as a revision;
- *  - only UNDER-deletion is corrected (n smaller than the previous candidate);
- *    an over-delete cannot be restored safely and is left alone;
+ *  - UNDER-deletion is topped up (Issue #2 堆叠);
+ *  - OVER-deletion inside a burst that already removed the candidate is dropped
+ *    (v2.2.0 "退格吞字": one backspace carried D(6)+D(1) for a 6-char candidate,
+ *    so the extra delete removed 正文 before the candidate). Bounded by
+ *    IME_MAX_OVERDELETE_DROPS so a held backspace still deletes;
+ *  - empty inserts (composition-boundary markers) are forwarded as no-ops but
+ *    no longer clear the bookkeeping - clearing it blinded the over-delete guard;
  *  - segment / correction length caps keep a misfire small and bounded;
  *  - any other input event (forward delete, enter, cursor move, detach) clears
  *    the tracked segment.
  *
- * Residual risk (documented in docs/CHANGES-2026-10.md): an IME that commits a
- * new word which happens to start with the previous word, within 40 ms of a
- * backspace, could get that one extra delete. Set
- * IME_SEGMENT_CORRECTION_ENABLED to false for a one-line rollback; real-device
- * regression is still required for Issue #2.
+ * Residual risk (documented in docs/IME-BRIDGE.md and docs/CHANGES-2026-11.md):
+ * an IME that legitimately deletes the candidate AND one surrounding character
+ * inside the same 40 ms burst loses that second delete and needs another press
+ * (logged). Set IME_SEGMENT_CORRECTION_ENABLED / IME_OVERDELETE_GUARD_ENABLED to
+ * false for a one-line rollback; real-device regression is still required.
  */
 const IME_SEGMENT_CORRECTION_ENABLED: boolean = true;
 const IME_REVISION_WINDOW_MS: number = 40;
@@ -91,6 +96,19 @@ const IME_EMULATE_MULTI_DELETE: boolean = true;
    than a candidate segment, and an unbounded loop on a broken event stream
    would block the UI thread. Larger requests are clamped and logged. */
 const IME_MAX_DELETE_CHARS: number = 64;
+/* Over-delete guard (device report 2026-11-24 "退格吞字"): 微信输入法 sends
+   DeleteLeft(6) + DeleteLeft(1) for ONE backspace on a 6-character candidate.
+   The extra delete is the key press itself and lands after the candidate is
+   already gone, so it eats a character of the text BEFORE the candidate.
+   Keep this separate from IME_SEGMENT_CORRECTION_ENABLED so a device A/B run can
+   tell the two heuristics apart. */
+const IME_OVERDELETE_GUARD_ENABLED: boolean = true;
+/* A held backspace must keep deleting: only the first few over-deletes of one
+   burst are dropped, then normal forwarding resumes. */
+const IME_MAX_OVERDELETE_DROPS: number = 2;
+/* Per-event diagnostics (lengths only, no text content). Flip to true when a
+   device log is needed for an IME event-stream investigation. */
+const IME_DEBUG_EVENTS: boolean = false;
 
 /*
  * Issue #2 accounting state lives at MODULE scope on purpose. IMFAdapter is
@@ -108,6 +126,7 @@ class ImeSegmentState {
   pendingDeleteAt: number = 0;
   lastInsertAt: number = 0;
   listenBound: boolean = false;
+  overDeleteDrops: number = 0;
 }
 
 const imeSegment: ImeSegmentState = new ImeSegmentState();
@@ -281,6 +300,17 @@ export class IMFAdapter extends BaseAdapter {
    */
   private applyImeInsert(text: string): void {
     let now: number = Date.now();
+    if (IME_DEBUG_EVENTS) {
+      LogUtil.info(TAG, `IME ev insert len=${text.length} burst=${imeSegment.pendingDeleteLength} last=${imeSegment.lastInsertText.length}`);
+    }
+    if (text.length === 0) {
+      /* Composition-boundary marker: the buffer change is a no-op, but the
+         segment bookkeeping MUST survive it. Clearing the pending delete here
+         used to blind the over-delete guard exactly in the burst that needed it
+         (device report 2026-11-24: D(6) -> I("") -> D(1) -> ...). */
+      this.nativeContext.InsertTextCallback(text);
+      return;
+    }
     let prev: string = imeSegment.lastInsertText;
     let withinDelete: boolean = imeSegment.pendingDeleteAt > 0 &&
       (now - imeSegment.pendingDeleteAt) <= IME_REVISION_WINDOW_MS &&
@@ -309,16 +339,38 @@ export class IMFAdapter extends BaseAdapter {
     imeSegment.lastInsertAt = now;
     imeSegment.pendingDeleteLength = -1;
     imeSegment.pendingDeleteAt = 0;
+    imeSegment.overDeleteDrops = 0;
   }
 
   /**
    * Issue #2: forward the deletion, but remember how much was removed within the
-   * revision window (one revision can arrive as several chunks).
+   * revision window (one revision can arrive as several chunks). Deletes that
+   * would eat text before an already-removed candidate are dropped first.
    */
   private applyImeDeleteLeft(length: number): void {
-    this.imeDeleteBack(length);
     let now: number = Date.now();
-    if (imeSegment.pendingDeleteAt > 0 && (now - imeSegment.pendingDeleteAt) <= IME_REVISION_WINDOW_MS) {
+    let inBurst: boolean = imeSegment.pendingDeleteAt > 0 &&
+      (now - imeSegment.pendingDeleteAt) <= IME_REVISION_WINDOW_MS;
+    if (IME_DEBUG_EVENTS) {
+      LogUtil.info(TAG, `IME ev delete len=${length} burst=${imeSegment.pendingDeleteLength} last=${imeSegment.lastInsertText.length}`);
+    }
+    if (IME_OVERDELETE_GUARD_ENABLED && inBurst && length > 0 &&
+      imeSegment.pendingDeleteLength >= 2 && imeSegment.lastInsertText.length >= 2 &&
+      imeSegment.pendingDeleteLength >= imeSegment.lastInsertText.length &&
+      imeSegment.overDeleteDrops < IME_MAX_OVERDELETE_DROPS) {
+      /* The candidate at the caret has already been removed inside this burst;
+         another delete can only take a character of the surrounding text.
+         Refresh the burst timestamp so the rest of the burst stays guarded. */
+      imeSegment.overDeleteDrops++;
+      imeSegment.pendingDeleteAt = now;
+      LogUtil.warn(TAG, `IME over-delete dropped: ${length} char(s) after ${imeSegment.pendingDeleteLength}/${imeSegment.lastInsertText.length} (device backspace case)`);
+      return;
+    }
+    if (!inBurst) {
+      imeSegment.overDeleteDrops = 0;
+    }
+    this.imeDeleteBack(length);
+    if (inBurst) {
       imeSegment.pendingDeleteLength += length;
     } else {
       imeSegment.pendingDeleteLength = length;
@@ -397,6 +449,7 @@ export class IMFAdapter extends BaseAdapter {
     imeSegment.pendingDeleteLength = -1;
     imeSegment.pendingDeleteAt = 0;
     imeSegment.lastInsertAt = 0;
+    imeSegment.overDeleteDrops = 0;
   }
 
   private detachTextInputHelper(callback: (ret: boolean) => void) {

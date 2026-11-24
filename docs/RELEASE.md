@@ -1,6 +1,6 @@
 # 发布流程：构建、门禁、签名与 Release
 
-> 适用版本：**v2.2.0（Obsidian 1.15.1 内核 + Issue #2 输入法缓解）**。发布前按第 1 节逐项打勾；构建细节与
+> 适用版本：**v2.2.1（退格吞字修复）**。发布前按第 1 节逐项打勾；构建细节与
 > CI 实现见第 2–5 节。安装包体积分析已归档到 [archive/HAP-SIZE](archive/HAP-SIZE.md)。
 
 ## 1. 发布前检查清单
@@ -10,7 +10,7 @@
 ### 1.1 版本与文档
 
 - [ ] `AppScope/app.json5`：`versionName` 与本次 tag 一致，`versionCode = 主*1e6+次*1e4+修订`
-      （2.2.0 → `2020000`）。
+      （2.2.1 → `2020001`）。
 - [ ] `README.md` / `README_EN.md` 的版本号、系统要求、构建命令与当前实现一致。
 - [ ] `node scripts/check-docs.cjs` 通过（相对链接无失效）。
 - [ ] 门禁结论必须抄当次实际输出（`verify-*` / `check-docs` 的末行与失败项），
@@ -66,7 +66,8 @@ hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-dae
       （`verify-asar` 的 PluginManager 工厂门禁已覆盖"压缩类被补丁截断"这类回归）；
 - [ ] 设置 → 手写笔可打开，笔能出墨，关闭后 PDF 叠层为 0；
 - [ ] 打开 PDF 写一笔，离开后注释位置正确（不整体左下偏移）；
-- [ ] 关于页显示 `2.2.0`、内核 `1.15.1`；弹窗/深浅色跟随/PDF 打开/删除文案/换仓/字体列表冒烟正常。
+- [ ] 关于页显示 `2.2.1`、内核 `1.15.1`；弹窗/深浅色跟随/PDF 打开/删除文案/换仓/字体列表冒烟正常。
+- [ ] 微信输入法：前缀 + 手写候选 + 退格一次，正文不被吞（清单见 [IME-BRIDGE](IME-BRIDGE.md) §4）。
 - [ ] 出货 HAP 归档：记录构建提交（须含 `ink rev 62`）、HAP sha256、`asar-fingerprint` 的
       app.js / main.js 内容指纹，写入 Release 说明；tag 指向该构建提交，避免"tag ≠ 实际出货"。
 
@@ -160,7 +161,7 @@ Release 附件的 `SHA256SUMS.txt` / `MD5SUMS.txt` 与 HAP 同时生成。产物
 
 ```text
 OHSidian-v<版本>-<图标>-icon-<signed|unsigned>.hap
-# 例：OHSidian-v2.2.0-obsidian-icon-unsigned.hap
+# 例：OHSidian-v2.2.1-obsidian-icon-unsigned.hap
 ```
 
 图标段 `ohsidian` / `obsidian` 对应两种桌面图标变体。校验：
@@ -173,8 +174,8 @@ md5sum -c MD5SUMS.txt
 
 ```powershell
 # Windows PowerShell
-Get-FileHash .\OHSidian-v2.2.0-*-icon-unsigned.hap -Algorithm SHA256
-Get-FileHash .\OHSidian-v2.2.0-*-icon-unsigned.hap -Algorithm MD5
+Get-FileHash .\OHSidian-v2.2.1-*-icon-unsigned.hap -Algorithm SHA256
+Get-FileHash .\OHSidian-v2.2.1-*-icon-unsigned.hap -Algorithm MD5
 ```
 
 ## 5. 发布操作顺序
@@ -184,8 +185,8 @@ Get-FileHash .\OHSidian-v2.2.0-*-icon-unsigned.hap -Algorithm MD5
 3. 打 tag 并推送：
 
    ```bash
-   git tag -a v2.2.0 -m "OHSidian 2.2.0（Obsidian 1.15.1 内核 + Issue #2 输入法缓解）"
-   git push origin v2.2.0
+   git tag -a v2.2.1 -m "OHSidian 2.2.1（退格吞字修复）"
+   git push origin v2.2.1
    ```
 
    **tag 就是版本号**：CI 以 tag 为准，自动把 `versionName`/`versionCode` 写入

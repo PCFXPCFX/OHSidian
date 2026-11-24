@@ -52,6 +52,17 @@ try {
       ime.includes('IME multi-delete emulated:'),
     'IME emulated delete loop is capped': ime.includes('IME_MAX_DELETE_CHARS') &&
       ime.includes('n = IME_MAX_DELETE_CHARS'),
+    // Device report 2026-11-24 "退格吞字": one backspace on a 6-char candidate
+    // arrives as D(6) + I("") + D(1); the extra delete ate 正文 before the
+    // candidate. The guard drops over-deletes inside the burst, and empty
+    // inserts must no longer clear the bookkeeping that the guard depends on.
+    'IME over-delete guard present': ime.includes('IME_OVERDELETE_GUARD_ENABLED') &&
+      ime.includes('IME over-delete dropped') &&
+      ime.includes('imeSegment.overDeleteDrops < IME_MAX_OVERDELETE_DROPS'),
+    'IME empty insert keeps the segment bookkeeping':
+      ime.includes('Composition-boundary marker') &&
+      ime.includes('if (text.length === 0)') &&
+      /if \(text\.length === 0\)[\s\S]{0,900}?InsertTextCallback\(text\);[\s\S]{0,120}?return;/.test(ime),
     'IME revision window + prefix guard': ime.includes('IME_REVISION_WINDOW_MS') && ime.includes('imePrefixRelated'),
     'IME other input events clear the segment': ime.includes('resetImeSegmentState'),
     // Audit B-4: IMFAdapter is resolved through Inject.getOrCreate() with the

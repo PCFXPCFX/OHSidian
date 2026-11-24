@@ -1963,3 +1963,32 @@ ink rev 62；touch/pandoc rev 213；README×2 badge 1.15.1；CHANGELOG/RELEASE/S
 **结论**：代码 / 构建 / 产物侧通过，tag `v2.2.0` 打在本次提交上。
 **唯一未闭合项**：IME 多删展开修复尚未经真机确认（真机回归 I-1）。若复测仍有堆叠，需修后
 重建 tag（tag 尚未推送，可安全移动）。
+
+
+### 三十四、v2.2.0 退格吞字修复：过删钳制 + 空插入保记账（2026-11-24）
+
+依据《OHSidian v2.2.0 退格吞字——审计定谳与修复建议》：微信输入法手写态按一次退格的事件流是
+`DeleteLeft(6) → InsertText(∅) → DeleteLeft(1) → InsertText(∅)×2 → InsertText("今天天气不")`——
+6 字候选携带 7 个删除量；第 7 删（退格键自身语义）在候选已删完、替换候选尚未写入时执行，
+删掉候选前的正文（`测试今天天气不错` → `测今天天气不`）。根因仍是桥面无组字通道（§1），
+2.2.0 的记账只防欠删、不防过删；且空插入在这条 burst 中间清空了记账，恰使钳制失明。
+
+**修复**（`web_engine/src/main/ets/adapter/IMFAdapter.ets`）
+
+1. `insertText("")`（组字边界标记）照常转发（对缓冲区无操作），但**不更新** `lastInsertText`、
+   **不清** `pendingDelete*`、不重置段状态；
+2. **过删钳制**：40 ms 窗口内、`pendingDeleteLength >= lastInsertText.length`（候选已删完）且
+   两者均 ≥2 字时，丢弃后续删除并写 `IME over-delete dropped: N char(s) after …`；
+   每段最多丢 `IME_MAX_OVERDELETE_DROPS = 2` 次，超出后恢复转发（长按退格不受影响）；
+   独立开关 `IME_OVERDELETE_GUARD_ENABLED` 便于真机二分定位；
+3. 事件级诊断 `IME_DEBUG_EVENTS`（默认关）：每次插入/删除仅记长度与窗口状态，不记文本内容；
+4. `verify-release` IME 断言 11 → 13 项（过删钳制、空插入保记账）。
+
+**推演**（非真机）：D(6) → pending 6、转发 6；I(∅) 不再清账；D(1) 命中钳制被丢弃；I("今天天气不")
+落位 → `测试今天天气不`（7 字），正确。无前缀场景第 7 删本就在文档起点静默无效，行为不变。
+
+**版本**：2.2.1 / versionCode 2020001（2.2.0 已发布，`v2.2.0` tag 保持不动）；CHANGELOG / RELEASE /
+STYLUS / release-notes-template 同步；IME-BRIDGE 更新 §1.6 / §2 / B-5 / §4（含审计 §10 回归矩阵 10 项）。
+
+**待真机**：微信输入法「前缀 + 手写 + 退格」、连续退格、40 ms 内快速退格、小艺输入法对照、
+手写堆叠场景不回归；命中时日志应有 `IME over-delete dropped`，未误伤时无该行。
