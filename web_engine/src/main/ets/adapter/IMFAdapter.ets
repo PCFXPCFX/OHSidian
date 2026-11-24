@@ -84,6 +84,9 @@ const IME_SEGMENT_CORRECTION_ENABLED: boolean = true;
 const IME_REVISION_WINDOW_MS: number = 40;
 const IME_SEGMENT_MAX_CHARS: number = 16;
 const IME_SEGMENT_MAX_CORRECTION: number = 12;
+/* The pinned engine ignores the count argument of the delete-backward bridge:
+   one call removes one character. Keep true for this engine; see imeDeleteBack. */
+const IME_EMULATE_MULTI_DELETE: boolean = true;
 
 /*
  * Issue #2 accounting state lives at MODULE scope on purpose. IMFAdapter is
@@ -293,7 +296,7 @@ export class IMFAdapter extends BaseAdapter {
         deficit = prev.length;
       }
       if (deficit > 0 && deficit <= IME_SEGMENT_MAX_CORRECTION) {
-        this.nativeContext.DeleteBackCallback(deficit);
+        this.imeDeleteBack(deficit);
         LogUtil.info(TAG, `IME candidate revision: removed ${deficit} leftover char(s) of "${prev}"`);
       }
     }
@@ -305,11 +308,11 @@ export class IMFAdapter extends BaseAdapter {
   }
 
   /**
-   * Issue #2: forward the deletion unchanged, but remember how much was removed
-   * within the revision window (one revision can arrive as several chunks).
+   * Issue #2: forward the deletion, but remember how much was removed within the
+   * revision window (one revision can arrive as several chunks).
    */
   private applyImeDeleteLeft(length: number): void {
-    this.nativeContext.DeleteBackCallback(length);
+    this.imeDeleteBack(length);
     let now: number = Date.now();
     if (imeSegment.pendingDeleteAt > 0 && (now - imeSegment.pendingDeleteAt) <= IME_REVISION_WINDOW_MS) {
       imeSegment.pendingDeleteLength += length;
@@ -320,6 +323,33 @@ export class IMFAdapter extends BaseAdapter {
     if (imeSegment.pendingDeleteLength > IME_SEGMENT_MAX_CHARS) {
       // Too much removed to be one candidate segment; stop trusting the window.
       this.resetImeSegmentState();
+    }
+  }
+
+  /**
+   * The engine bridge's DeleteBackward ignores the count: a device HiLog trace
+   * (2026-11-24, MatePad Air / 7.0.0) shows `DeleteLeft,length: 2` moving the
+   * caret exactly one character, twice in a row. The IME's handwriting model is
+   * "replace the whole current candidate", so every multi-character revision
+   * left the previous candidate behind and the text accumulated
+   * (我爱 → 我爱我爱北 → …). Emulate the count with one-character deletes.
+   *
+   * NOTE: this is coupled to the pinned engine binaries (electron/libs/*.so).
+   * If a future engine honours the argument, set IME_EMULATE_MULTI_DELETE to
+   * false (otherwise every delete would be applied count×count times).
+   */
+  private imeDeleteBack(count: number): void {
+    let n: number = Math.floor(count);
+    if (!(n > 0)) {
+      return;
+    }
+    if (!IME_EMULATE_MULTI_DELETE || n === 1) {
+      this.nativeContext.DeleteBackCallback(n);
+      return;
+    }
+    LogUtil.info(TAG, `IME multi-delete emulated: ${n} characters (engine ignores the count)`);
+    for (let i = 0; i < n; i++) {
+      this.nativeContext.DeleteBackCallback(1);
     }
   }
 

@@ -40,8 +40,16 @@ try {
   const imeChecks = {
     'IME accounting switch present': ime.includes('IME_SEGMENT_CORRECTION_ENABLED'),
     'IME insert path records the candidate': ime.includes('imeSegment.lastInsertText = text'),
-    'IME insert path tops up an under-delete': ime.includes('this.nativeContext.DeleteBackCallback(deficit)'),
-    'IME delete path forwards the original length first': ime.includes('this.nativeContext.DeleteBackCallback(length)'),
+    'IME insert path tops up an under-delete': ime.includes('this.imeDeleteBack(deficit)'),
+    'IME delete path forwards the original length': ime.includes('this.imeDeleteBack(length)'),
+    // Device HiLog 2026-11-24: the pinned engine ignores DeleteBackward's count
+    // (DeleteLeft length 2 moved the caret one char), so a multi-character
+    // candidate revision left text behind and handwriting accumulated
+    // (我 我我 我我爱 ...). The count must be emulated with single deletes.
+    'IME multi-delete emulated (engine ignores the count)':
+      ime.includes('IME_EMULATE_MULTI_DELETE') &&
+      ime.includes('this.nativeContext.DeleteBackCallback(1)') &&
+      ime.includes('IME multi-delete emulated:'),
     'IME revision window + prefix guard': ime.includes('IME_REVISION_WINDOW_MS') && ime.includes('imePrefixRelated'),
     'IME other input events clear the segment': ime.includes('resetImeSegmentState'),
     // Audit B-4: IMFAdapter is resolved through Inject.getOrCreate() with the

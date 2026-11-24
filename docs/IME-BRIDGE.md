@@ -14,6 +14,11 @@
 4. 手写"逐笔重识别、替换当前组字区间"在无组字通道、无选区回读的桥面上只能退化为
    `deleteBackward(n)+insertText(候选)`，n 由输入法自记；n 偏小（实测 0 或 1，正确值应为
    上一候选长度）时，每轮修订留下上一段，逐笔累积成 `AB → AAAB`。
+5. **2026-11-24 真机 HiLog 再定位（关键）**：桥面 `DeleteBackward` **忽略数量参数**——日志中
+   `DeleteLeft,length: 2` 后光标只退 1 个字符（连续两次复现）。于是候选每长一个字，修订就残留一段：
+   `我 → 我我 → 我我爱 → 我我爱北…`，即 "我爱北京天安门" 被写成
+   `我 我我 我我我 我我爱 我爱北…`。这是比"输入法删少了"更底层的桥面缺陷。
+   适配层已补偿：把"删 N 个"展开为 N 次单删（`imeDeleteBack`）。
 
 升内核或升 app 都不解决：内核 1.15.1 渲染层组字面完整存活，桥面不发货则事件依旧不来。
 
@@ -21,8 +26,10 @@
 
 不改桥面 ABI，只处理已经到达的事件：
 
+- **删除按数量展开**：`deleteLeft(n)` 的 n 在引擎侧被忽略（一次只删 1 字符），适配层改发 n 次
+  `DeleteBackCallback(1)`（`imeDeleteBack`），并在 n>1 时写日志 `IME multi-delete emulated: N`；
 - 记录上一次插入的候选文本；
-- `deleteLeft(n)` 照原样下发（零延迟），40 ms 窗口内累加删除量（一次修订可能拆成多块）；
+- 40 ms 窗口内累加删除量（一次修订可能拆成多块）；
 - `insertText(新候选)` 到达时，若 40 ms 内且与上一次插入**同前缀**，判为一次候选修订：
   先补 `上一候选长度 − 已删长度` 个 `DeleteBackCallback`（只补欠删），再插入；
 - 前删 / 回车 / 移动光标 / detach / attach 一律清空记账；单次补删 ≤12 字符，候选段 ≤16 字符；
@@ -67,7 +74,8 @@
 请移植层补：`RegisterPreviewTextCallback`/`RegisterFinishPreviewCallback`（或按 ArkWeb 在 Attach 的
 TextConfig 里带 selection range 与 `isTextPreviewSupported`）；`libelectron.so` 把 preview 事件映射到
 Blink 的 `ImeSetComposition`/`ImeFinishComposingText`；并补 `GetLeftTextOfCursor`/selection 回读。
-完成后 §2 的记账即可删除。
+另外 `DeleteBackward(count)` 目前忽略 count（只删 1 字符，见 §1.5），也请在引擎侧按 count 实现
+（实现后把 `IME_EMULATE_MULTI_DELETE` 置 false，避免二次重复删）。完成后 §2 的记账即可删除。
 
 ## 7. 相关
 

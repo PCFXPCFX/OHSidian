@@ -5897,3 +5897,34 @@ asar 内 `OHSIDIAN_INK_REV = "62"`、`inkQuietStatus` 与一次性提示串均�
 （辅助哈希 `7fce6be6…ba342`；审计环境重建为 25,414,539 B，差异只在 asar 头部，内容指纹一致口径）。
 
 **未落地**：F-3 真机回归（唯一硬闸门，清单见审计 §九 I-1）、F-1 打 tag（审计通过后执行）。
+
+
+### 三十二、Issue #2 真机复发定位：桥面 DeleteBackward 忽略数量（2026-11-24）
+
+真机（MatePad Air / 7.0.0 / 应用 2.2.0 rev62）复测：手写"我爱北京天安门"写成
+`我 我我 我我我 我我爱 我我爱北…`。随附 HiLog 给出决定性证据：
+
+```
+50.130 ImsaKit DeleteLeft,length: 2
+50.142 OnCursorUpdate,left: 1606   ← 只退 1 个字符（1570=0/1606=1/1642=2）
+50.375 ImsaKit DeleteLeft,length: 2
+50.388 OnCursorUpdate,left: 1642   ← 又只退 1 个
+```
+
+即：IME 发出的 `deleteLeft(length)` 数量正确，但**引擎桥面的 DeleteBackward 忽略数量参数、每次只删
+1 个字符**。手写的"替换整个候选"因此每轮残留 `候选长度−1` 个字符，候选越长残留越多。此前 ArkTS 记账
+判据（只补"IME 删少了"的欠删）在数量本身正确时不会触发，所以复发——根因比定谳报告的假设更底层。
+
+**修复**（`IMFAdapter.ets`）：
+
+- 新增 `imeDeleteBack(count)`：把"删 N 个"展开为 N 次 `DeleteBackCallback(1)`；n>1 时写
+  `IME multi-delete emulated: N characters (engine ignores the count)` 便于真机复核。
+- `applyImeDeleteLeft` 与候选段补删统一走该函数；`IME_EMULATE_MULTI_DELETE` 常量用于引擎日后
+  修好 count 语义时一行关闭（否则会变成 N×N 次删除）。
+- `verify-release` 的 IME 断言 9 → 10 项（多删展开 + 单删循环 + 日志串）。
+- `docs/IME-BRIDGE.md` §1.5 / §2 / §7 记录该桥面缺陷，并把"DeleteBackward 按 count 实现"加入
+  引擎侧长期修法。
+
+**验证（本轮）**：`verify-release` / `verify-asar` / `verify-plugin-install` / `verify-native-libs` /
+`check-docs` 全绿；HAP 重建后 `modules.abc` 含 `imeDeleteBack` 与 `IME multi-delete emulated`；
+真机效果待用户复测（预期：逐笔写"我爱北京天安门"不再累积残留，日志可见多删展开行）。

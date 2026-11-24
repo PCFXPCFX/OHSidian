@@ -23,6 +23,9 @@
 
 **Issue #2 缓解**
 
+- **桥面 `DeleteBackward` 忽略数量**（2026-11-24 真机 HiLog 定位）：`deleteLeft(2)` 实际只删 1 个字符，
+  候选每长一个字就残留一段（"我爱北京天安门" → `我 我我 我我爱 我我爱北…`）。适配层把删除展开为
+  n 次单删（`imeDeleteBack`），n>1 时写日志 `IME multi-delete emulated: N`。
 - ArkTS `IMFAdapter` 记账：40 ms 内"删除紧跟插入且同前缀"判为一次候选修订，先补足欠删再插入；
   只补欠删（≤12 字符），其它输入事件清空记账；`IME_SEGMENT_CORRECTION_ENABLED=false` 回滚。
 - 记账状态放**模块级**（`IMFAdapter` 经 `Inject.getOrCreate()` 以 transient 作用域解析，实例字段会被
