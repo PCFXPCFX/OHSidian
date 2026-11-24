@@ -19,7 +19,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/HarmonyOS-6.0.2%2B-blue?logo=harmonyos" alt="HarmonyOS" />
-  <img src="https://img.shields.io/badge/Obsidian-1.13.7-purple?logo=obsidian" alt="Obsidian" />
+  <img src="https://img.shields.io/badge/Obsidian-1.15.1-purple?logo=obsidian" alt="Obsidian" />
   <img src="https://img.shields.io/badge/license-BSD%203--Clause-green" alt="License" />
 </p>
 

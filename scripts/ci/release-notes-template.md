@@ -2,11 +2,13 @@ OHSidian 是 [Obsidian](https://obsidian.md) 的非官方 HarmonyOS 移植版：
 
 > 目标系统：HarmonyOS 6.0.2 起（compatible API 22 / target API 24，真机验证）。遇到问题欢迎提 [Issue](https://github.com/PCFXPCFX/OHSidian/issues)。
 
-## 本版新增与修复（2.1.1）
+## 本版新增与修复（2.2.0）
 
-- **许可合规（2.1.1 新增）**：随包提供内置 Pandoc 的 GPL-2.0 许可证**全文**、WASI 运行时的 MIT
-  许可全文、以及含精确版本/源码地址/sha256 的第三方源码声明；组件仍随包内置，无需用户下载。
-
+- **Obsidian 内核升级 1.13.7 → 1.15.1**：官方签名件（SHA-256 + RSA-SHA256 双验证），补丁面全部
+  重锚（换仓、字体、删除文案、PDF 画布、插件安装/require/secretStorage、版本闸与 MIME 等）；
+  新增启动兜底，HAP 体积约 −1 MB。
+- **Issue #2（手写输入法文字重复堆叠）缓解**：ArkTS 适配层补候选段记账，抑制 `AB → AAAB`
+  式堆叠。根因在引擎输入法桥面（缺组字通道），**属缓解、非定论修复**，欢迎反馈真机表现。
 - **内置 Pandoc（无需安装、无需弱沙箱）**：随包内置官方 Pandoc 3.10（WebAssembly），Enhancing Export /
   pandoc 类插件导出 docx、pptx、epub、html 等直接可用；平板与 PC 同一构建。限制：不能输出 PDF、
   不联网、只支持 Lua filter（可执行 filter 会明确拒绝）。
@@ -16,7 +18,9 @@ OHSidian 是 [Obsidian](https://obsidian.md) 的非官方 HarmonyOS 移植版：
   error 级日志默认落盘，插件失败可查。
 - **设置与诊断**：底部新增 Pandoc / 诊断 / 日志三个分区（默认隐藏，可在常规里打开「显示高级信息」）；
   诊断报告为纯事实格式，且一次只跑一个。
-- 完整清单见 [docs/CHANGELOG.md](https://github.com/PCFXPCFX/OHSidian/blob/main/docs/CHANGELOG.md)。
+- 许可合规：随包提供内置 Pandoc 的 GPL-2.0 全文、WASI 运行时 MIT 全文与源码声明（无需下载）。
+- 完整清单见 [docs/CHANGELOG.md](https://github.com/PCFXPCFX/OHSidian/blob/main/docs/CHANGELOG.md)；
+  Issue #2 取证见 [docs/IME-BRIDGE.md](https://github.com/PCFXPCFX/OHSidian/blob/main/docs/IME-BRIDGE.md)。
 
 **仍存在的失败面（属内核/平台策略，与本版无关）**：内核硬拒载名单（`settings-search`、旧版 `cmdr` /
 `obsidian-image-toolkit`、`better-pdf-plugin` 1.4.0）、deprecated 版本表、真正只支持移动端的插件、

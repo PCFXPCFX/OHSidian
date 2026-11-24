@@ -1,6 +1,6 @@
 # 平台能力适配清单（HarmonyOS）
 
-> 来源：对 `obsidian.asar`（1.13.7）与自家补丁的差异审计。
+> 来源：对 `obsidian.asar`（1.15.1）与自家补丁的差异审计。
 > 用途：这些点是"Obsidian 假设了某个桌面平台能力、在鸿蒙上不成立"的地方，按影响排序留档，不急着全改。
 > **锚点约定（第 178 轮）**：`app.js` 的字节偏移会随 extraction 漂移（实测同一份代码存在 3 组不同 delta，约 114.8k/115.5k/117.5k），一律以**唯一子串**为准；`app.css` 的行号稳定（误差 1 行，0-based），可以照用。
 
@@ -579,3 +579,38 @@ host 用该目录创建服务，自检文件名带 pid；成功后自检三项�
 `node scripts/verify-pandoc-wasm.cjs`（真实转换：md→html/docx、reference-doc、Lua filter、本地图片、
 PDF/exec-filter 拒绝、`--version` 延迟；wasm 锁校验走 gunzip）；`verify-asar` 另有内置标记与 7 项 hook
 交互行为门禁（rev213）。
+
+
+
+
+## 七、内核 1.15.1 与输入法桥面（2026-11-24）
+
+### 7.1 内核 1.13.7 → 1.15.1
+
+官方 `obsidian-1.15.1.asar.gz` 8,562,390 B（sha256 与 obsidian-releases 一致，RSA-SHA256 验签通过），
+asar 24,715,194 B / 368 条目，`app.js` 3,365,654 B、`main.js` 220,175 B；pdf.js 三件逐字节未变。
+
+重锚站点（`scripts/update-obsidian.mjs`，全部 src-first + 应用后专用标记）：换仓抽屉
+（`Bm(t.path),` 前缀保留）、设置页换仓（本轮新增，审计 A1b）、系统字体注入、删除对话框文案、
+PDF 画布上限（不变）、插件 require 判据、插件下载（NF-015 改为整函数替换 `UEe()`）、安装/加载
+失败提示、`secretStorage`（类字段形态）、设置键去重（`AEe`）、版本闸（`fi/$t`）、更新器锁存
+（`no/k`）、`app://` MIME 两个分支（`E`/`T`）、窗框默认 native（`Ke/vt`）、nativeTheme 兜底（新增）。
+
+约束：渲染层常量仍为 `Ix="28.2.3"`、主进程门槛 `<21`；**不得抬高 shim**（`$t>=29` 会激活引擎
+未验证的 `plugin-script-root` 路径）。1.15.1 新增 `nativeTheme` 主进程调用，引擎无该模块，
+一行守卫（缺失=非深色）避免首窗 TypeError；长期由引擎补齐。新 IPC（`popup-token`、`startup-*`、
+`plugin-script-root`、`latest-public-version`）按审计列为真机观察项。
+
+门禁：`verify-asar`（6 个漂移标记 + 4 条新增）、`verify-plugin-install`（NF-015 行为门禁改为
+sentinel 切出 `UEe()` + 内核真实 `TV/IV` + 5 个合成下载）、`refresh-app-patch`（复刻锚点同步）、
+`verify-release`。回滚：`git checkout -- web_engine/src/main/resources/resfile/resources/app/`
+后按 1.13.7 旧条目 `--repatch`。
+
+### 7.2 Issue #2 手写输入法文字重复堆叠
+
+根因在移植层 `libadapter.so` 桥面：只有 insert/delete/enter/move-cursor，无组字通道、无选区回读，
+手写"替换组字区间"退化为 `deleteBackward(n)+insertText(候选)`，n 偏小时逐笔累积。平台与渲染层
+都不缺能力，缺的是移植层桥面（详见 [IME-BRIDGE](IME-BRIDGE.md)）。
+
+本轮在 `IMFAdapter.ets` 记账（40 ms 窗口 + 同前缀判定 + 只补欠删），一行开关可回滚；
+组字通道仍未补齐，属缓解，真机清单与引擎侧长期修法见 [IME-BRIDGE](IME-BRIDGE.md)。

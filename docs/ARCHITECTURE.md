@@ -10,7 +10,7 @@
 
 **分层说明**（自上而下）：
 
-- **Obsidian 层**：官方 obsidian-1.13.7.asar 签名产物（下载时做 SHA-256 与官方 RSA-SHA256 校验），经 `scripts/update-obsidian.mjs` 补丁管线注入运行时兼容补丁（IPC 守卫、`obsidian://` 深链桥、触摸模式适配、默认仓库重定向、回收站重定向与 30 天清理、CLI 服务套接字重定向、自动更新关闭）；笔记编辑核心未改动。Obsidian 为专有软件，版权归其权利人所有，本仓库与其无任何关联。
+- **Obsidian 层**：官方 obsidian-1.15.1.asar 签名产物（下载时做 SHA-256 与官方 RSA-SHA256 校验），经 `scripts/update-obsidian.mjs` 补丁管线注入运行时兼容补丁（IPC 守卫、`obsidian://` 深链桥、触摸模式适配、默认仓库重定向、回收站重定向与 30 天清理、CLI 服务套接字重定向、自动更新关闭）；笔记编辑核心未改动。Obsidian 为专有软件，版权归其权利人所有，本仓库与其无任何关联。
 - **Electron 兼容层**：`@electron/remote` 提供 remote 模块 API，`main.js` 负责加载 asar 与更新管理。
 - **JSBind 桥接层**：连接 JS 运行时与 ArkTS 原生层，把 Electron API 调用转发到对应的适配器。
 - **C++ 原生库**：`libadapter.so` 提供核心系统级 API 对接。
@@ -175,7 +175,7 @@ OHsidian/
 │       ├── cpp/types/libadapter/     # C++ 原生库类型声明
 │       └── resources/resfile/resources/app/
 │           ├── main.js               # Electron 启动入口
-│           ├── package.json          # Obsidian 1.13.7 包装配置（版本即 asar 拉取钉子）
+│           ├── package.json          # Obsidian 1.15.1 包装配置（版本即 asar 拉取钉子）
 │           └── obsidian.asar         # Obsidian 应用包（不入库，构建时自动生成）
 │
 ├── electron/                         # HAP 入口模块

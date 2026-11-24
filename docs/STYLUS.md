@@ -1,6 +1,6 @@
 # 手写笔（华为 M-Pencil）：方案、评测与验收
 
-> 状态：**v2.1.1 主线功能**，内核 `ink rev 61`。手写笔模式默认关闭，在
+> 状态：**v2.2.0 主线功能**，内核 `ink rev 61`。手写笔模式默认关闭，在
 > **设置 → 手写笔 → 手写笔模式** 开启。
 >
 > 本文合并了原《手写笔适配方案》与《手写特性回归评测》：前半部分讲实现，
@@ -118,7 +118,7 @@ Stroke：
 
 ### 5.2 PDF
 
-- **真实 viewer**：Obsidian 1.13.7 的链是 `view.viewer(T1) → .child(x1) → .pdfViewer(g) → .pdfViewer(pdf.js)`；`pdfViewerChain` 逐层跟随，`pdfJsViewerOf` 取第一个带 `getPageView` 的对象。页码用 `pageView.viewport` 转换 PDF points。
+- **真实 viewer**：Obsidian 1.15.1 的链是 `view.viewer(T1) → .child(x1) → .pdfViewer(g) → .pdfViewer(pdf.js)`；`pdfViewerChain` 逐层跟随，`pdfJsViewerOf` 取第一个带 `getPageView` 的对象。页码用 `pageView.viewport` 转换 PDF points。
 - **真实 PDF 不再有 pdfdom 回退**：首次取 viewer 失败时 350ms 重试；pdfdom 只用于笔记内嵌 PDF。
 - **打开时先恢复页码**：`pagesinit` 读 `pdfjs.history`（按 document fingerprint）在首帧渲染前跳到上次页；距当前页 >2 页的 `pagerender` 调 `cancelRendering`，避免重的封面页阻塞渲染队列。
 - **live/base 双 canvas**：`ohsidian-ink-pdf-live` 只画当前笔画，`ohsidian-ink-pdf` 只画已提交笔画。
@@ -256,7 +256,7 @@ MP4 + GIF，直接用于酷安/B 站宣传。
 |---|---|
 | **原版 Obsidian** | 官方 Obsidian（桌面/移动端），没有鸿蒙平板适配，也没有手写层 |
 | **平板适配版** | 本项目早期只做触摸/窗口/避让的提交（`initial` … `window frame update`） |
-| **手写魔改版** | 当前版本：在平板适配之上加了 M-Pencil、PDF 写回、一笔成形等（v2.1.1 / ink 61） |
+| **手写魔改版** | 当前版本：在平板适配之上加了 M-Pencil、PDF 写回、一笔成形等（v2.2.0 / ink 61） |
 
 报告里的“原版”列统一指**原版 Obsidian**；仓库里的 commit 都是本项目的平板改动，
 不再用某个旧 tag 冒充原版。
@@ -392,7 +392,7 @@ artifacts/stylus-eval/20261103-193000-v2.0.0/
 3. `--mode gate` 全绿（或明确记录 `manual` 项的人工结论）；
 4. release asar 已恢复，`node scripts/verify-release.cjs` 与
    `node scripts/verify-asar.cjs` 都通过；
-5. release HAP 的 `module.json` 为 `versionName=2.1.1`、`versionCode=2010001`、
+5. release HAP 的 `module.json` 为 `versionName=2.2.0`、`versionCode=2020000`、
    `minAPIVersion=60002022`，且 asar 内无 `probeHook`。
 
 真机手写（逐项）：

@@ -5801,3 +5801,42 @@ check-docs 全绿。obsidian.asar 与 patch rev 不变（仍 rev213），本次�
 **发布动作（需人工）**：`git push origin main` 后打新 tag `v2.1.1`，由 CI 重建对外包
 （2.1.0 的 tag 与发布包保持原样）。
 
+
+
+
+
+### 二十八、内核 1.13.7 → 1.15.1（2026-11-24）
+
+依据内核升级审计报告（2026-11-23）。审计基线是 2.0.0，实际工作面比其 12 条锚点更多：
+2.1.x 新增的 NF-015/NF-018/rev203 补丁也绑定了旧压缩名，本轮共迁移 **13 处 app.js + 6 处 main.js**。
+
+- 取件校验：gz 8,562,390 B，sha256 与 obsidian-releases 一致，RSA-SHA256 验签通过；asar
+  24,715,194 B / 368 条目；pdf.js 三件与 1.13.7 逐字节相同；`obsidian-artifacts.json` 新增 1.15.1
+  条目（保留 1.13.7 以便回滚），pin 改 1.15.1。
+- 结构差异：1.15.1 把 tslib 状态机换成原生 async/await，插件下载合并进单一 `async function UEe(o,t)`，
+  NF-015 因此从 5 处 `case` 锚点改为 1 个整函数替换；换仓改成 `Bm()` 双写，抽屉保留前缀、设置页下拉
+  一并改走 `openVaultChooser`；其余锚点按新压缩名重锚（`fi/$t`、`no/k`、`E/T`、`Ke/vt`、`AEe` 等）。
+- 新增 R1：1.15.1 首窗路径读 `r.nativeTheme.shouldUseDarkColors`，引擎主进程无该模块 → 一行守卫
+  （缺失=非深色），避免首窗构建 TypeError。
+- 门禁：`verify-asar` 6 个漂移标记同步 + 4 条新断言；`verify-plugin-install` 改为 sentinel 切出
+  `UEe()` + 内核真实 `TV/IV` + 5 个合成下载用例；`refresh-app-patch` 复刻锚点同步。
+- 验证：`--repatch` 无 WARNING，asar 25,419,547 B；`verify-asar`/`verify-plugin-install`/
+  `verify-release` 全绿；HAP 136,650,185 B（较 2.1.1 −1.06 MB）。
+- 待真机：popup-token、startup-snapshot 首屏时序、关于页更新提示。
+
+
+### 二十九、Issue #2 缓解：ArkTS 候选段记账（2026-11-24）
+
+依据 Issue #2 审计定谳报告：根因在 `libadapter.so` 桥面缺组字通道与选区回读，手写替换语义退化为
+`deleteBackward(n)+insertText(候选)`，n 偏小时逐笔累积。采用报告 §7.1 的最低成本缓解，落在
+`web_engine/src/main/ets/adapter/IMFAdapter.ets`：
+
+- `insertText` 记录上一次插入；40 ms 内"删除紧跟插入且同前缀"判为候选修订，先补足欠删再插入；
+  只补欠删（≤12 字符、候选段 ≤16 字符），前删/回车/移动光标/detach 清空记账；
+- `deleteLeft` 照原样下发（零延迟），仅记录删除量；命中写日志便于真机判定；
+  `IME_SEGMENT_CORRECTION_ENABLED=false` 一行回滚；
+- 新增 `docs/IME-BRIDGE.md`（根因、边界、真机清单、回滚、引擎侧长期修法）；`verify-release`
+  新增 ArkTS 标记断言。
+
+**未宣称已修复**：组字通道仍在引擎桥面，需真机回归后由维护者判定；未采用渲染层 `ime-fix.js`
+（2.5 s 时间窗两向误判，且不在补丁管线内）。

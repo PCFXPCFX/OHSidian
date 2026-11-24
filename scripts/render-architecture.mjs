@@ -24,7 +24,7 @@ const OUT_DIR = path.join(ROOT, 'docs', 'images');
 const I18N = {
   zh: {
     fileBase: 'architecture',
-    obTitle: 'Obsidian 1.13.7',
+    obTitle: 'Obsidian 1.15.1',
     obSub: 'obsidian.asar · 官方签名产物 + 可复现运行时补丁',
     electronLabel: 'Electron API 兼容层',
     electronItems: ['@electron/remote', 'Node.js 运行时', 'main.js 包装器'],
@@ -37,7 +37,7 @@ const I18N = {
   },
   en: {
     fileBase: 'architecture.en',
-    obTitle: 'Obsidian 1.13.7',
+    obTitle: 'Obsidian 1.15.1',
     obSub: 'obsidian.asar · official signed artifact + reproducible runtime patches',
     electronLabel: 'Electron API Compatibility Layer',
     electronItems: ['@electron/remote', 'Node.js Runtime', 'main.js Wrapper'],

@@ -4,6 +4,33 @@
 > [CHANGES-2026-09](CHANGES-2026-09.md)、[CHANGES-2026-10](CHANGES-2026-10.md)
 > （开发日志，不是发布说明）。
 
+## 2.2.0（Obsidian 1.15.1 内核 + Issue #2 输入法缓解）
+
+`versionCode 2020000` · Obsidian 1.15.1 · 内核 `ink rev 61`
+
+> 内核 1.13.7 → **1.15.1**（官方签名件，SHA-256 + RSA-SHA256 双验证）；
+> Issue #2（手写输入法文字重复堆叠）在 ArkTS 适配层补候选段记账——**缓解，不是定谳修复**
+> （根因在引擎桥面，见 [IME-BRIDGE](IME-BRIDGE.md)）。
+
+**内核 1.15.1**
+
+- 13 处 app.js + 6 处 main.js 文本锚点全部重锚（src-first + 应用后专用标记，漏打即门禁失败）。
+- 新增 `nativeTheme` 一行兜底：1.15.1 首窗路径读 `shouldUseDarkColors`，本引擎主进程无该模块。
+- 插件安装完整性按 1.15.1 形态重写（下载合并进单一 `UEe()`，改为整函数替换）；`secretStorage`
+  明文兜底、设置键去重、插件 require 判据同步重锚。
+- 渲染层 Electron 版本常量保持 28.2.3，不抬高（29+ 会切到引擎未验证的路径）。
+- asar 26.4 → 25.4 MB（HAP 约 −1 MB）；pdf.js 三件逐字节未变。
+
+**Issue #2 缓解**
+
+- ArkTS `IMFAdapter` 记账：40 ms 内"删除紧跟插入且同前缀"判为一次候选修订，先补足欠删再插入；
+  只补欠删（≤12 字符），其它输入事件清空记账；`IME_SEGMENT_CORRECTION_ENABLED=false` 回滚。
+- 需真机回归：手写逐笔 / 拼音英文键盘 / 退格后快速输入 / 移动光标 / 多窗口（清单见 IME-BRIDGE §4）。
+
+**门禁**
+
+- `verify-asar` 6 个漂移标记同步 + 4 条新断言；`verify-plugin-install` 的 NF-015 改为对新 `UEe()`
+  的行为门禁；`verify-release` 新增 ArkTS 记账断言。
 ## 2.1.1（内置 Pandoc 许可合规）
 
 `versionCode 2010001` · Obsidian 1.13.7 · 内核 `ink rev 61`

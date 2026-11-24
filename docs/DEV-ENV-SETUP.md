@@ -78,7 +78,7 @@ hvigorw assembleHap --mode module -p product=default
 
 | 修改点 | 预期现象 |
 |--------|---------|
-| Obsidian 1.13.7 | 启动后 `帮助 > 关于` 显示 1.13.7;若启动异常,回滚命令见 docs/CHANGES-2026-09.md |
+| Obsidian 1.15.1 | 启动后 `帮助 > 关于` 显示 1.15.1;若启动异常,回滚命令见 docs/CHANGES-2026-09.md |
 | 触屏模式跟随系统 | 平板切到 PC 窗口模式后界面自动变桌面布局;命令面板可手动切换("OHSidian: 切换触屏模式") |
 | 触摸触发范围 | 按钮更容易按中;若还难按,把 ohsidian-flags.json 的 touchSlopDistance 调大(见 docs/CHANGES-2026-09.md) |
 | 触屏模式 | Ctrl+Shift+P 或侧栏命令面板搜"触屏"或 "touch mode",执行后切换为移动布局 |
